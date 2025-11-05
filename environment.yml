@@ -1,0 +1,19 @@
+name: biosig_env
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - ipykernel
+  - ipython
+  - numpy
+  - matplotlib
+  - pandas
+  - pip
+  - pytorch
+  - scipy
+  - pyserial
+  - tqdm
+  - pynput
+  - pip:
+      - notebook
+      - python-dotenv
