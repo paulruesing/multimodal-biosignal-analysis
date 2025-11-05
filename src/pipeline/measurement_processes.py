@@ -8,7 +8,7 @@ from matplotlib.widgets import Button
 from matplotlib.animation import FuncAnimation
 from pynput import keyboard
 from scipy.optimize import curve_fit
-from typing import Callable
+from typing import Callable, Literal
 import multiprocessing
 from ctypes import c_char
 
@@ -19,62 +19,51 @@ import pandas as pd
 
 
 ############### READOUT METHODS ###############
-def read_fsr_sensor(baud_rate: int = 115200,
-                    serial_port: str = '/dev/tty.usbmodem143309601',
-                    record_bool: bool = True,
-                    command: str | None = None,
-                    allowed_input_range: tuple[float] = (.0, 3.3),
-                    processing_func: Callable[[float], float] | None = None,
-                    smoothing_ema_alpha: float = 0.4,  # 1 = no smoothing, -> 0 more smoothing
-                    ) -> float | None:
-    """ To be commented. """
-    global _last_valid_reading, measurements, timestamps
-    try:
-        with serial.Serial(serial_port, baud_rate, timeout=1) as ser:
-            # check for output command:
-            if command in ("A", "B"):
-                ser.write(command.encode("ascii"))
-                ser.flush()  # waits for all outgoing data to be transmitted
-
-            # read new line and convert to float:
-            line = ser.readline().decode('ascii', errors="ignore").strip()
-            if not line.startswith("VAL:"):  # check whether line contains measurement result
-                return _last_valid_reading
-            raw_str = line.replace("VAL:", "")  # formatting
-            value = float(raw_str)
-
-            # check whether input remains in feasible range:
-            if not allowed_input_range[0] < value < allowed_input_range[1]: return _last_valid_reading
-
-            if processing_func is not None: value = processing_func(value)
-
-            # Apply EMA smoothing:
-            value = smoothing_ema_alpha * value + (1 - smoothing_ema_alpha) * _last_valid_reading
-            _last_valid_reading = value
-
-            # save (if record_bool) and return:
-            if record_bool:
-                timestamps.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                measurements.append(value)
-            return value
-
-    except (ValueError, serial.SerialException) as e:
-        print(f"Serial error: {e}")
-        return _last_valid_reading
-
-
 # todo: ponder, whether prefixes are the best way to distinguish measurements (I think they might work well)
 def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[[float], float], str, float]],
                              baud_rate: int = 115200,
                              serial_port: str = '/dev/tty.usbmodem143309601',
                              record_bool: bool = True,
-                             command: str | None = None,
+                             command: Literal['A', 'B'] | None = None,
                              # measurement_label, processing_callable, serial_input_marker
 
                              allowed_input_range: tuple[float] = (.0, 3.3),
                              smoothing_ema_alpha: float = 0.4,  # 1 = no smoothing, -> 0 more smoothing
                              ) -> dict[str, float] | None:
-    """ To be commented. """
+    """
+    Reads multiple sensor measurements simultaneously from a serial port and processes each.
+
+    Parameters
+    ----------
+    measurement_definitions : tuple of tuples
+        Each tuple contains:
+        - measurement_label (str): unique label for the measurement.
+        - processing_func (callable or None): optional post-processing function for the measurement's raw value.
+        - serial_input_marker (str): prefix string that identifies the measurement in the serial input line.
+    baud_rate : int, optional
+        Baud rate for the serial connection (default is 115200).
+    serial_port : str, optional
+        The serial port identifier to connect to (default is '/dev/tty.usbmodem143309601').
+    record_bool : bool, optional
+        Whether to record the processed values with timestamps (default is True).
+    command : str or None, optional
+        Optional command to send to the device ('A' or 'B') before reading (default is None).
+    allowed_input_range : tuple of float, optional
+        Acceptable input value range; values outside are discarded (default is (0.0, 3.3)).
+    smoothing_ema_alpha : float, optional
+        Exponential moving average smoothing factor; 1 = no smoothing, closer to 0 = more smoothing (default is 0.4).
+
+    Returns
+    -------
+    dict of {str: float} or None
+        Returns a dictionary mapping measurement labels to their processed and smoothed values.
+        If reading fails, returns last valid values for all measurements.
+
+    Notes
+    -----
+    Uses dynamic global variables for each measurement label to keep track of last valid readings, timestamps, and recorded measurements.
+    Handles serial communication and parsing errors gracefully by reverting to last valid readings.
+    """
     # we deploy globals() function here for dynamic global object naming and accessing (depending on included measurements)
     try:
         output_dict = {}  # will be returned
@@ -129,7 +118,23 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
 def force_estimator(voltage: float,
                     fsr_a: float = 5.0869,
                     fsr_b: float = 1.8544) -> float:
-    """ Converts the voltage input to estimated dynanometer force. """
+    """
+    Estimates force from voltage reading based on a calibration model for an FSR sensor.
+
+    Parameters
+    ----------
+    voltage : float
+        The input voltage measured from the FSR sensor.
+    fsr_a : float, optional
+        Calibration coefficient 'a' for the model (default is 5.0869).
+    fsr_b : float, optional
+        Calibration exponent 'b' for the model (default is 1.8544).
+
+    Returns
+    -------
+    float
+        Estimated force corresponding to the input voltage, based on the power-law relationship.
+    """
     force_estimation = fsr_a * voltage ** fsr_b
     return force_estimation
 
@@ -137,14 +142,53 @@ def force_estimator(voltage: float,
 def sampling_process(shared_dict,
                      force_save_event,  # save_event callable through other functions
                      saving_done_event,  # saving_done event pausing other processes
+                     start_trigger_event,  # send start trigger event ('A' via serial connection)
+                     stop_trigger_event,  # send stop trigger event ('B' via serial connection)
                      measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str]],
                      # (measurement_label, processing_callable, serial_input_marker)
                      sampling_rate_hz: int = 1000,
+                     record_bool: bool = True,
                      save_recordings_path: str | Path = None,
                      store_every_n_measurements: int = 10000,
                      working_memory_size: int = 600000,  # equals 10 min, measurements to store in RAM before clean-up
                      **read_serial_kwargs,
                      ):
+    """
+    Continuously samples sensor data from serial input and updates a shared dictionary for inter-process communication.
+
+    Parameters
+    ----------
+    shared_dict : multiprocessing.Manager.dict
+        Shared dictionary object to store the latest sample values for each measurement label.
+    force_save_event : threading.Event or multiprocessing.Event
+        Event to trigger saving of the current buffered data to disk.
+    saving_done_event : threading.Event or multiprocessing.Event
+        Event to send start trigger event ('A' via serial connection)
+    stop_trigger_event : threading.Event or multiprocessing.Event
+        Event to send stop trigger event ('B' via serial connection).
+    saving_done_event : threading.Event or multiprocessing.Event
+        Event to signal completion of saving data.
+    measurement_definitions : tuple of tuples
+        Each tuple contains measurement_label (str), optional processing callable, and serial input marker (str).
+    record_bool : bool, optional
+        Whether to record the processed values with timestamps (default is True).
+    sampling_rate_hz : int, optional
+        Desired sampling frequency in Hz (default is 1000).
+    save_recordings_path : str or Path, optional
+        Directory path where data recordings will be saved (default is None).
+    store_every_n_measurements : int, optional
+        Frequency (number of samples) to perform redundant saves (default is 10000).
+    working_memory_size : int, optional
+        Number of samples to hold in memory before final save and cleanup (default is 600000).
+    **read_serial_kwargs : dict
+        Additional keyword arguments passed to serial reading functions.
+
+    Notes
+    -----
+    Initializes global variables for each measurement's historic data and applies smoothing as defined.
+    Saves intermediate and final data as CSV files when triggered or memory limit reached.
+    Mimics real-time sampling with sleep intervals to achieve approximate sampling rate.
+    """
     # initialise global variables for read_sensor function:
     for measurement_label, processing_func, teensy_marker in measurement_definitions:
         globals()['measurements_' + measurement_label] = []
@@ -154,7 +198,7 @@ def sampling_process(shared_dict,
     # saving method to be called regularly and upon clean-up:
     def save_data(title_suffix: str = ''):
         # if len(measurements) == 0: return  # only save if there's something to save
-        if save_recordings_path is not None:
+        if save_recordings_path is not None and record_bool:
             print(f"Saving recorded data to {save_recordings_path}")
 
             # prepare separate series for each measurement:
@@ -172,8 +216,20 @@ def sampling_process(shared_dict,
     try:
         sample_counter = 1
         while True:
-            # method retrieves and saves sample:
+            # check for command events:
+            if start_trigger_event.is_set():
+                command = 'A'
+                print("Sending start trigger via serial!")
+                start_trigger_event.clear()
+            elif stop_trigger_event.is_set():
+                command = 'B'
+                print("Sending stop trigger via serial!")
+                stop_trigger_event.clear()
+            else: command = None
+            # method retrieves and saves sample as well as sends command:
             samples = read_serial_measurements(measurement_definitions=measurement_definitions,
+                                               record_bool=record_bool,
+                                               command=command,
                                                **read_serial_kwargs)
 
             # store in shared memory:
@@ -205,23 +261,71 @@ def sampling_process(shared_dict,
 def dummy_sampling_process(shared_dict,
                            force_save_event,  # save_event callable through other functions
                            saving_done_event,  # saving_done event pausing other processes
-
-                           # important:
+                           start_trigger_event,  # send start trigger event ('A' via serial connection)
+                           stop_trigger_event,  # send stop trigger event ('B' via serial connection)
                            measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str]],
                            # measurement_label, processing_callable, serial_input_marker
                            custom_rand_maxs: tuple[float] = None,
-
                            sampling_rate_hz: int = 1000,
+
+                           # the following parameters are unused but included to prevent errors when replacing the sampling rate function
                            save_recordings_path: str | Path = None,
                            store_every_n_measurements: int = 10000,
                            working_memory_size: int = 600000,
                            # equals 10 min, measurements to store in RAM before clean-up
                            **read_serial_kwargs,
                            ):
-    """ Imitates sampling from serial connection for development purposes. """
+    """
+    Dummy process to simulate sensor data sampling for development and testing purposes.
+
+    Parameters
+    ----------
+    shared_dict : multiprocessing.Manager.dict
+        Shared dictionary to store generated sample values.
+    force_save_event : threading.Event or multiprocessing.Event
+        Event to trigger dummy save operation.
+    saving_done_event : threading.Event or multiprocessing.Event
+        Event to signal completion of dummy save.
+    stop_trigger_event : threading.Event or multiprocessing.Event
+        Event to send stop trigger event ('B' via serial connection).
+    saving_done_event : threading.Event or multiprocessing.Event
+        Event to signal completion of saving data.
+    measurement_definitions : tuple of tuples
+        Each tuple contains measurement_label (str), optional processing callable, and serial input marker (str).
+    custom_rand_maxs : tuple of floats, optional
+        Custom maximum values for random data generation per measurement label (default creates ascending range).
+    sampling_rate_hz : int, optional
+        Frequency to simulate in Hz (default is 1000).
+    save_recordings_path : str or Path, optional
+        Ignored in dummy process; present for API compatibility (default is None).
+    store_every_n_measurements : int, optional
+        Ignored in dummy process; present for API compatibility (default is 10000).
+    working_memory_size : int, optional
+        Ignored in dummy process; present for API compatibility (default is 600000).
+    **read_serial_kwargs : dict
+        Ignored in dummy process; present for API compatibility.
+
+    Notes
+    -----
+    Generates random float values scaled by custom or default max values.
+    Supports triggering of save events that print dummy save statements.
+    Mimics sleep intervals to simulate real-time sampling frequency.
+    """
     try:
         sample_counter = 1
         while True:
+            # imitate check for command events:
+            if start_trigger_event.is_set():
+                command = 'A'
+                print("Sending start trigger via serial!")
+                start_trigger_event.clear()
+            elif stop_trigger_event.is_set():
+                command = 'B'
+                print("Sending stop trigger via serial!")
+                stop_trigger_event.clear()
+            else:
+                command = None
+
             # random dummy samples:
             rand_maxs = list(range(1, len(measurement_definitions) + 1)) if custom_rand_maxs is None else custom_rand_maxs
             samples = {measurement_label: np.random.rand() * rand_max for (measurement_label, _, _), rand_max in zip(measurement_definitions, rand_maxs)}
@@ -234,7 +338,7 @@ def dummy_sampling_process(shared_dict,
                 force_save_event.clear()
                 saving_done_event.set()
                 print('[SAMPLER] saved!')
-            print(shared_dict)
+
             # simulate sampling frequency:
             time.sleep(1/sampling_rate_hz)
             sample_counter += 1
@@ -255,6 +359,44 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
                     input_unit_label: str = 'Input [V]',
                     x_label: str = 'Time [s]',
                     title: str = 'Live Input View'):
+    """
+    Displays a live updating plot for a biosignal input from shared memory with optional gauge visualization.
+
+    Parameters
+    ----------
+    shared_dict : dict of str to float
+        Shared dictionary holding the latest measurement values keyed by measurement label.
+    measurement_dict_label : str
+        The key in shared_dict corresponding to the measurement to be visualized.
+    include_gauge : bool, optional
+        Whether to include a polar gauge visualizing the current input value (default is True).
+    display_window_len_s : int, optional
+        The length of the time window in seconds shown on the line plot (default is 3).
+    display_refresh_rate_hz : int, optional
+        Refresh rate of the display in Hertz (default is 15).
+    y_limits : tuple of float, optional
+        Initial y-axis limits for the line plot and gauge (default is (0, 3.3)).
+    target_value : float or None, optional
+        Optional target value to display as a reference line on the plot and gauge (default is None).
+    dynamically_update_y_limits : bool, optional
+        If True, adjusts y-axis limits dynamically based on incoming data outside current bounds (default is True).
+    plot_size : tuple of float, optional
+        Size of the matplotlib figure in inches (default is (15, 10)).
+    input_unit_label : str, optional
+        Label for the input units used on the y-axis and gauge labels (default is 'Input [V]').
+    x_label : str, optional
+        Label for the x-axis representing time (default is 'Time [s]').
+    title : str, optional
+        Title of the entire plot figure (default is 'Live Input View').
+
+    Notes
+    -----
+    - Uses matplotlib's FuncAnimation for live updating views.
+    - Provides a pause/continue button to control updating.
+    - Implements exponential moving average smoothing internally via the sampling process.
+    - Gauge is a semicircular polar plot showing current input relative to y-limits.
+    - Handles dynamic rescaling of plots if incoming values exceed current y-limits.
+    """
     try:
         matplotlib.use('TkAgg')  # select backend (suitable for animation)
 
@@ -393,6 +535,94 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
         plt.close('all')
 
 
+# todo: eventually include analog input from QTC?
+def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from sampling process
+                        start_trigger_event,
+                        stop_trigger_event,
+                        plot_size: tuple[float, float] = (4.5, 1),
+                        title: str = "Quattrocento Control Master",
+                        display_refresh_rate_hz: float = 5
+                        ):
+    """
+    Displays a control master view for managing start/stop triggers and monitoring shared biosignal measurement keys.
+
+    Parameters
+    ----------
+    shared_dict : dict of str to float
+        Shared dictionary holding the latest measurement values keyed by measurement label; used to display keys.
+    start_trigger_event : threading.Event or multiprocessing.Event
+        Event to signal the start of sampling; triggered by the Start button.
+    stop_trigger_event : threading.Event or multiprocessing.Event
+        Event to signal the stop of sampling; triggered by the Stop button.
+    plot_size : tuple of float, optional
+        Size of the matplotlib figure in inches (default is (5, 2)).
+    title : str, optional
+        The title shown on the figure window (default is "Quattrocento Control Master").
+    display_refresh_rate_hz : float, optional
+        Update frequency of the display in Hertz (default is 5).
+
+    Returns
+    -------
+    None
+        Creates an interactive window with Start and Stop buttons and a status text that updates regularly.
+
+    Notes
+    -----
+    - Uses matplotlib’s FuncAnimation to periodically update status text reflecting keys in shared_dict.
+    - Integrates two buttons to set/clear events used by a sampling process.
+    - Designed for synchronization and control of data acquisition pipelines in multiprocessing contexts.
+    - Automatically closes figure upon window close or termination.
+    """
+    try:
+        matplotlib.use('TkAgg')  # select backend (suitable for animation)
+
+        # initialise figure:
+        fig, dummy_ax = plt.subplots(figsize=plot_size)
+        dummy_ax.grid(False)  # Disable grid lines
+        dummy_ax.set_axis_off()  # Turn off the entire polar axis frame
+        fig.suptitle(title)
+
+        # trigger buttons (events relate to sampling-process):
+        def start_button_click(event):
+            start_trigger_event.set()
+            start_button.label.set_text("Start (Done)")
+            stop_button.label.set_text("Stop")
+        def stop_button_click(event):
+            stop_trigger_event.set()
+            start_button.label.set_text("Start")
+            stop_button.label.set_text("Stop (Done)")
+
+        start_button_ax = plt.axes([0.1, .4, 0.3, 0.15])
+        start_button = Button(start_button_ax, 'Start')
+        start_button.on_clicked(start_button_click)
+        stop_button_ax = plt.axes([0.6, .4, 0.3, 0.15])
+        stop_button = Button(stop_button_ax, 'Stop')
+        stop_button.on_clicked(stop_button_click)
+
+        # status text:
+        info_text = fig.text(0.2, 0.1, "", ha='left', va='center', fontsize=10)
+
+        def init():
+            info_text.set_text("Initializing...")
+
+            return info_text
+
+        def update(frame):
+            """ update view and fetch new observation. (frame is required although unused) """
+            # update only if is_running:
+            info_text.set_text(f"Receiving Serial Measurements: {list(shared_dict.keys())}")
+            return info_text
+
+        # run and show animation:
+        ani = FuncAnimation(fig, update, frames=1,
+                            init_func=init, blit=False,
+                            interval=int(1000/display_refresh_rate_hz), repeat=True)
+        plt.show()
+
+    finally:
+        plt.close('all')
+
+
 ############### MULTIPROCESSING METHODS ###############
 class RobustEventManager:
     """ Triggers events and safely waits for triggers while preventing deadlocks through timeouts. """
@@ -443,23 +673,55 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
                                 record_measurements: bool = True,
                                 # measurement_label, processing_callable, serial_input_marker
                                 ) -> None:
+    """
+    Starts multiprocessing setup for simultaneous measurement sampling and live plotting for multiple biosignal channels.
+
+    Parameters
+    ----------
+    measurement_definitions : tuple of tuples
+        Configuration for each measurement, where each tuple contains:
+        - measurement_label (str): the key identifying the measurement.
+        - processing_callable (callable or None): optional function to process raw measurements.
+        - serial_input_marker (str): prefix identifying the measurement line in serial input.
+    measurement_saving_path : str or Path, optional
+        Path where recorded measurement data will be saved. If None, data will not be saved persistently.
+    measurement_sampling_rate_hz : int, optional
+        Sampling frequency in Hertz for the measurement acquisition process (default is 1000).
+    record_measurements : bool, optional
+        Whether to record measurements to disk (default is True).
+
+    Returns
+    -------
+    None
+        Function initializes and starts multiprocessing processes for sampling and plotting.
+        Manages graceful shutdown and data saving on KeyboardInterrupt.
+
+    Notes
+    -----
+    - Launches separate processes for each display: FSR (force-sensitive resistor), ECG, and GSR (galvanic skin response).
+    - Uses a shared multiprocessing dictionary to communicate latest measurement values among processes.
+    - Implements `RobustEventManager` for safe inter-process signaling of save events to avoid deadlocks.
+    - Currently uses a dummy sampling process; replace with actual serial sampling target as needed.
+    - Handles KeyboardInterrupt for clean termination and saves any buffered data before exit.
+    """
     # initialise shared :
     shared_dict = multiprocessing.Manager().dict()
+    measurement_labels = []  # for dynamic object definition below
     for measurement_label, _, _ in measurement_definitions:
         shared_dict[measurement_label] = .0
+        measurement_labels.append(measurement_label)
 
 
     # saving event:
     force_save_event = RobustEventManager()
     saving_done_event = RobustEventManager()
+    start_trigger_event = RobustEventManager()
+    stop_trigger_event = RobustEventManager()
 
     # define processes:
     sampler = multiprocessing.Process(
         target=dummy_sampling_process,
-        args=(
-            shared_dict,
-            force_save_event, saving_done_event,  # events
-        ),
+        args=(shared_dict, force_save_event, saving_done_event, start_trigger_event, stop_trigger_event,),
         kwargs={'measurement_definitions': measurement_definitions,
                 'sampling_rate_hz': measurement_sampling_rate_hz,
                 'save_recordings_path': measurement_saving_path,
@@ -467,48 +729,60 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
                 'baud_rate': 115200,},
         name="SamplingProcess")
 
-    fsr_displayer = multiprocessing.Process(
-        target=plot_input_view,
-        args=(shared_dict,),
-        kwargs={'measurement_dict_label': 'fsr',
-                'target_value': 1.2,
-                'include_gauge': True,
-                'title': 'FSR Input'
-                },
-        name="FSRDisplayProcess")
+    if 'fsr' in measurement_labels:
+        fsr_displayer = multiprocessing.Process(
+            target=plot_input_view,
+            args=(shared_dict,),
+            kwargs={'measurement_dict_label': 'fsr',
+                    'target_value': 1.2,
+                    'include_gauge': True,
+                    'title': 'FSR Input'
+                    },
+            name="FSRDisplayProcess")
 
-    ecg_displayer = multiprocessing.Process(
-        target=plot_input_view,
-        args=(shared_dict,),
-        kwargs={'measurement_dict_label': 'ecg',
-                'target_value': None,
-                'include_gauge': False,
-                'title': 'ECG Input'
-                },
-        name="ECGDisplayProcess")
+    if 'ecg' in measurement_labels:
+        ecg_displayer = multiprocessing.Process(
+            target=plot_input_view,
+            args=(shared_dict,),
+            kwargs={'measurement_dict_label': 'ecg',
+                    'target_value': None,
+                    'include_gauge': False,
+                    'title': 'ECG Input'
+                    },
+            name="ECGDisplayProcess")
 
-    gsr_displayer = multiprocessing.Process(
-        target=plot_input_view,
-        args=(shared_dict,),
-        kwargs={'measurement_dict_label': 'gsr',
-                'target_value': 1.2,
-                'include_gauge': False,
-                'title': 'GSR Input'
+    if 'gsr' in measurement_labels:
+        gsr_displayer = multiprocessing.Process(
+            target=plot_input_view,
+            args=(shared_dict,),
+            kwargs={'measurement_dict_label': 'gsr',
+                    'target_value': 1.2,
+                    'include_gauge': False,
+                    'title': 'GSR Input'
+                    },
+            name="ECGDisplayProcess")
+
+    master_displayer = multiprocessing.Process(
+        target=qtc_control_master_view,
+        args=(shared_dict, start_trigger_event, stop_trigger_event,),
+        kwargs={
                 },
-        name="ECGDisplayProcess")
+        name="MasterDisplayProcess")
 
     # start processes:
     try:
         sampler.start()
-        fsr_displayer.start()
-        ecg_displayer.start()
-        gsr_displayer.start()
+        if 'fsr' in measurement_labels: fsr_displayer.start()
+        if 'ecg' in measurement_labels: ecg_displayer.start()
+        if 'gsr' in measurement_labels: gsr_displayer.start()
+        master_displayer.start()
 
         # Wait for processes with timeout
         sampler.join()  #timeout=300  # 5 minute timeout (unused currently, main script ends anyway)
-        fsr_displayer.join()  #timeout=300
-        ecg_displayer.join()
-        gsr_displayer.join()
+        if 'fsr' in measurement_labels: fsr_displayer.join()  #timeout=300
+        if 'ecg' in measurement_labels: ecg_displayer.join()
+        if 'gsr' in measurement_labels: gsr_displayer.join()
+        master_displayer.join()
 
     except KeyboardInterrupt:
         print("Terminating processes...")
@@ -519,13 +793,16 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
 
         # stop all processes:
         sampler.terminate()
-        fsr_displayer.terminate()
-        ecg_displayer.terminate()
-        gsr_displayer.terminate()
+        if 'fsr' in measurement_labels: fsr_displayer.terminate()
+        if 'ecg' in measurement_labels: ecg_displayer.terminate()
+        if 'gsr' in measurement_labels: gsr_displayer.terminate()
+        master_displayer.terminate()
+
         sampler.join()
-        fsr_displayer.join()
-        ecg_displayer.join()
-        gsr_displayer.join()
+        if 'fsr' in measurement_labels: fsr_displayer.join()
+        if 'ecg' in measurement_labels: ecg_displayer.join()
+        if 'gsr' in measurement_labels: gsr_displayer.join()
+        master_displayer.join()
 
     finally:
         print("Cleanup completed")
@@ -537,8 +814,9 @@ if __name__ == '__main__':
 
     # start process:
     start_measurement_processes(measurement_definitions=(("fsr", None, "VAL:"),
-                                                         ("ecg", None, "ECG:"),
-                                                         ("gsr", None, "GSR:"),),
+                                                         #("ecg", None, "ECG:"),
+                                                         #("gsr", None, "GSR:"),
+                                                         ),
                                 measurement_saving_path=DATA, record_measurements=True,
                                 )
 
