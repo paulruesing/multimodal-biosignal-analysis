@@ -242,6 +242,30 @@ class SpotifyController:
         process.communicate()
 
     @staticmethod
+    def pause():
+        """
+        Pause the currently playing Spotify track.
+        """
+        applescript = 'tell application "Spotify" to pause'
+        process = subprocess.Popen(
+            ['osascript', '-e', applescript],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        process.communicate()
+
+    @staticmethod
+    def resume():
+        """
+        Resume playback of the current Spotify track.
+        """
+        applescript = 'tell application "Spotify" to play'
+        process = subprocess.Popen(
+            ['osascript', '-e', applescript],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        process.communicate()
+
+    @staticmethod
     def play_track(spotify_track_url: str):
         """
         Play a Spotify track by its URL or track ID.
