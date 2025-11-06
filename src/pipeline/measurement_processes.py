@@ -19,7 +19,7 @@ import pandas as pd
 
 
 ############### READOUT METHODS ###############
-# todo: ponder, whether prefixes are the best way to distinguish measurements (I think they might work well)
+# todo: ponder, whether prefixes are the best way to distinguish serial_measurements (I think they might work well)
 def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[[float], float], str, float]],
                              baud_rate: int = 115200,
                              serial_port: str = '/dev/tty.usbmodem143309601',
@@ -31,7 +31,7 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
                              smoothing_ema_alpha: float = 0.4,  # 1 = no smoothing, -> 0 more smoothing
                              ) -> dict[str, float] | None:
     """
-    Reads multiple sensor measurements simultaneously from a serial port and processes each.
+    Reads multiple sensor serial_measurements simultaneously from a serial port and processes each.
 
     Parameters
     ----------
@@ -57,14 +57,14 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
     -------
     dict of {str: float} or None
         Returns a dictionary mapping measurement labels to their processed and smoothed values.
-        If reading fails, returns last valid values for all measurements.
+        If reading fails, returns last valid values for all serial_measurements.
 
     Notes
     -----
-    Uses dynamic global variables for each measurement label to keep track of last valid readings, timestamps, and recorded measurements.
+    Uses dynamic global variables for each measurement label to keep track of last valid readings, timestamps, and recorded serial_measurements.
     Handles serial communication and parsing errors gracefully by reverting to last valid readings.
     """
-    # we deploy globals() function here for dynamic global object naming and accessing (depending on included measurements)
+    # we deploy globals() function here for dynamic global object naming and accessing (depending on included serial_measurements)
     try:
         output_dict = {}  # will be returned
         with serial.Serial(serial_port, baud_rate, timeout=1) as ser:
@@ -150,7 +150,7 @@ def sampling_process(shared_dict,
                      record_bool: bool = True,
                      save_recordings_path: str | Path = None,
                      store_every_n_measurements: int = 10000,
-                     working_memory_size: int = 600000,  # equals 10 min, measurements to store in RAM before clean-up
+                     working_memory_size: int = 600000,  # equals 10 min, serial_measurements to store in RAM before clean-up
                      **read_serial_kwargs,
                      ):
     """
@@ -197,7 +197,7 @@ def sampling_process(shared_dict,
 
     # saving method to be called regularly and upon clean-up:
     def save_data(title_suffix: str = ''):
-        # if len(measurements) == 0: return  # only save if there's something to save
+        # if len(serial_measurements) == 0: return  # only save if there's something to save
         if save_recordings_path is not None and record_bool:
             print(f"Saving recorded data to {save_recordings_path}")
 
@@ -272,7 +272,7 @@ def dummy_sampling_process(shared_dict,
                            save_recordings_path: str | Path = None,
                            store_every_n_measurements: int = 10000,
                            working_memory_size: int = 600000,
-                           # equals 10 min, measurements to store in RAM before clean-up
+                           # equals 10 min, serial_measurements to store in RAM before clean-up
                            **read_serial_kwargs,
                            ):
     """
@@ -681,14 +681,14 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
     measurement_definitions : tuple of tuples
         Configuration for each measurement, where each tuple contains:
         - measurement_label (str): the key identifying the measurement.
-        - processing_callable (callable or None): optional function to process raw measurements.
+        - processing_callable (callable or None): optional function to process raw serial_measurements.
         - serial_input_marker (str): prefix identifying the measurement line in serial input.
     measurement_saving_path : str or Path, optional
         Path where recorded measurement data will be saved. If None, data will not be saved persistently.
     measurement_sampling_rate_hz : int, optional
         Sampling frequency in Hertz for the measurement acquisition process (default is 1000).
     record_measurements : bool, optional
-        Whether to record measurements to disk (default is True).
+        Whether to record serial_measurements to disk (default is True).
 
     Returns
     -------
@@ -810,12 +810,12 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
 if __name__ == '__main__':
     # define saving folder:
     ROOT = Path().resolve().parent.parent
-    DATA = ROOT / "data" / "measurements"
+    DATA = ROOT / "data" / "serial_measurements"
 
     # start process:
     start_measurement_processes(measurement_definitions=(("fsr", None, "VAL:"),
-                                                         #("ecg", None, "ECG:"),
-                                                         #("gsr", None, "GSR:"),
+                                                         ("ecg", None, "ECG:"),
+                                                         ("gsr", None, "GSR:"),
                                                          ),
                                 measurement_saving_path=DATA, record_measurements=True,
                                 )
