@@ -13,6 +13,7 @@ import multiprocessing
 from ctypes import c_char
 
 import src.utils.file_management as filemgmt
+from src.pipeline.music_control import SpotifyController
 
 from pathlib import Path
 import pandas as pd
@@ -539,9 +540,12 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
 def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from sampling process
                         start_trigger_event,
                         stop_trigger_event,
-                        plot_size: tuple[float, float] = (4.5, 1),
+                        plot_size: tuple[float, float] = (10, 2),
                         title: str = "Quattrocento Control Master",
-                        display_refresh_rate_hz: float = 5
+                        display_refresh_rate_hz: float = 3,
+                        music_category_txt: str | Path | None = None,
+                        control_log_path: str | Path | None = None,
+                        save_log_working_memory_size: int = 60000,
                         ):
     """
     Displays a control master view for managing start/stop triggers and monitoring shared biosignal measurement keys.
@@ -576,6 +580,12 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
     try:
         matplotlib.use('TkAgg')  # select backend (suitable for animation)
 
+        if music_category_txt is not None:  # initialise spotify controller
+            print("Initialising SpotifyController instance. Remember opening spotify!")
+            music_master = SpotifyController(category_url_dict=music_category_txt)
+            include_music = True
+        else: include_music = False
+
         # initialise figure:
         fig, dummy_ax = plt.subplots(figsize=plot_size)
         dummy_ax.grid(False)  # Disable grid lines
@@ -585,33 +595,85 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
         # trigger buttons (events relate to sampling-process):
         def start_button_click(event):
             start_trigger_event.set()
-            start_button.label.set_text("Start (Done)")
-            stop_button.label.set_text("Stop")
+            start_button.label.set_text("Start Trigger (Done)")
+            stop_button.label.set_text("Stop Trigger")
         def stop_button_click(event):
             stop_trigger_event.set()
-            start_button.label.set_text("Start")
-            stop_button.label.set_text("Stop (Done)")
+            start_button.label.set_text("Start Trigger")
+            stop_button.label.set_text("Stop Trigger (Done)")
 
-        start_button_ax = plt.axes([0.1, .4, 0.3, 0.15])
-        start_button = Button(start_button_ax, 'Start')
+        start_button_ax = plt.axes([0.1, .7, 0.35, 0.15])
+        start_button = Button(start_button_ax, 'Start Trigger')
         start_button.on_clicked(start_button_click)
-        stop_button_ax = plt.axes([0.6, .4, 0.3, 0.15])
-        stop_button = Button(stop_button_ax, 'Stop')
+        stop_button_ax = plt.axes([0.55, .7, 0.35, 0.15])
+        stop_button = Button(stop_button_ax, 'Stop Trigger')
         stop_button.on_clicked(stop_button_click)
 
+        # define music control instruments:
+        if include_music:
+            music_button_label = fig.text(0.1, 0.6, "Music Control:", ha='left', va='center', fontsize=10)
+            resume_button_ax = plt.axes([0.1, .4, 0.1, 0.15])
+            resume_button = Button(resume_button_ax, 'Resume')
+            def resume_button_clicked(event): music_master.resume()
+            resume_button.on_clicked(resume_button_clicked)
+            pause_button_ax = plt.axes([0.8, .4, 0.1, 0.15])
+            pause_button = Button(pause_button_ax, 'Pause')
+            def pause_button_clicked(event): music_master.pause()
+            pause_button.on_clicked(pause_button_clicked)
+
+            n_categories = len(music_master.category_url_dict.keys())
+            width_button = (.5 / n_categories) * .95
+            button_positions = np.linspace(.225, .775-width_button, n_categories)
+            for category, button_pos in zip(music_master.category_url_dict.keys(), button_positions):
+                temp_button_ax = plt.axes([button_pos, .4, width_button, .15])
+                globals()[f'{category}_button'] = Button(temp_button_ax, f'Next {category}')
+                # define function (category needs to be saved as default value due to late binding)
+                globals()[f'{category}_button_clicked'] = lambda event, cat=category: music_master.play_next_from(cat)
+                globals()[f'{category}_button'].on_clicked(globals()[f'{category}_button_clicked'])
+
         # status text:
-        info_text = fig.text(0.2, 0.1, "", ha='left', va='center', fontsize=10)
+        info_text = fig.text(0.1, 0.25, "", ha='left', va='center', fontsize=10)
+        if include_music: music_text = fig.text(0.1, 0.1, "", ha='left', va='center', fontsize=10)
 
         def init():
             info_text.set_text("Initializing...")
+            if include_music: music_text.set_text("Initializing...")
+            return (info_text, music_text) if include_music else info_text
 
-            return info_text
-
+        global save_log_counter
+        save_log_counter = 1  # for saving log file
+        global log_dict
+        log_dict = {'Time': [], 'Music': []}
         def update(frame):
             """ update view and fetch new observation. (frame is required although unused) """
             # update only if is_running:
             info_text.set_text(f"Receiving Serial Measurements: {list(shared_dict.keys())}")
-            return info_text
+            if include_music:
+                if music_master.current_category_and_counter is not None:  # e.g. Groovy (1/8)
+                    current_cat_str = f"{music_master.current_category_and_counter[0]} ({music_master.current_category_and_counter[1]+1}/{len(music_master.category_url_dict[music_master.current_category_and_counter[0]])})"" | "
+                else: current_cat_str = ""
+                try:
+                    current_track_info = music_master.get_current_track(output_type='dict')
+                    # e.g. Hallelujah by Leonard Cohen | 34.29s / 194.38s
+                    current_track_str = f"{current_track_info['Title']} by {current_track_info['Artist']} | {current_track_info['Position [s]']:.2f}s / {current_track_info['Duration [ms]']/1000:.2f}s"
+                    music_text.set_text(current_cat_str + current_track_str)
+                except ValueError:  # no music playing currently
+                    music_text.set_text("No track playing currently.")
+
+            # logging eventually:
+            global save_log_counter
+            if control_log_path is not None:
+                global log_dict
+                log_dict['Time'].append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                log_dict['Music'].append(music_text.get_text())
+                save_log_counter += 1  # because this is only increased here, we can omit the condition below:
+            if save_log_counter % save_log_working_memory_size == 0:  # save and working memory reset
+                pd.DataFrame(log_dict).to_csv(control_log_path / filemgmt.file_title("Experiment Log Working Memory Full Save", ".csv"), index=False)
+                log_dict = {'Time': [], 'Music': []}
+            elif save_log_counter % (save_log_working_memory_size // 100) == 0:  # interim save
+                pd.DataFrame(log_dict).to_csv(control_log_path / filemgmt.file_title("Experiment Log Interim Save", ".csv"), index=False)
+
+            return (info_text, music_text) if include_music else info_text
 
         # run and show animation:
         ani = FuncAnimation(fig, update, frames=1,
@@ -672,6 +734,8 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
                                 measurement_sampling_rate_hz: int = 1000,
                                 record_measurements: bool = True,
                                 # measurement_label, processing_callable, serial_input_marker
+                                music_category_txt: str | Path | None = None,
+                                control_log_path: str | Path | None = None,
                                 ) -> None:
     """
     Starts multiprocessing setup for simultaneous measurement sampling and live plotting for multiple biosignal channels.
@@ -765,7 +829,8 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
     master_displayer = multiprocessing.Process(
         target=qtc_control_master_view,
         args=(shared_dict, start_trigger_event, stop_trigger_event,),
-        kwargs={
+        kwargs={'music_category_txt': music_category_txt,
+                'control_log_path': control_log_path,
                 },
         name="MasterDisplayProcess")
 
@@ -810,13 +875,18 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
 if __name__ == '__main__':
     # define saving folder:
     ROOT = Path().resolve().parent.parent
-    DATA = ROOT / "data" / "serial_measurements"
+    SERIAL_MEASUREMENTS = ROOT / "data" / "serial_measurements"
+    EXPERIMENT_LOG = ROOT / "data" / "experiment_logs"
+    MUSIC_CONFIG = ROOT / "config" / "music_selection.txt"
 
     # start process:
     start_measurement_processes(measurement_definitions=(("fsr", None, "VAL:"),
-                                                         ("ecg", None, "ECG:"),
-                                                         ("gsr", None, "GSR:"),
+                                                         #("ecg", None, "ECG:"),
+                                                         #("gsr", None, "GSR:"),
                                                          ),
-                                measurement_saving_path=DATA, record_measurements=True,
+                                measurement_saving_path=SERIAL_MEASUREMENTS,
+                                record_measurements=True,
+                                music_category_txt=MUSIC_CONFIG,
+                                control_log_path=EXPERIMENT_LOG,
                                 )
 
