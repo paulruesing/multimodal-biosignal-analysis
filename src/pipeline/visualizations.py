@@ -99,35 +99,34 @@ EEG_POSITIONS = {'Fpz': (0.0, 0.602),
  'O2': (0.165, -0.5599999999999999)}
 
 ##############  PLOTTING FUNCTIONS ##############
-def plot_circles_heatmap(values: dict[str, float] | list[float],
-                         include_labels: bool = True,
-                         colormap='viridis',
-                         color_scale=None,
-                         value_label: str = 'Heatmap values',
-                         plot_size: (int, int) = (8, 8)):
+def plot_eeg_heatmap(values: dict[str, float] | list[float],
+                     include_labels: bool = True,
+                     colormap='viridis',
+                     color_scale=None,
+                     value_label: str = 'Heatmap values',
+                     plot_size: (int, int) = (8, 8)):
     """
-    Plot circles at predefined positions filled based on heatmap values with optional labels.
+    Plot heatmap circles at predefined electrode positions for a 64-channel EEG (10-20 system).
 
     Parameters
     ----------
-    values : dict | list
-        Dictionary with keys as channels and values representing heatmap values for color filling. Or list with latter.
-    include_lables : default=True
-        Whether to include channel text labels.
-    colormap : str or matplotlib.colors.Colormap, optional
-        Matplotlib colormap name or Colormap object used for coloring circles. Default is 'viridis'.
-    color_scale : tuple or None, optional
-        Tuple (vmin, vmax) setting the color scale limits for heatmap normalization.
-        If None, scale is inferred from values min and max. Default is None.
-    value_label : str, optional
-        Plotted next to heatmap.
-    plot_size: (int, int) tuple, default=(8, 8)
-        Figure size.
+    values : dict or list of float
+        Heatmap values mapped by channel names if dict, or list of values corresponding to predefined electrode positions.
+    include_labels : bool, default True
+        Whether to include text labels for each electrode.
+    colormap : str or matplotlib.colors.Colormap, default 'viridis'
+        Colormap used to map values to colors.
+    color_scale : tuple of (float, float) or None, optional
+        Tuple specifying (vmin, vmax) for normalization of colors. If None, min and max of values are used.
+    value_label : str, default 'Heatmap values'
+        Label for the colorbar next to the heatmap.
+    plot_size : tuple of int, default (8, 8)
+        Size of the matplotlib figure in inches.
 
     Returns
     -------
     matplotlib.figure.Figure
-        The matplotlib Figure object containing the plot.
+        The figure object containing the heatmap plot.
     """
     fig, ax = plt.subplots(figsize=plot_size)
 
