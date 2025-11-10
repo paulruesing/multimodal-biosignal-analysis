@@ -7,9 +7,13 @@ dependencies:
   - ipython
   - numpy
   - matplotlib
+  - mne
+  - mne-icalabel
   - pandas
   - pip
   - pytorch
+  - pywavelets
+  - scikit-learn
   - scipy
   - pyserial
   - tqdm
