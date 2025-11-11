@@ -59,9 +59,6 @@ def test_biosignal_preprocessor_init():
         assert processor.wavelet_type == wavelet
         assert processor.denoising_threshold_mode == denoising_thresh_mode
 
-# todo: tests for amenable properties with asserting execution of clean_downstream_results()
-# todo: test clean downstream results
-
 def test_biosignal_preprocessor_amenable_properties():
     """ Setting these properties should trigger clean_downstream_results """
     # Create dummy input data with shape (timesteps, channels)
@@ -104,3 +101,6 @@ def test_biosignal_preprocessor_amenable_properties():
                 assert np.array_equal(current_val, new_value), f"{var_name} not set successfully."
             else:
                 assert getattr(processor, var_name) == new_value, f"{var_name} not set successfully."
+
+
+# todo: test clean downstream results
