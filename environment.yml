@@ -11,6 +11,8 @@ dependencies:
   - mne-icalabel
   - pandas
   - pip
+  - pytest
+  - pytest-cov
   - pytorch
   - pywavelets
   - scikit-learn
