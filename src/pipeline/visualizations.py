@@ -247,7 +247,8 @@ def plot_freq_domain(amplitude_spectrum: np.ndarray[float, float] | np.ndarray[f
     plt.ylabel('Amplitude')
     plt.title(plot_title)
     plt.legend(ncols=amplitude_spectrum.shape[1] // 16 + 1)
-    plt.xlim(frequency_range)
+    if frequency_range is not None: plt.xlim(frequency_range)
+    else: print("Consider defining frequency range for improved display.")
     
     # eventually save:
     if save_dir is not None: smart_save_fig(save_dir, plot_title)
