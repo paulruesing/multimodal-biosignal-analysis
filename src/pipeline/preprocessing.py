@@ -13,8 +13,8 @@ import mne_icalabel
 import pywt
 from scipy.signal import butter, filtfilt, iirnotch, welch, csd
 
-
 from src.pipeline.visualizations import plot_eeg_heatmap, plot_freq_domain, EEG_CHANNELS
+import src.utils.file_management as filemgmt
 
 class BiosignalPreprocessor:
     """
@@ -46,7 +46,7 @@ class BiosignalPreprocessor:
     amplitude_rejection_threshold : float or None, optional
         Amplitude threshold for rejection; None disables amplitude rejection.
         Default is 0.001.
-    ica_components : int or None, optional
+    n_ica_components : int or None, optional
         Number of ICA components for artifact rejection; None disables ICA.
         Default is 25.
     laplacian_filter_neighbor_radius : float or None, optional
@@ -90,7 +90,8 @@ class BiosignalPreprocessor:
                  notch_width: float | None = None,
                  reference_channels: str | Literal['average'] | None = 'average',
                  amplitude_rejection_threshold: float | None = .001,
-                 ica_components: int | None = 25,
+                 n_ica_components: int | None = 25,
+                 automatic_ic_labelling: bool = True,
                  laplacian_filter_neighbor_radius: float | None = .05,
                  wavelet_type: Literal['db4', 'sym5', 'coif1'] | None = 'db4',
                  denoising_threshold_mode: Literal['soft', 'hard'] = 'soft',
@@ -120,7 +121,8 @@ class BiosignalPreprocessor:
         self._notch_width = notch_width  # None leads to automatic setting
         self._reference_channels = reference_channels  # None leads to no re-referencing
         self._amplitude_rejection_threshold = amplitude_rejection_threshold  # None leads to no amplitude thresholding
-        self._ica_components = ica_components  # None leads to no automatic artefact rejection
+        self._n_ica_components = n_ica_components  # None leads to no automatic artefact rejection
+        self._automatic_ic_labelling = automatic_ic_labelling
         self._manual_ics_to_exclude: list[int] = None
         self._laplacian_filter_neighbor_radius = laplacian_filter_neighbor_radius  # None -> no Laplacian filtering
         self._wavelet_type = wavelet_type  # None -> no wavelet denoising
@@ -130,7 +132,7 @@ class BiosignalPreprocessor:
         # mne type:
         self._mne_amplitude_compliant_data = self._mne_filtered_data = None
         self._mne_referenced_data = self._mne_raw_data = None
-        self._mne_ica_result = self._mne_artefact_free_data = None
+        self._mne_ica_result = self._ica_automatic_labels = self._mne_artefact_free_data = None
         # np type:
         self._np_artefact_free_data = self._np_smoothed_data = None
         self._np_denoised_data = self._np_output_data = None
@@ -340,10 +342,10 @@ class BiosignalPreprocessor:
     @amplitude_rejection_threshold.setter
     def amplitude_rejection_threshold(self, amplitude_rejection_threshold: float | None) -> None:
         self._amplitude_rejection_threshold = amplitude_rejection_threshold
-        self.clean_downstream_results(change_in='amplitude thesholding')
+        self.clean_downstream_results(change_in='amplitude thresholding')
 
     @property
-    def ica_components(self) -> int:
+    def n_ica_components(self) -> int:
         """
         Number of ICA components for artifact correction.
 
@@ -352,11 +354,20 @@ class BiosignalPreprocessor:
         int or None
             Number of ICA components; None disables ICA processing.
         """
-        return self._ica_components
+        return self._n_ica_components
 
-    @ica_components.setter
-    def ica_components(self, ica_components: int) -> None:
-        self._ica_components = ica_components
+    @n_ica_components.setter
+    def n_ica_components(self, ica_components: int) -> None:
+        self._n_ica_components = ica_components
+        self.clean_downstream_results(change_in='artefact rejection')
+
+    @property
+    def automatic_ic_labelling(self) -> bool:
+        return self._automatic_ic_labelling
+
+    @automatic_ic_labelling.setter
+    def automatic_ic_labelling(self, automatic_ic_labelling: bool) -> None:
+        self._automatic_ic_labelling = automatic_ic_labelling
         self.clean_downstream_results(change_in='artefact rejection')
 
     @property
@@ -551,15 +562,16 @@ class BiosignalPreprocessor:
         Raises
         ------
         ValueError
-            If `ica_components` is not defined.
+            If `n_ica_components` is not defined.
         """
         if self._mne_ica_result is not None: return self._mne_ica_result
 
-        if self.ica_components is None: raise ValueError("ica_components needs to be defined!")
+        if self.n_ica_components is None: raise ValueError("n_ica_components needs to be defined!")
         # fit ICA:
-        ica = mne.preprocessing.ICA(n_components=self.ica_components,
+        ica = mne.preprocessing.ICA(n_components=self.n_ica_components,
                                     max_iter='auto',
                                     method='infomax',
+                                    random_state=42,
                                     # switches between nonlinearities, appears more robust but takes much longer (than FastICA)
                                     fit_params=dict(extended=True))
         # convergence is difficult with too short datasets, rule of thumb appears to be n-components x 20-30 = required_seconds
@@ -580,17 +592,21 @@ class BiosignalPreprocessor:
         if self._mne_artefact_free_data is not None: return self._mne_artefact_free_data
 
         # otherwise compute
-        if self.ica_components is None: return self.mne_amplitude_compliant_data
+        if self.n_ica_components is None: return self.mne_amplitude_compliant_data
 
         # label ica components:
-        ica_label_output = mne_icalabel.label_components(self.mne_amplitude_compliant_data,
-                                                         self.mne_ica_result, method='iclabel')
-        probs, labels = ica_label_output.values()
+        if self._ica_automatic_labels is None:  # store internally
+            self._ica_automatic_labels = mne_icalabel.label_components(
+                self.mne_amplitude_compliant_data,
+                                                             self.mne_ica_result, method='iclabel')
+        probs, labels = self._ica_automatic_labels.values()
         print("Found the following IC labels:\n", labels)
-        print("Will exclude 'heart beat' and 'muscle artifact'.")
+        labels_to_exclude = ('heart beat', 'muscle artifact', 'channel noise')
+        automatically_excluded_ics = [idx for idx, label in enumerate(labels) if label in labels_to_exclude]
+        print(f"Will exclude {labels_to_exclude} ICs, that are: ", automatically_excluded_ics)
 
         # exclude such. we can access the private variable _mne_ica... here because we ensured it's computed by accessing the property above
-        exclusion_list = [idx for idx, label in enumerate(labels) if label in ('heart beat', 'muscle artifact')] + self.manual_ics_to_exclude
+        exclusion_list = automatically_excluded_ics + self.manual_ics_to_exclude
         print(f'Also excluding manual set ICs: {self.manual_ics_to_exclude}\n(change this selection via manual_ics_to_exclude parameter)')
         # set conversion interim to prevent duplicates
         self._mne_ica_result.exclude = list(set(exclusion_list))
@@ -779,13 +795,13 @@ class BiosignalPreprocessor:
 
         # else compute with progress bar:
         print('Running full preprocessing pipeline...')
-        for step in tqdm(['import', 'filtering', 'referencing', 'amplitude thesholding',
+        for step in tqdm(['import', 'filtering', 'referencing', 'amplitude thresholding',
                                  'artefact rejection', 'smoothing', 'denoising']):
             # accessing properties leads to computation:
             if step == 'import': _ = self.mne_raw_data
             elif step == 'filtering': _ = self.mne_filtered_data
             elif step == 'referencing': _ = self.mne_referenced_data
-            elif step == 'amplitude thesholding': _ = self.mne_amplitude_compliant_data
+            elif step == 'amplitude thresholding': _ = self.mne_amplitude_compliant_data
             elif step == 'artefact rejection': _ = self.np_artefact_free_data
             elif step == 'smoothing': _ = self.np_smoothed_data
             elif step == 'denoising': _ = self.np_denoised_data
@@ -808,7 +824,9 @@ class BiosignalPreprocessor:
             freqs=[self.notch_frequency * i for i in range(1, self.notch_harmonics+1)],
             picks='all', notch_widths=self.notch_width)
 
-    def _annotate_amplitude_based_artefacts(self):
+    def _annotate_amplitude_based_artefacts(self,
+                                            min_duration: float = .025,
+                                            max_bad_segments_percent: float = 5):
         """
         Annotate data segments and channels with amplitude-based artefacts.
 
@@ -824,8 +842,8 @@ class BiosignalPreprocessor:
         annotations, bad_channels = mne.preprocessing.annotate_amplitude(
             self._mne_amplitude_compliant_data,
             peak=reject_criteria,
-            min_duration=.025,  # minimum duration for consecutive samples to exceed or fall below threshold
-            bad_percent=5,  # channels with more bad segments will be marked as complete bad channels
+            min_duration=min_duration,  # minimum duration for consecutive samples to exceed or fall below threshold
+            bad_percent=max_bad_segments_percent,  # channels with more bad segments will be marked as complete bad channels
         )
         print(f"Found {len(bad_channels)} bad channels.")
 
@@ -834,7 +852,7 @@ class BiosignalPreprocessor:
         self._mne_amplitude_compliant_data.info['bads'].extend(bad_channels)
 
     def clean_downstream_results(self,
-                                 change_in: Literal['import', 'filtering', 'referencing', 'amplitude thesholding',
+                                 change_in: Literal['import', 'filtering', 'referencing', 'amplitude thresholding',
                                  'artefact rejection', 'smoothing', 'denoising']):
         """
         Clear cached intermediate results downstream of a specified processing step.
@@ -843,7 +861,7 @@ class BiosignalPreprocessor:
         ----------
         change_in : str
             Processing stage where changes occurred; must be one of
-            {'import', 'filtering', 'referencing', 'amplitude thesholding',
+            {'import', 'filtering', 'referencing', 'amplitude thresholding',
              'artefact rejection', 'smoothing', 'denoising'}.
 
         Raises
@@ -871,6 +889,7 @@ class BiosignalPreprocessor:
             self._mne_artefact_free_data = None
             self._np_artefact_free_data = None
             self._mne_ica_results = None
+            self._ica_automatic_labels = None
             self._np_smoothed_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
@@ -881,7 +900,9 @@ class BiosignalPreprocessor:
             self._mne_referenced_data = None
             self._mne_amplitude_compliant_data = None
             self._mne_artefact_free_data = None
+            self._np_artefact_free_data = None
             self._mne_ica_results = None
+            self._ica_automatic_labels = None
             self._np_smoothed_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
@@ -893,16 +914,18 @@ class BiosignalPreprocessor:
             self._mne_artefact_free_data = None
             self._np_artefact_free_data = None
             self._mne_ica_results = None
+            self._ica_automatic_labels = None
             self._np_smoothed_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
             self._wavelet_coefficients = None
             self._np_output_data = None
-        elif change_in.lower() == 'amplitude thesholding':
+        elif change_in.lower() == 'amplitude thresholding':
             self._mne_amplitude_compliant_data = None
             self._mne_artefact_free_data = None
             self._np_artefact_free_data = None
             self._mne_ica_results = None
+            self._ica_automatic_labels = None
             self._np_smoothed_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
@@ -912,6 +935,7 @@ class BiosignalPreprocessor:
             self._mne_artefact_free_data = None
             self._np_artefact_free_data = None
             self._mne_ica_results = None
+            self._ica_automatic_labels = None
             self._np_smoothed_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
@@ -928,7 +952,17 @@ class BiosignalPreprocessor:
             self._denoised_wavelet_coefficients = None
             self._wavelet_coefficients = None
             self._np_output_data = None
-        else: raise ValueError("change_in category is undefined!")
+        else: raise ValueError(f"change_in category: '{change_in}' is undefined!")
+
+    def export_results(self, save_dir: Path | str, identifier: str = None) -> None:
+        """ Exports results to .npy """
+        # prepare save-title:
+        title = f"Preprocessed {self.modality} {self.n_channels}ch {self.n_timesteps/self.sampling_freq}sec"
+        if identifier is not None: title += f" ({identifier})"
+        save_path = save_dir / filemgmt.file_title(f"{title}", ".npy")
+        # save:
+        np.save(save_path, self.np_output_data)
+        print('Saved results to ', save_path)
 
     @staticmethod
     def discrete_fourier_transform(input_array: np.ndarray,
@@ -989,7 +1023,7 @@ class BiosignalPreprocessor:
         return amplitude_spectrum, freqs_pos
 
     ############# PLOTTING METHODS #############
-    def plot_independent_component(self, ic_index: int):
+    def plot_independent_component(self, ic_index: int, verbose: bool = True):
         """
         Plot properties of a specified independent component from ICA.
 
@@ -998,6 +1032,11 @@ class BiosignalPreprocessor:
         ic_index : int
             Index of the independent component to plot.
         """
+        if verbose:
+            print("Consider manually selecting ICs to exclude based on the following comments:")
+            print("Muscle artifacts are localized spatially, show high-frequency power spectra with positive slopes, and have irregular spike-like time courses.")
+            print("Heartbeat components have bilateral topographies, clear spectral peaks at heartbeat frequency, and periodic variance across time.")
+            print("Noise shows non-physiological spatial patterns with narrow-band frequency peaks or broadband noise and variable variance patterns.")
         self.mne_ica_result.plot_properties(self.mne_amplitude_compliant_data, ic_index)
 
     def plot_data_overview(self):
@@ -1017,18 +1056,21 @@ class BiosignalPreprocessor:
         # if new bad channels have been (de-)selected:
         if temp_bad_channels != self.mne_amplitude_compliant_data.info['bads']:
             print('New bad channels (de-)selected, will clean downstream results.')
-            self.clean_downstream_results(change_in='amplitude thesholding')
+            self.clean_downstream_results(change_in='amplitude thresholding')
 
 if __name__ == '__main__':
     ROOT = Path().resolve().parent.parent
     QTC_DATA = ROOT / "data" / "qtc_measurements" / "2025_06"
     subject_data_dir = QTC_DATA / "sub-10"
 
-    # example run:
+    # load data:
+    print('Loading data...')
     input_file = np.load(subject_data_dir / "motor_eeg_full.npy").T
     data_modality: Literal['eeg', 'emg'] = 'eeg'
     sampling_freq = 2048  # Hz
 
+    # define prepper:
+    print('Initialising BiosignalPreprocessor...')
     prepper = BiosignalPreprocessor(
         np_input_array=input_file,
         sampling_freq=sampling_freq,
@@ -1036,6 +1078,16 @@ if __name__ == '__main__':
         band_pass_frequencies='auto',
     )
 
-    print(prepper.np_output_data)
+    #prepper.plot_data_overview()
 
-    prepper.discrete_fourier_transform(prepper.np_output_data)
+    # automatic artefact rejection:
+    _ = prepper.mne_artefact_free_data
+
+    # manual inspection of ICs:
+    for ic_ind in range(prepper.n_ica_components):
+        prepper.plot_independent_component(ic_ind,
+                                           verbose=(ic_ind==0),  # print only on first iteration
+                                           )
+
+
+    #prepper.discrete_fourier_transform(prepper.np_output_data)
