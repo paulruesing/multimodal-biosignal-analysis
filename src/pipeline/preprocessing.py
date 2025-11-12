@@ -22,7 +22,7 @@ class BiosignalPreprocessor:
 
     Parameters
     ----------
-    np_input_array : np.ndarray
+    np_input_data : np.ndarray
         Input data array of shape (timesteps, channels).
     sampling_freq : int
         Sampling frequency of the input data in Hz.
@@ -81,7 +81,7 @@ class BiosignalPreprocessor:
         Raw input data as MNE object.
     """
     def __init__(self,
-                 np_input_array: np.ndarray,  # shape: (timesteps, channels)
+                 np_input_data: np.ndarray,  # shape: (timesteps, channels)
                  sampling_freq: int,  # Hz
                  modality: Literal['eeg', 'emg'],
                  band_pass_frequencies: tuple[float, float] | Literal['auto'] = 'auto',
@@ -105,12 +105,12 @@ class BiosignalPreprocessor:
         - mne_amplitude_compliant_data
         - mne_referenced_data
         - mne_filtered_data
-        - mne_raw_data or np_input_array
+        - mne_raw_data or np_input_data
         """
         # all private attributes accessible via properties, because setting recomputes filtered data
         # import parameters:
-        assert np_input_array.shape[1] < np_input_array.shape[0], "Should be more timesteps (rows) than channels (columns)!"
-        self._np_input_array = np_input_array
+        assert np_input_data.shape[1] < np_input_data.shape[0], "Should be more timesteps (rows) than channels (columns)!"
+        self._np_input_data = np_input_data
         self._sampling_freq = sampling_freq
         self._modality = modality
 
@@ -156,7 +156,7 @@ class BiosignalPreprocessor:
             "- mne_amplitude_compliant_data\n"
             "- mne_referenced_data\n"
             "- mne_filtered_data\n"
-            "- mne_raw_data / np_input_array (raw input)\n\n"
+            "- mne_raw_data / np_input_data (raw input)\n\n"
             f"Instance details:\n"
             f"- modality: {self.modality}\n"
             f"- sampling frequency: {self.sampling_freq} Hz\n"
@@ -179,7 +179,7 @@ class BiosignalPreprocessor:
     ############# PROPERTIES #############
     ### input properties ###
     @property
-    def np_input_array(self) -> np.ndarray:
+    def np_input_data(self) -> np.ndarray:
         """
         Original input data array.
 
@@ -188,11 +188,11 @@ class BiosignalPreprocessor:
         np.ndarray
             Input data with shape (timesteps, channels).
         """
-        return self._np_input_array
+        return self._np_input_data
 
-    @np_input_array.setter
-    def np_input_array(self, np_input_array: np.ndarray):
-        self._np_input_array = np_input_array
+    @np_input_data.setter
+    def np_input_data(self, np_input_data: np.ndarray):
+        self._np_input_data = np_input_data
         self.clean_downstream_results(change_in='import')
 
     @property
@@ -232,12 +232,12 @@ class BiosignalPreprocessor:
     @property
     def n_timesteps(self) -> int:
         """ Number of timesteps (rows) of the provided input_array. """
-        return self.np_input_array.shape[0]
+        return self.np_input_data.shape[0]
 
     @property
     def n_channels(self) -> int:
         """ Number of channels (columns) of the provided input_array. """
-        return self.np_input_array.shape[1]
+        return self.np_input_data.shape[1]
 
     @property
     def band_pass_frequencies(self) -> tuple[float, float]:
@@ -359,7 +359,7 @@ class BiosignalPreprocessor:
     @n_ica_components.setter
     def n_ica_components(self, ica_components: int) -> None:
         self._n_ica_components = ica_components
-        self.clean_downstream_results(change_in='artefact rejection')
+        self.clean_downstream_results(change_in='ica computation')
 
     @property
     def automatic_ic_labelling(self) -> bool:
@@ -468,7 +468,7 @@ class BiosignalPreprocessor:
         data_info = mne.create_info(ch_names=EEG_CHANNELS,
                                     sfreq=self.sampling_freq,
                                     ch_types=self.modality,)
-        raw_data = mne.io.RawArray(self.np_input_array.T, data_info)
+        raw_data = mne.io.RawArray(self.np_input_data.T, data_info)
 
         if self.modality == 'eeg': raw_data.set_montage(mne.channels.make_standard_montage('standard_1020'))
         # todo: implement custom sEMG montage for Laplacian spatial filtering
@@ -853,7 +853,7 @@ class BiosignalPreprocessor:
 
     def clean_downstream_results(self,
                                  change_in: Literal['import', 'filtering', 'referencing', 'amplitude thresholding',
-                                 'artefact rejection', 'smoothing', 'denoising']):
+                                 'ica computation', 'artefact rejection', 'smoothing', 'denoising']):
         """
         Clear cached intermediate results downstream of a specified processing step.
 
@@ -879,7 +879,7 @@ class BiosignalPreprocessor:
         - mne_amplitude_compliant_data
         - mne_referenced_data
         - mne_filtered_data
-        - mne_raw_data or np_input_array
+        - mne_raw_data or np_input_data
         """
         if change_in.lower() == 'import':
             self._mne_raw_data = None
@@ -931,11 +931,19 @@ class BiosignalPreprocessor:
             self._denoised_wavelet_coefficients = None
             self._wavelet_coefficients = None
             self._np_output_data = None
+        elif change_in.lower() == 'ica computation':
+            self._mne_ica_results = None
+            self._ica_automatic_labels = None
+            self._np_artefact_free_data = None
+            self._mne_artefact_free_data = None
+            self._np_smoothed_data = None
+            self._np_denoised_data = None
+            self._denoised_wavelet_coefficients = None
+            self._wavelet_coefficients = None
+            self._np_output_data = None
         elif change_in.lower() == 'artefact rejection':
             self._mne_artefact_free_data = None
             self._np_artefact_free_data = None
-            self._mne_ica_results = None
-            self._ica_automatic_labels = None
             self._np_smoothed_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
@@ -1072,22 +1080,39 @@ if __name__ == '__main__':
     # define prepper:
     print('Initialising BiosignalPreprocessor...')
     prepper = BiosignalPreprocessor(
-        np_input_array=input_file,
+        np_input_data=input_file,
         sampling_freq=sampling_freq,
         modality=data_modality,
         band_pass_frequencies='auto',
     )
-
-    #prepper.plot_data_overview()
+    
+    # input plot:
+    prepper.discrete_fourier_transform(prepper.np_input_data,
+                                       sampling_freq=sampling_freq,
+                                       frequency_range=(0, 100),
+                                       plot_title='Raw Data - Fourier Spectrum',
+                                       plot_result=True,)
 
     # automatic artefact rejection:
     _ = prepper.mne_artefact_free_data
 
     # manual inspection of ICs:
-    for ic_ind in range(prepper.n_ica_components):
-        prepper.plot_independent_component(ic_ind,
-                                           verbose=(ic_ind==0),  # print only on first iteration
-                                           )
+    if input("Do you want to visualize all ICs? Press enter if yes, else type anything: ") == "":
+        for ic_ind in range(prepper.n_ica_components):
+            prepper.plot_independent_component(ic_ind,
+                                               verbose=(ic_ind==0),  # print only on first iteration
+                                               )
+    # possibility for changes:
+    manual_ics = input("Please enter additional independent components to exclude, separated by space (e.g. '10 13 7'): ")
+    if manual_ics != '':
+        manual_ics = [int(ind_str) for ind_str in manual_ics.split(' ')]
+        # change in preprocessor:
+        prepper.manual_ics_to_exclude = manual_ics  # this forces results recomputation
 
+    # output plot
+    prepper.discrete_fourier_transform(prepper.np_output_data,
+                                       sampling_freq=sampling_freq,
+                                       frequency_range=(0, 100),
+                                       plot_title='Preprocessed Data - Fourier Spectrum',
+                                       plot_result=True,)
 
-    #prepper.discrete_fourier_transform(prepper.np_output_data)
