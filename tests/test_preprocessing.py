@@ -15,7 +15,7 @@ class TestBiosignalPreprocessor:
 
         # define dummy test instance:
         self.instance = BiosignalPreprocessor(
-            np_input_array=self.input_data,
+            np_input_data=self.input_data,
             sampling_freq=self.sampling_freq,
             modality=self.modality,
         )
@@ -41,7 +41,7 @@ class TestBiosignalPreprocessor:
         ):
             # Initialize instance
             processor = BiosignalPreprocessor(
-                np_input_array=self.input_data,
+                np_input_data=self.input_data,
                 sampling_freq=self.sampling_freq,
                 modality=modality,
                 band_pass_frequencies=band_pass_freqs,
@@ -57,7 +57,7 @@ class TestBiosignalPreprocessor:
             )
 
             # Check if attributes are correctly set
-            assert np.array_equal(processor.np_input_array, self.input_data)
+            assert np.array_equal(processor.np_input_data, self.input_data)
             assert processor.band_pass_frequencies == band_pass_freqs if band_pass_freqs != 'auto' else (0.1, 100)
 
             # this could be done with a loop and assert getattr(processor, VAR_NAME) == VALUE
@@ -80,7 +80,7 @@ class TestBiosignalPreprocessor:
         """ Setting these properties should trigger clean_downstream_results with the respective category. """
         # iterate over amenable properties:
         for var_name, new_value, category in [
-            ('np_input_array', self.input_data, 'import'),
+            ('np_input_data', self.input_data, 'import'),
             ('sampling_freq', 300, 'import'),
             ('modality', 'eeg', 'import'),
             ('band_pass_frequencies', (20, 80), 'filtering'),
@@ -89,7 +89,7 @@ class TestBiosignalPreprocessor:
             ('notch_width', None, 'filtering'),
             ('reference_channels', 'average', 'referencing'),
             ('amplitude_rejection_threshold', 0.001, 'amplitude thresholding'),
-            ('n_ica_components', 25, 'artefact rejection'),
+            ('n_ica_components', 25, 'ica computation'),
             ('automatic_ic_labelling', False, 'artefact rejection'),
             ('manual_ics_to_exclude', [1, 4], 'artefact rejection'),
             ('laplacian_filter_neighbor_radius', 0.05, 'smoothing'),
@@ -125,9 +125,9 @@ class TestBiosignalPreprocessor:
             '_mne_filtered_data',  # 1: filtering
             '_mne_referenced_data',  # 2: referencing
             '_mne_amplitude_compliant_data',  # 3: amplitude thresholding
-            '_mne_artefact_free_data',  # 4: artefact rejection
-            '_mne_ica_results',
+            '_mne_ica_results',  # 4: ica computation
             '_ica_automatic_labels',
+            '_mne_artefact_free_data',  # 6: artefact rejection
             '_np_artefact_free_data',
             '_np_smoothed_data',  # 8: smoothing
             '_np_denoised_data',  # 9: denoising
@@ -138,7 +138,8 @@ class TestBiosignalPreprocessor:
             ('filtering', 1),
             ('referencing', 2),
             ('amplitude thresholding', 3),
-            ('artefact rejection', 4),
+            ('ica computation', 4),
+            ('artefact rejection', 6),
             ('smoothing', 8),
             ('denoising', 9),
         ]:
