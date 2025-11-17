@@ -11,10 +11,14 @@ import pywt
 import mne
 import mne_icalabel
 import pywt
-from scipy.signal import butter, filtfilt, iirnotch, welch, csd
+from scipy import signal
 
+import src.pipeline.signal_features as features
+import src.pipeline.data_surrogation as surrogation
 from src.pipeline.visualizations import plot_eeg_heatmap, plot_freq_domain, EEG_CHANNELS
 import src.utils.file_management as filemgmt
+
+EEG_CHANNEL_IND_DICT = {ch: ind+1 for ind, ch in enumerate(EEG_CHANNELS)}
 
 class BiosignalPreprocessor:
     """
@@ -65,7 +69,7 @@ class BiosignalPreprocessor:
         The final preprocessed output data.
     np_denoised_data : np.ndarray
         Wavelet denoised data.
-    np_smoothed_data : np.ndarray
+    np_spatially_filtered_data : np.ndarray
         Smoothed data after Laplacian filtering.
     mne_artefact_free_data : mne.io.Raw
         ICA-filtered artefact-free MNE data.
@@ -100,7 +104,7 @@ class BiosignalPreprocessor:
         Properties follow hierarchical logic (higher ones containing filtering steps pertaining to lower ones):
         - np_output_data
         - np_denoised_data
-        - np_smoothed_data
+        - np_spatially_filtered_data
         - mne_artefact_free_data or np_artefact_free_data
         - mne_amplitude_compliant_data
         - mne_referenced_data
@@ -134,7 +138,7 @@ class BiosignalPreprocessor:
         self._mne_referenced_data = self._mne_raw_data = None
         self._mne_ica_result = self._ica_automatic_labels = self._mne_artefact_free_data = None
         # np type:
-        self._np_artefact_free_data = self._np_smoothed_data = None
+        self._np_artefact_free_data = self._np_spatially_filtered_data = None
         self._np_denoised_data = self._np_output_data = None
         # others:
         self._wavelet_coefficients = self._denoised_wavelet_coefficients = None
@@ -151,7 +155,7 @@ class BiosignalPreprocessor:
             "Access properties in hierarchical order for each step:\n"
             "- np_output_data (final output)\n"
             "- np_denoised_data\n"
-            "- np_smoothed_data\n"
+            "- np_spatially_filtered_data\n"
             "- mne_artefact_free_data / np_artefact_free_data\n"
             "- mne_amplitude_compliant_data\n"
             "- mne_referenced_data\n"
@@ -453,7 +457,7 @@ class BiosignalPreprocessor:
 
     ### calculation-based properties ###
     @property
-    def mne_raw_data(self):
+    def mne_raw_data(self) -> mne.io.RawArray:
         """
         Raw biosignal data as an MNE Raw object.
 
@@ -477,7 +481,7 @@ class BiosignalPreprocessor:
         return self._mne_raw_data
 
     @property
-    def mne_filtered_data(self):
+    def mne_filtered_data(self) -> mne.io.RawArray:
         """
         Band-pass and notch filtered data in MNE Raw format.
 
@@ -498,7 +502,7 @@ class BiosignalPreprocessor:
         return self._mne_filtered_data
 
     @property
-    def mne_referenced_data(self):
+    def mne_referenced_data(self) -> mne.io.RawArray:
         """
         Re-referenced MNE data.
 
@@ -518,7 +522,7 @@ class BiosignalPreprocessor:
         return self._mne_referenced_data
 
     @property
-    def mne_amplitude_compliant_data(self):
+    def mne_amplitude_compliant_data(self) -> mne.io.RawArray:
         """
         Data after amplitude-based artifact detection and annotation.
 
@@ -534,7 +538,7 @@ class BiosignalPreprocessor:
 
         self._mne_amplitude_compliant_data = self.mne_referenced_data.copy()
         # annotate bad segments and discover bad channels based on amplitude thresholding:
-        self._annotate_amplitude_based_artefacts()
+        _ = self._annotate_amplitude_based_artefacts()  # returns bad channels -> not needed
         return self._mne_amplitude_compliant_data
 
     @property
@@ -580,7 +584,7 @@ class BiosignalPreprocessor:
         return self._mne_ica_result
 
     @property
-    def mne_artefact_free_data(self):
+    def mne_artefact_free_data(self) -> mne.io.RawArray:
         """
         Artefact-free data after ICA component exclusion.
 
@@ -639,9 +643,9 @@ class BiosignalPreprocessor:
         return self._np_artefact_free_data
 
     @property
-    def np_smoothed_data(self) -> np.ndarray:
+    def np_spatially_filtered_data(self) -> np.ndarray:
         """
-        Smoothed data after Laplacian spatial filtering.
+        Spatially sharpened data after Laplacian spatial filtering.
 
         Returns
         -------
@@ -653,26 +657,12 @@ class BiosignalPreprocessor:
         Laplacian filtering is only applied for EEG modality when a neighbor radius is set;
         otherwise returns artefact-free data unchanged.
         """
-        if self._np_smoothed_data is not None: return self._np_smoothed_data
+        if self._np_spatially_filtered_data is not None: return self._np_spatially_filtered_data
 
         # reasons to omit Laplacian spatial filtering:
         if self.laplacian_filter_neighbor_radius is None: return self.np_artefact_free_data
-        if self.modality == 'emg':
-            print("Laplacian spatial filtering for EMG data is not implemented yet (requires 3D positional electrode mapping). Data remains unchanged.")
-            return self.np_artefact_free_data
 
-        # compute:
-        _ = self.mne_artefact_free_data.get_montage()  # checks whether montage was provided
-        pos = np.array([self.mne_artefact_free_data.info['chs'][i]['loc'][:3] for i in range(len(self.mne_artefact_free_data.ch_names))])  # 3D coords of channels
-
-        # identify proximal EEG channels based on positional mapping:
-        neighbors = []
-        for i, pos_i in enumerate(pos):
-            dists = np.linalg.norm(pos - pos_i,
-                                   axis=1)  # compute Euclidean dist from current electrode to all others
-            # find neighbors by: excluding self and keeping channels within radius
-            neigh = np.where((dists > 0) & (dists < self.laplacian_filter_neighbor_radius))[0]
-            neighbors.append(neigh)
+        neighbors = self.get_neighboring_electrodes_mapping()
 
         # Compute Laplacian-filtered data:
         laplacian_data = np.zeros_like(self.np_artefact_free_data)  # prepare output array
@@ -682,8 +672,8 @@ class BiosignalPreprocessor:
             else:  # no neighbors: keep original:
                 laplacian_data[:, i] = self.np_artefact_free_data[:, i]
 
-        self._np_smoothed_data = laplacian_data
-        return self._np_smoothed_data
+        self._np_spatially_filtered_data = laplacian_data
+        return self._np_spatially_filtered_data
 
     @property
     def wavelet_coefficients(self) ->  list[np.ndarray[np.ndarray[float]]]:
@@ -704,11 +694,11 @@ class BiosignalPreprocessor:
         if self.wavelet_type is None: raise ValueError("wavelet_type needs to be defined.")
 
         # implement computation:
-        max_level = pywt.dwt_max_level(len(self.np_smoothed_data),
+        max_level = pywt.dwt_max_level(len(self.np_spatially_filtered_data),
                                        pywt.Wavelet(self.wavelet_type).dec_len)  # up to which level to decompose
 
         # compute wavelet coefficients:
-        self._wavelet_coefficients = pywt.wavedec(self.np_smoothed_data, self.wavelet_type,
+        self._wavelet_coefficients = pywt.wavedec(self.np_spatially_filtered_data, self.wavelet_type,
                             level=max_level)
         return self._wavelet_coefficients
 
@@ -771,7 +761,7 @@ class BiosignalPreprocessor:
         if self._np_denoised_data is not None: return self._np_denoised_data
 
         # skip computation if:
-        if self.wavelet_type is None: return self.np_smoothed_data
+        if self.wavelet_type is None: return self.np_spatially_filtered_data
 
         # compute and return:
         self._np_denoised_data = pywt.waverec(self.denoised_wavelet_coefficients, self.wavelet_type)
@@ -803,13 +793,54 @@ class BiosignalPreprocessor:
             elif step == 'referencing': _ = self.mne_referenced_data
             elif step == 'amplitude thresholding': _ = self.mne_amplitude_compliant_data
             elif step == 'artefact rejection': _ = self.np_artefact_free_data
-            elif step == 'smoothing': _ = self.np_smoothed_data
+            elif step == 'smoothing': _ = self.np_spatially_filtered_data
             elif step == 'denoising': _ = self.np_denoised_data
 
         self._np_output_data = self.np_denoised_data
         return self._np_output_data
 
     ############# PREPROCESSING METHODS #############
+    @staticmethod
+    def mne_to_numpy(mne_data: mne.io.RawArray) -> np.ndarray:
+        return mne_data.get_data().T
+
+    @staticmethod
+    def numpty_to_mne(np_data: np.ndarray,
+                      sampling_freq: float,
+                      modality: Literal['eeg', 'emg'],
+                      ) -> mne.io.RawArray:
+        data_info = mne.create_info(ch_names=EEG_CHANNELS,
+                                    sfreq=sampling_freq,
+                                    ch_types=modality, )
+        return mne.io.RawArray(np_data.T, data_info)
+
+    def get_neighboring_electrodes_mapping(self) -> list[list[int]]:
+        """
+        Derives neighboring electrodes based on mne-montage (3d montage information) and
+        laplacian_filter_neighbor_radius radius threshold.
+
+        Returns a list (length = n_channels) containing lists of neighbors per channel (electrode).
+        """
+        # sanity checks
+        if self.laplacian_filter_neighbor_radius is None:
+            raise ValueError("laplacian_filter_neighbor_radius needs to be defined!")
+        if self.modality == 'emg':
+            raise ValueError("Laplacian spatial filtering for EMG data is not implemented yet (requires 3D positional electrode mapping). Data remains unchanged.")
+
+        # compute:
+        _ = self.mne_artefact_free_data.get_montage()  # checks whether montage was provided
+        pos = np.array([self.mne_artefact_free_data.info['chs'][i]['loc'][:3] for i in range(len(self.mne_artefact_free_data.ch_names))])  # 3D coords of channels
+
+        # identify proximal EEG channels based on positional mapping:
+        neighbors = []
+        for i, pos_i in enumerate(pos):
+            dists = np.linalg.norm(pos - pos_i,
+                                   axis=1)  # compute Euclidean dist from current electrode to all others
+            # find neighbors by: excluding self and keeping channels within radius
+            neigh = np.where((dists > 0) & (dists < self.laplacian_filter_neighbor_radius))[0]
+            neighbors.append(neigh.tolist())  # store as list
+        return neighbors
+
     def _apply_notch_filter(self):
         """
         Apply notch filters to remove electrical interference frequencies.
@@ -825,10 +856,13 @@ class BiosignalPreprocessor:
             picks='all', notch_widths=self.notch_width)
 
     def _annotate_amplitude_based_artefacts(self,
+                                            input_mne_data: mne.io.RawArray | None = None,
                                             min_duration: float = .025,
-                                            max_bad_segments_percent: float = 5):
+                                            max_bad_segments_percent: float = 5,
+                                            inplace: bool = True) -> list[int]:
         """
         Annotate data segments and channels with amplitude-based artefacts.
+        Initialise self._mne_amplitude_compliant_data beforehand because this will be annotated.
 
         Raises
         ------
@@ -836,11 +870,15 @@ class BiosignalPreprocessor:
             If `amplitude_rejection_threshold` is not defined.
         """
         if self.amplitude_rejection_threshold is None: raise ValueError("amplitude_rejection_threshold needs to be defined!")
+        # if inplace: uses _mne_amplitude_compliant_data even though input_mne_data provided
+        use_internal_data = input_mne_data is None or inplace
+        if self._mne_amplitude_compliant_data is None and use_internal_data:
+            raise ValueError("If inplace operation is desired, _mne_amplitude_compliant_data needs to be initialised beforehand!")
         reject_criteria = dict(eeg=self.amplitude_rejection_threshold, emg=self.amplitude_rejection_threshold)
 
         # derive annotations:
         annotations, bad_channels = mne.preprocessing.annotate_amplitude(
-            self._mne_amplitude_compliant_data,
+            self._mne_amplitude_compliant_data if use_internal_data else input_mne_data,
             peak=reject_criteria,
             min_duration=min_duration,  # minimum duration for consecutive samples to exceed or fall below threshold
             bad_percent=max_bad_segments_percent,  # channels with more bad segments will be marked as complete bad channels
@@ -848,8 +886,13 @@ class BiosignalPreprocessor:
         print(f"Found {len(bad_channels)} bad channels.")
 
         # save result:
-        self._mne_amplitude_compliant_data.set_annotations(annotations)
-        self._mne_amplitude_compliant_data.info['bads'].extend(bad_channels)
+        if inplace:
+            self._mne_amplitude_compliant_data.set_annotations(annotations)
+            self._mne_amplitude_compliant_data.info['bads'].extend(bad_channels)
+
+        # convert to indices (starting at 1 and return):
+        bad_channel_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in bad_channels]
+        return bad_channel_inds
 
     def clean_downstream_results(self,
                                  change_in: Literal['import', 'filtering', 'referencing', 'amplitude thresholding',
@@ -874,7 +917,7 @@ class BiosignalPreprocessor:
         Properties follow hierarchical logic (higher ones containing filtering steps pertaining to lower ones):
         - np_output_data
         - np_denoised_data
-        - np_smoothed_data
+        - np_spatially_filtered_data
         - mne_artefact_free_data or np_artefact_free_data
         - mne_amplitude_compliant_data
         - mne_referenced_data
@@ -890,7 +933,7 @@ class BiosignalPreprocessor:
             self._np_artefact_free_data = None
             self._mne_ica_results = None
             self._ica_automatic_labels = None
-            self._np_smoothed_data = None
+            self._np_spatially_filtered_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
             self._wavelet_coefficients = None
@@ -903,7 +946,7 @@ class BiosignalPreprocessor:
             self._np_artefact_free_data = None
             self._mne_ica_results = None
             self._ica_automatic_labels = None
-            self._np_smoothed_data = None
+            self._np_spatially_filtered_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
             self._wavelet_coefficients = None
@@ -915,7 +958,7 @@ class BiosignalPreprocessor:
             self._np_artefact_free_data = None
             self._mne_ica_results = None
             self._ica_automatic_labels = None
-            self._np_smoothed_data = None
+            self._np_spatially_filtered_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
             self._wavelet_coefficients = None
@@ -926,7 +969,7 @@ class BiosignalPreprocessor:
             self._np_artefact_free_data = None
             self._mne_ica_results = None
             self._ica_automatic_labels = None
-            self._np_smoothed_data = None
+            self._np_spatially_filtered_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
             self._wavelet_coefficients = None
@@ -936,7 +979,7 @@ class BiosignalPreprocessor:
             self._ica_automatic_labels = None
             self._np_artefact_free_data = None
             self._mne_artefact_free_data = None
-            self._np_smoothed_data = None
+            self._np_spatially_filtered_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
             self._wavelet_coefficients = None
@@ -944,13 +987,13 @@ class BiosignalPreprocessor:
         elif change_in.lower() == 'artefact rejection':
             self._mne_artefact_free_data = None
             self._np_artefact_free_data = None
-            self._np_smoothed_data = None
+            self._np_spatially_filtered_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
             self._wavelet_coefficients = None
             self._np_output_data = None
         elif change_in.lower() == 'smoothing':
-            self._np_smoothed_data = None
+            self._np_spatially_filtered_data = None
             self._np_denoised_data = None
             self._denoised_wavelet_coefficients = None
             self._wavelet_coefficients = None
@@ -963,7 +1006,7 @@ class BiosignalPreprocessor:
         else: raise ValueError(f"change_in category: '{change_in}' is undefined!")
 
     def export_results(self, save_dir: Path | str, identifier: str = None) -> None:
-        """ Exports results to .npy """
+        """ Exports results (np_output_data) to .npy """
         # prepare save-title:
         title = f"Preprocessed {self.modality} {self.n_channels}ch {self.n_timesteps/self.sampling_freq}sec"
         if identifier is not None: title += f" ({identifier})"
@@ -972,63 +1015,160 @@ class BiosignalPreprocessor:
         np.save(save_path, self.np_output_data)
         print('Saved results to ', save_path)
 
-    @staticmethod
-    def discrete_fourier_transform(input_array: np.ndarray,
-                                   sampling_freq: int,
-                                   axis: Literal[0, 1] = 0, plot_result: bool = True, **plot_kwargs) -> tuple[np.ndarray, np.ndarray]:
+    ############# VALIDATION METHODS #############
+    def validate_filtering(self,
+                           target_freq: float = 21.5,
+                           freq_window: float = 8.5,
+                           verbose: bool = True) -> tuple[float, float]:
+        """ To be commented.
+        Returns increase in SNR (based on target freq.) due to filtering.
+        Default arguments are CMC-reelvant beta band: 21.5±8.5 Hz
         """
-        Compute the discrete Fourier transform (DFT) of the input signal.
+        ### SNR improvement:
+        # compute SNR for np.input_data:
+        input_snr = features.compute_spectral_snr(self.np_input_data,
+                                            self.sampling_freq,
+                                            target_freq=target_freq, freq_window=freq_window)
 
-        Parameters
-        ----------
-        input_array : np.ndarray
-            Input signal array (can be 1D or 2D).
-        sampling_freq : int
-            Data sampling frequency (Hz).
-        axis : {0, 1}, optional
-            Axis along which to compute the DFT for 2D input. Default is 0.
-        plot_result : bool, optional
-            Whether to plot the amplitude spectrum. Default is True.
-        **plot_kwargs
-            Additional keyword arguments to pass to the plotting function.
+        # compute SNR for mne_filtered_data (band pass and notch)
+        filtered_snr = features.compute_spectral_snr(self.mne_to_numpy(self.mne_filtered_data),
+                                            self.sampling_freq,
+                                            target_freq=target_freq, freq_window=freq_window)
+        snr_improvement = filtered_snr - input_snr
+        if verbose: print(f'[VALIDATION] Target-band SNR improvement due to filtering: {snr_improvement:.3f} dB (now {filtered_snr:.3f} dB)')
 
-        Returns
-        -------
-        amplitude_spectrum : np.ndarray
-            Magnitude of the DFT for positive frequencies.
-        freqs_pos : np.ndarray
-            Corresponding positive frequency bins in Hz.
+        ### PSD consistency:
+        # calculate PSDs:
+        raw_freqs, raw_psd = signal.welch(self.np_input_data, axis=0,
+                                          fs=self.sampling_freq, nperseg=self.sampling_freq * 4,  # 4-second window
+                                          )
+        filtered_freqs, filtered_psd = signal.welch(self.mne_to_numpy(self.mne_filtered_data), axis=0,
+                                          fs=self.sampling_freq, nperseg=self.sampling_freq * 4,  # 4-second window
+                                          )
 
-        Raises
-        ------
-        AttributeError
-            If axis is not specified for 2D input.
-        """
-        # input sanity checks:
-        if len(input_array.shape) == 1:
-            input_array = input_array[:, np.newaxis]
-            if axis is None: axis = 0
-        else:
-            if axis is None: raise AttributeError("For 2D signal arrays, axis needs to be defined!")
+        # define target band:
+        assert np.array_equal(raw_freqs,filtered_freqs), "PSD result frequencies should be equivalent between un- and pre-processed data."
+        target_band = (raw_freqs < target_freq + freq_window) & (raw_freqs > target_freq - freq_window)
 
-        # descriptive parameters:
-        n_samples = input_array.shape[axis]
+        # compare mean PSD in target band:
+        raw_mean_psd = 10 * np.log10(np.mean(raw_psd[target_band]))
+        filtered_mean_psd = 10 * np.log10(np.mean(filtered_psd[target_band]))
+        psd_difference = filtered_mean_psd - raw_mean_psd
+        if verbose: print(f'[VALIDATION] Target-band PSD difference due to filtering: {psd_difference:.3f} dB')
 
-        # compute discrete FT with FFT algorithm:
-        fft_result = np.fft.fft(input_array, axis=axis)  # shape is as input
-        freqs_fft = np.fft.fftfreq(n_samples, d=1/sampling_freq)    # frequency bin labels [Hz]
+        # return both differences:
+        return snr_improvement, psd_difference
 
-        # retain only positive frequencies (FFT of real-valued signals is symmetric)
-        freqs_pos = freqs_fft[freqs_fft >= 0]
-        fft_pos = fft_result[freqs_fft >= 0, :] if axis == 0 else fft_result[:, freqs_fft >= 0]
+    def validate_referencing(self,
+                             target_freq: float = 21.5,
+                             freq_window: float = 8.5,
+                             verbose: bool = True,
+                            ) -> float:
+        # compute SNR for mne_filtered_data (band pass and optionally notch):
+        input_snr = features.compute_spectral_snr(self.mne_to_numpy(self.mne_filtered_data),
+                                                  self.sampling_freq,
+                                                  target_freq=target_freq, freq_window=freq_window)
 
-        # compute magnitude:
-        amplitude_spectrum = np.abs(fft_pos) * 2 / n_samples  # normalize amplitude by 2/n_samples
+        # compute SNR for mne_referenced_data (re-referenced):
+        filtered_snr = features.compute_spectral_snr(self.mne_to_numpy(self.mne_referenced_data),
+                                                     self.sampling_freq,
+                                                     target_freq=target_freq, freq_window=freq_window)
+        snr_improvement = filtered_snr - input_snr
+        if verbose: print(f'[VALIDATION] Target-band SNR improvement due to referencing: {snr_improvement:.3f} dB (now {filtered_snr:.3f} dB)')
+        return snr_improvement
 
-        # eventually plot:
-        if plot_result: plot_freq_domain(amplitude_spectrum, freqs_pos, **plot_kwargs)
+    def validate_amplitude_thresholding(self,
+                                        n_runs: int = 10,
+                                        verbose: bool = True) -> tuple[float, float]:
+        """ Returns specificity (= true neg. rate) and selectivity (= true pos. rate) for surrogate bad channel recognition based on amplitude thresholding. """
+        all_channels = [i + 1 for i in range(self.n_channels)]
+        specificity_list = []; selectivity_list = []
+        # iterative procedure, to average specificity / selectivity metrics:
+        for trial in range(n_runs):
+            # create surrogate:
+            surrogate, amended_channels = surrogation.insert_bad_channels(self.mne_to_numpy(self.mne_referenced_data),
+                                                        axis=0, scale_range=(5, 15))
+            unchanged_channels = [ch for ch in all_channels if ch not in amended_channels]
 
-        return amplitude_spectrum, freqs_pos
+            # detect bad channels:
+            detected_bad_channels = self._annotate_amplitude_based_artefacts(input_mne_data=self.numpty_to_mne(surrogate,
+                                                                                                               self.sampling_freq,
+                                                                                                               self.modality),
+                                                                             inplace=False)
+
+            # compute metrics (positive = detected as bad)
+            false_positives = [ch for ch in unchanged_channels if ch in detected_bad_channels]
+            true_positives = [ch for ch in amended_channels if ch in detected_bad_channels]
+            false_negatives = [ch for ch in amended_channels if ch not in detected_bad_channels]
+            true_negatives = [ch for ch in unchanged_channels if ch not in detected_bad_channels]
+
+            # specificity = true_neg / (true_neg + false_pos) = 1 - false_pos_rate
+            specificity_list.append(len(true_negatives) / (len(true_negatives) + len(false_positives)))
+            # selectivity = true_pos / (true_pos + false_neg) = 1 - false_neg_rate
+            selectivity_list.append(len(true_positives) / (len(true_positives) + len(false_negatives)))
+
+        # average and return metrics:
+        specificity = np.nanmean(specificity_list).item(); selectivity = np.nanmean(selectivity_list).item()
+        if verbose: print(f'[VALIDATION] Amplitude-Thresholding for Bad Channel Detection:\n\tSpecificity (true neg.): {specificity:.3f}\n\tSelectivity (true pos.): {selectivity:.3f}')
+        return np.nanmean(specificity_list).item(), np.nanmean(selectivity_list).item()
+
+    # todo: validate_artefact_rejection (trial-to-trial variability)
+    # later, when multi-trial data is processed
+
+    def validate_spatial_filtering(self, verbose: bool = True) -> float:
+        """ Only works for EEG currently. Averages coherence over all frequencies. """
+        # derive neighbors (based on 3d-positional information from MNE and laplacian_filter_neighbor_radius):
+        neighbor_mapping = self.get_neighboring_electrodes_mapping()
+
+        # compute average magn. squared coherence with neighboring electrodes before and after spatial filtering:
+        if verbose: print(f"[VALIDATION] Computing local coherence for all electrodes before and after spatial filtering...")
+        for step_ind, data in enumerate([self.np_artefact_free_data, self.np_spatially_filtered_data]):
+            ch_local_coherences = []  # average neighbor coherence list
+            for ch_ind, neighbors in enumerate(tqdm(neighbor_mapping)):  # takes ~2-5s per electrode:
+                pairwise_coherences = []  # pairwise coherence list
+                for neighbor_ind in neighbors:
+                    # compute pairwise coherence (magn. squared -> stationary, non-time-lagged):
+                    freqs, coh = signal.coherence(x=data[:, ch_ind],
+                                                  y=data[:, neighbor_ind],
+                                                  fs=self.sampling_freq, axis=0)
+                    # average over all frequencies (might be changed down the road):
+                    pairwise_coherences.append(np.nanmean(coh))
+
+                # average over neighbors:
+                ch_local_coherences.append(np.nanmean(pairwise_coherences))
+
+            # average over electrodes and store depending on which data was used:
+            if step_ind == 0:  # before
+                local_coherence_before = np.nanmean(ch_local_coherences).item()
+                if verbose: print(f"[VALIDATION] Local Mag.Sq. Coherence BEFORE spatial filtering: {local_coherence_before:.3f}")
+            elif step_ind == 1:  # after
+                local_coherence_after = np.nanmean(ch_local_coherences).item()
+                if verbose: print(f"[VALIDATION] Local Mag.Sq. Coherence AFTER spatial filtering: {local_coherence_after:.3f}")
+
+        # compute coherence diff:
+        coh_diff = local_coherence_after - local_coherence_before
+        if verbose: print(f"[VALIDATION] Local coherence (~cross talk) hence changed by: {coh_diff:.3f}")
+        return coh_diff
+
+    # todo: think how to include surrogate data here
+    def validate_wavelet_denoising(self,
+                                   target_freq: float = 21.5,
+                                   freq_window: float = 8.5,
+                                   verbose: bool = True, ) -> float:
+        """ Noise is defined as frequencies outside the target band. Default target freq. is 21.5 ±8.5 Hz. """
+        # compute SNR for spatially filtered data (step before):
+        input_snr = features.compute_spectral_snr(self.np_spatially_filtered_data,
+                                                  self.sampling_freq,
+                                                  target_freq=target_freq, freq_window=freq_window)
+
+        # compute SNR for wavelet denoised data:
+        filtered_snr = features.compute_spectral_snr(self.np_denoised_data,
+                                                     self.sampling_freq,
+                                                     target_freq=target_freq, freq_window=freq_window)
+        snr_improvement = filtered_snr - input_snr
+        if verbose: print(
+            f'[VALIDATION] Target-band SNR improvement due to wavelet denoising: {snr_improvement:.3f} dB (now {filtered_snr:.3f} dB)')
+        return snr_improvement
 
     ############# PLOTTING METHODS #############
     def plot_independent_component(self, ic_index: int, verbose: bool = True):
@@ -1073,7 +1213,7 @@ if __name__ == '__main__':
 
     # load data:
     print('Loading data...')
-    input_file = np.load(subject_data_dir / "motor_eeg_full.npy").T
+    input_file = np.load(subject_data_dir / "motor_eeg_full.npy").T[:2048*60, :]  # 1 minute
     data_modality: Literal['eeg', 'emg'] = 'eeg'
     sampling_freq = 2048  # Hz
 
@@ -1085,13 +1225,23 @@ if __name__ == '__main__':
         modality=data_modality,
         band_pass_frequencies='auto',
     )
-    
+
+
+    ##### START DEVELOPMENT SECTION
+    filt_snr_increase, filt_psd_diff = prepper.validate_filtering()
+    ref_snr_increase = prepper.validate_referencing()
+    specificity, selectivity = prepper.validate_amplitude_thresholding()
+    spat_filt_local_coh_decrease = prepper.validate_spatial_filtering()
+    denoise_snr_increase = prepper.validate_wavelet_denoising()
+    quit()
+    ##### END DEVELOPMENT SECTION
+
     # input plot:
-    prepper.discrete_fourier_transform(prepper.np_input_data,
-                                       sampling_freq=sampling_freq,
-                                       frequency_range=(0, 100),
-                                       plot_title='Raw Data - Fourier Spectrum',
-                                       plot_result=True,)
+    features.discrete_fourier_transform(prepper.np_input_data,
+                                           sampling_freq=sampling_freq,
+                                           frequency_range=(0, 100),
+                                           plot_title='Raw Data - Fourier Spectrum',
+                                           plot_result=True, )
 
     # automatic artefact rejection:
     _ = prepper.mne_artefact_free_data
@@ -1100,19 +1250,18 @@ if __name__ == '__main__':
     if input("Do you want to visualize all ICs? Press enter if yes, else type anything: ") == "":
         for ic_ind in range(prepper.n_ica_components):
             prepper.plot_independent_component(ic_ind,
-                                               verbose=(ic_ind==0),  # print only on first iteration
+                                               verbose=(ic_ind == 0),  # print only on first iteration
                                                )
     # possibility for changes:
-    manual_ics = input("Please enter additional independent components to exclude, separated by space (e.g. '10 13 7'): ")
+    manual_ics = input(
+        "Please enter additional independent components to exclude, separated by space (e.g. '10 13 7'): ")
     if manual_ics != '':
-        manual_ics = [int(ind_str) for ind_str in manual_ics.split(' ')]
-        # change in preprocessor:
-        prepper.manual_ics_to_exclude = manual_ics  # this forces results recomputation
+        manual_ics = [int(ind_str) for ind_str in manual_ics]
+    prepper.manual_ics_to_exclude = manual_ics
 
-    # output plot
-    prepper.discrete_fourier_transform(prepper.np_output_data,
-                                       sampling_freq=sampling_freq,
-                                       frequency_range=(0, 100),
-                                       plot_title='Preprocessed Data - Fourier Spectrum',
-                                       plot_result=True,)
-
+    # output plot:
+    features.discrete_fourier_transform(prepper.np_output_data,
+                                        sampling_freq=sampling_freq,
+                                        frequency_range=(0, 100),
+                                        plot_title='Preprocessed Data - Fourier Spectrum',
+                                        plot_result=True)
