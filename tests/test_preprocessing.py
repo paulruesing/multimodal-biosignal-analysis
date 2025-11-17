@@ -2,16 +2,19 @@ import pytest
 
 from unittest.mock import patch, MagicMock
 import numpy as np
+from typing import Literal
+import mne
+import re
 from src.pipeline.preprocessing import BiosignalPreprocessor
 
 ################### Test BiosignalPreprocessor ###################
 class TestBiosignalPreprocessor:
     def setup_method(self):
         # Create dummy input data with shape (timesteps, channels)
-        timesteps = 1000; channels = 64
+        timesteps = 10000; channels = 64
         self.input_data = np.random.randn(timesteps, channels)  # 1000 timesteps, 8 channels
-        self.sampling_freq = 256
-        self.modality = 'eeg'
+        self.sampling_freq = 2048
+        self.modality: Literal['eeg', 'emg'] = 'eeg'
 
         # define dummy test instance:
         self.instance = BiosignalPreprocessor(
@@ -129,7 +132,7 @@ class TestBiosignalPreprocessor:
             '_ica_automatic_labels',
             '_mne_artefact_free_data',  # 6: artefact rejection
             '_np_artefact_free_data',
-            '_np_smoothed_data',  # 8: smoothing
+            '_np_spatially_filtered_data',  # 8: smoothing
             '_np_denoised_data',  # 9: denoising
             '_np_output_data',
         ]
@@ -167,6 +170,7 @@ class TestBiosignalPreprocessor:
         with pytest.raises(ValueError, match="amplitude_rejection_threshold needs to be defined!"):
             self.instance._annotate_amplitude_based_artefacts()
 
+    # todo: test annotate amplitude based artefacts inplace=True!
 
     def test_apply_notch_filter_raises_error(self):
         """ Raises ValueError for missing input. """
@@ -174,3 +178,33 @@ class TestBiosignalPreprocessor:
         self.instance.notch_frequency = None
         with pytest.raises(ValueError, match="notch_frequency needs to be defined!"):
             self.instance._apply_notch_filter()
+
+    def test_mne_to_numpy(self):
+        np_data = self.instance.mne_to_numpy(self.instance.mne_raw_data)
+        assert isinstance(np_data, np.ndarray), "mne_to_numpy method didn't return a numpy array."
+
+    def test_numpy_to_mne(self):
+        mne_data = self.instance.numpty_to_mne(self.input_data, sampling_freq=self.sampling_freq, modality=self.modality)
+        assert isinstance(mne_data, (mne.io.RawArray, mne.io.Raw)), "numpy_to_mne method didn't return an mne object."
+
+    def test_get_neighboring_electrodes_mapping(self):
+        """ Should raise errors for laplacian_filter_neighbor_radius=None and modality='emg'. Should return list of lists of ints."""
+        self.instance.n_ica_components = None  # ensures ICA is skipped
+
+        # test EMG sanity check:
+        self.instance.modality = 'emg'
+        with pytest.raises(ValueError, match=re.escape("Laplacian spatial filtering for EMG data is not implemented yet (requires 3D positional electrode mapping). Data remains unchanged.")):
+            # parentheses are grouping expressions in RE -> use re.escape
+            self.instance.get_neighboring_electrodes_mapping()
+        self.instance.modality = 'eeg'
+
+        # test neighbor radius sanity check:
+        self.instance.laplacian_filter_neighbor_radius = None
+        with pytest.raises(ValueError, match="laplacian_filter_neighbor_radius needs to be defined!"):
+            self.instance.get_neighboring_electrodes_mapping()
+        self.instance.laplacian_filter_neighbor_radius = .05  # default value
+
+        # test return value:
+        neighbor_mapping = self.instance.get_neighboring_electrodes_mapping()
+        neighbor_mapping = [entry for entry in neighbor_mapping if entry is not None and len(entry) != 0]  # skip NaNs
+        assert isinstance(neighbor_mapping, list) and isinstance(neighbor_mapping[0], list) and isinstance(neighbor_mapping[0][0], int)
