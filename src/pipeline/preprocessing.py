@@ -15,10 +15,9 @@ from scipy import signal
 
 import src.pipeline.signal_features as features
 import src.pipeline.data_surrogation as surrogation
-from src.pipeline.visualizations import plot_eeg_heatmap, plot_freq_domain, EEG_CHANNELS
+from src.pipeline.visualizations import plot_eeg_heatmap, plot_freq_domain, EEG_CHANNELS, EEG_CHANNEL_IND_DICT
 import src.utils.file_management as filemgmt
 
-EEG_CHANNEL_IND_DICT = {ch: ind+1 for ind, ch in enumerate(EEG_CHANNELS)}
 
 class BiosignalPreprocessor:
     """
@@ -604,14 +603,14 @@ class BiosignalPreprocessor:
                 self.mne_amplitude_compliant_data,
                                                              self.mne_ica_result, method='iclabel')
         probs, labels = self._ica_automatic_labels.values()
-        print("Found the following IC labels:\n", labels)
+        mne.utils.logger.info("Found the following IC labels:\n", labels)
         labels_to_exclude = ('heart beat', 'muscle artifact', 'channel noise')
         automatically_excluded_ics = [idx for idx, label in enumerate(labels) if label in labels_to_exclude]
-        print(f"Will exclude {labels_to_exclude} ICs, that are: ", automatically_excluded_ics)
+        mne.utils.logger.info(f"Will exclude {labels_to_exclude} ICs, that are: ", automatically_excluded_ics)
 
         # exclude such. we can access the private variable _mne_ica... here because we ensured it's computed by accessing the property above
         exclusion_list = automatically_excluded_ics + self.manual_ics_to_exclude
-        print(f'Also excluding manual set ICs: {self.manual_ics_to_exclude}\n(change this selection via manual_ics_to_exclude parameter)')
+        mne.utils.logger.info(f'Also excluding manual set ICs: {self.manual_ics_to_exclude}\n(change this selection via manual_ics_to_exclude parameter)')
         # set conversion interim to prevent duplicates
         self._mne_ica_result.exclude = list(set(exclusion_list))
 
@@ -638,7 +637,7 @@ class BiosignalPreprocessor:
 
         # compute:
         self._np_artefact_free_data = self.mne_artefact_free_data.get_data().T
-        print(f'np data also contains bad channels ({self.bad_channels}).\nConsider excluding such manually!')
+        mne.utils.logger.info(f'np data also contains bad channels ({self.bad_channels}).\nConsider excluding such manually!')
 
         return self._np_artefact_free_data
 
@@ -859,7 +858,7 @@ class BiosignalPreprocessor:
                                             input_mne_data: mne.io.RawArray | None = None,
                                             min_duration: float = .025,
                                             max_bad_segments_percent: float = 5,
-                                            inplace: bool = True) -> list[int]:
+                                            inplace: bool = True, ) -> list[int]:
         """
         Annotate data segments and channels with amplitude-based artefacts.
         Initialise self._mne_amplitude_compliant_data beforehand because this will be annotated.
@@ -883,7 +882,7 @@ class BiosignalPreprocessor:
             min_duration=min_duration,  # minimum duration for consecutive samples to exceed or fall below threshold
             bad_percent=max_bad_segments_percent,  # channels with more bad segments will be marked as complete bad channels
         )
-        print(f"Found {len(bad_channels)} bad channels.")
+        mne.utils.logger.info(f"Found {len(bad_channels)} bad channels.")
 
         # save result:
         if inplace:
@@ -1024,131 +1023,135 @@ class BiosignalPreprocessor:
         Returns increase in SNR (based on target freq.) due to filtering.
         Default arguments are CMC-reelvant beta band: 21.5±8.5 Hz
         """
-        ### SNR improvement:
-        # compute SNR for np.input_data:
-        input_snr = features.compute_spectral_snr(self.np_input_data,
-                                            self.sampling_freq,
-                                            target_freq=target_freq, freq_window=freq_window)
+        with mne.utils.use_log_level('warning'):  # context manager to keep console output clean
+            ### SNR improvement:
+            # compute SNR for np.input_data:
+            input_snr = features.compute_spectral_snr(self.np_input_data,
+                                                self.sampling_freq,
+                                                target_freq=target_freq, freq_window=freq_window)
 
-        # compute SNR for mne_filtered_data (band pass and notch)
-        filtered_snr = features.compute_spectral_snr(self.mne_to_numpy(self.mne_filtered_data),
-                                            self.sampling_freq,
-                                            target_freq=target_freq, freq_window=freq_window)
-        snr_improvement = filtered_snr - input_snr
-        if verbose: print(f'[VALIDATION] Target-band SNR improvement due to filtering: {snr_improvement:.3f} dB (now {filtered_snr:.3f} dB)')
+            # compute SNR for mne_filtered_data (band pass and notch)
+            filtered_snr = features.compute_spectral_snr(self.mne_to_numpy(self.mne_filtered_data),
+                                                self.sampling_freq,
+                                                target_freq=target_freq, freq_window=freq_window)
+            snr_improvement = filtered_snr - input_snr
+            if verbose: print(f'[VALIDATION] Target-band SNR improvement due to filtering: {snr_improvement:.3f} dB (now {filtered_snr:.3f} dB)')
 
-        ### PSD consistency:
-        # calculate PSDs:
-        raw_freqs, raw_psd = signal.welch(self.np_input_data, axis=0,
-                                          fs=self.sampling_freq, nperseg=self.sampling_freq * 4,  # 4-second window
-                                          )
-        filtered_freqs, filtered_psd = signal.welch(self.mne_to_numpy(self.mne_filtered_data), axis=0,
-                                          fs=self.sampling_freq, nperseg=self.sampling_freq * 4,  # 4-second window
-                                          )
+            ### PSD consistency:
+            # calculate PSDs:
+            raw_freqs, raw_psd = signal.welch(self.np_input_data, axis=0,
+                                              fs=self.sampling_freq, nperseg=self.sampling_freq * 4,  # 4-second window
+                                              )
+            filtered_freqs, filtered_psd = signal.welch(self.mne_to_numpy(self.mne_filtered_data), axis=0,
+                                              fs=self.sampling_freq, nperseg=self.sampling_freq * 4,  # 4-second window
+                                              )
 
-        # define target band:
-        assert np.array_equal(raw_freqs,filtered_freqs), "PSD result frequencies should be equivalent between un- and pre-processed data."
-        target_band = (raw_freqs < target_freq + freq_window) & (raw_freqs > target_freq - freq_window)
+            # define target band:
+            assert np.array_equal(raw_freqs,filtered_freqs), "PSD result frequencies should be equivalent between un- and pre-processed data."
+            target_band = (raw_freqs < target_freq + freq_window) & (raw_freqs > target_freq - freq_window)
 
-        # compare mean PSD in target band:
-        raw_mean_psd = 10 * np.log10(np.mean(raw_psd[target_band]))
-        filtered_mean_psd = 10 * np.log10(np.mean(filtered_psd[target_band]))
-        psd_difference = filtered_mean_psd - raw_mean_psd
-        if verbose: print(f'[VALIDATION] Target-band PSD difference due to filtering: {psd_difference:.3f} dB')
+            # compare mean PSD in target band:
+            raw_mean_psd = 10 * np.log10(np.mean(raw_psd[target_band]))
+            filtered_mean_psd = 10 * np.log10(np.mean(filtered_psd[target_band]))
+            psd_difference = filtered_mean_psd - raw_mean_psd
+            if verbose: print(f'[VALIDATION] Target-band PSD difference due to filtering: {psd_difference:.3f} dB')
 
-        # return both differences:
-        return snr_improvement, psd_difference
+            # return both differences:
+            return snr_improvement, psd_difference
 
     def validate_referencing(self,
                              target_freq: float = 21.5,
                              freq_window: float = 8.5,
                              verbose: bool = True,
                             ) -> float:
-        # compute SNR for mne_filtered_data (band pass and optionally notch):
-        input_snr = features.compute_spectral_snr(self.mne_to_numpy(self.mne_filtered_data),
-                                                  self.sampling_freq,
-                                                  target_freq=target_freq, freq_window=freq_window)
+        with mne.utils.use_log_level('warning'):  # context manager to keep console output clean
+            # compute SNR for mne_filtered_data (band pass and optionally notch):
+            input_snr = features.compute_spectral_snr(self.mne_to_numpy(self.mne_filtered_data),
+                                                      self.sampling_freq,
+                                                      target_freq=target_freq, freq_window=freq_window)
 
-        # compute SNR for mne_referenced_data (re-referenced):
-        filtered_snr = features.compute_spectral_snr(self.mne_to_numpy(self.mne_referenced_data),
-                                                     self.sampling_freq,
-                                                     target_freq=target_freq, freq_window=freq_window)
-        snr_improvement = filtered_snr - input_snr
-        if verbose: print(f'[VALIDATION] Target-band SNR improvement due to referencing: {snr_improvement:.3f} dB (now {filtered_snr:.3f} dB)')
-        return snr_improvement
+            # compute SNR for mne_referenced_data (re-referenced):
+            filtered_snr = features.compute_spectral_snr(self.mne_to_numpy(self.mne_referenced_data),
+                                                         self.sampling_freq,
+                                                         target_freq=target_freq, freq_window=freq_window)
+            snr_improvement = filtered_snr - input_snr
+            if verbose: print(f'[VALIDATION] Target-band SNR improvement due to referencing: {snr_improvement:.3f} dB (now {filtered_snr:.3f} dB)')
+            return snr_improvement
 
     def validate_amplitude_thresholding(self,
                                         n_runs: int = 10,
                                         verbose: bool = True) -> tuple[float, float]:
         """ Returns specificity (= true neg. rate) and selectivity (= true pos. rate) for surrogate bad channel recognition based on amplitude thresholding. """
-        all_channels = [i + 1 for i in range(self.n_channels)]
-        specificity_list = []; selectivity_list = []
-        # iterative procedure, to average specificity / selectivity metrics:
-        for trial in range(n_runs):
-            # create surrogate:
-            surrogate, amended_channels = surrogation.insert_bad_channels(self.mne_to_numpy(self.mne_referenced_data),
-                                                        axis=0, scale_range=(5, 15))
-            unchanged_channels = [ch for ch in all_channels if ch not in amended_channels]
+        with mne.utils.use_log_level('warning'):  # context manager to keep console output clean
+            all_channels = [i + 1 for i in range(self.n_channels)]
+            specificity_list = []; selectivity_list = []
+            # iterative procedure, to average specificity / selectivity metrics:
+            for trial in range(n_runs):
+                # create surrogate:
+                surrogate, amended_channels = surrogation.insert_bad_channels(self.mne_to_numpy(self.mne_referenced_data),
+                                                            axis=0, scale_range=(5, 15))
+                unchanged_channels = [ch for ch in all_channels if ch not in amended_channels]
 
-            # detect bad channels:
-            detected_bad_channels = self._annotate_amplitude_based_artefacts(input_mne_data=self.numpty_to_mne(surrogate,
-                                                                                                               self.sampling_freq,
-                                                                                                               self.modality),
-                                                                             inplace=False)
+                # detect bad channels:
+                detected_bad_channels = self._annotate_amplitude_based_artefacts(input_mne_data=self.numpty_to_mne(surrogate,
+                                                                                                                   self.sampling_freq,
+                                                                                                                   self.modality),
+                                                                                 inplace=False)
 
-            # compute metrics (positive = detected as bad)
-            false_positives = [ch for ch in unchanged_channels if ch in detected_bad_channels]
-            true_positives = [ch for ch in amended_channels if ch in detected_bad_channels]
-            false_negatives = [ch for ch in amended_channels if ch not in detected_bad_channels]
-            true_negatives = [ch for ch in unchanged_channels if ch not in detected_bad_channels]
+                # compute metrics (positive = detected as bad)
+                false_positives = [ch for ch in unchanged_channels if ch in detected_bad_channels]
+                true_positives = [ch for ch in amended_channels if ch in detected_bad_channels]
+                false_negatives = [ch for ch in amended_channels if ch not in detected_bad_channels]
+                true_negatives = [ch for ch in unchanged_channels if ch not in detected_bad_channels]
 
-            # specificity = true_neg / (true_neg + false_pos) = 1 - false_pos_rate
-            specificity_list.append(len(true_negatives) / (len(true_negatives) + len(false_positives)))
-            # selectivity = true_pos / (true_pos + false_neg) = 1 - false_neg_rate
-            selectivity_list.append(len(true_positives) / (len(true_positives) + len(false_negatives)))
+                # specificity = true_neg / (true_neg + false_pos) = 1 - false_pos_rate
+                specificity_list.append(len(true_negatives) / (len(true_negatives) + len(false_positives)))
+                # selectivity = true_pos / (true_pos + false_neg) = 1 - false_neg_rate
+                selectivity_list.append(len(true_positives) / (len(true_positives) + len(false_negatives)))
 
-        # average and return metrics:
-        specificity = np.nanmean(specificity_list).item(); selectivity = np.nanmean(selectivity_list).item()
-        if verbose: print(f'[VALIDATION] Amplitude-Thresholding for Bad Channel Detection:\n\tSpecificity (true neg.): {specificity:.3f}\n\tSelectivity (true pos.): {selectivity:.3f}')
-        return np.nanmean(specificity_list).item(), np.nanmean(selectivity_list).item()
+            # average and return metrics:
+            specificity = np.nanmean(specificity_list).item(); selectivity = np.nanmean(selectivity_list).item()
+            if verbose: print(f'[VALIDATION] Amplitude-Thresholding for Bad Channel Detection:\n\tSpecificity (true neg.): {specificity:.3f}\n\tSelectivity (true pos.): {selectivity:.3f}')
+            return np.nanmean(specificity_list).item(), np.nanmean(selectivity_list).item()
 
     # todo: validate_artefact_rejection (trial-to-trial variability)
     # later, when multi-trial data is processed
 
     def validate_spatial_filtering(self, verbose: bool = True) -> float:
         """ Only works for EEG currently. Averages coherence over all frequencies. """
-        # derive neighbors (based on 3d-positional information from MNE and laplacian_filter_neighbor_radius):
-        neighbor_mapping = self.get_neighboring_electrodes_mapping()
+        with mne.utils.use_log_level('warning'):  # context manager to keep console output clean
+            # derive neighbors (based on 3d-positional information from MNE and laplacian_filter_neighbor_radius):
+            neighbor_mapping = self.get_neighboring_electrodes_mapping()
 
-        # compute average magn. squared coherence with neighboring electrodes before and after spatial filtering:
-        if verbose: print(f"[VALIDATION] Computing local coherence for all electrodes before and after spatial filtering...")
-        for step_ind, data in enumerate([self.np_artefact_free_data, self.np_spatially_filtered_data]):
-            ch_local_coherences = []  # average neighbor coherence list
-            for ch_ind, neighbors in enumerate(tqdm(neighbor_mapping)):  # takes ~2-5s per electrode:
-                pairwise_coherences = []  # pairwise coherence list
-                for neighbor_ind in neighbors:
-                    # compute pairwise coherence (magn. squared -> stationary, non-time-lagged):
-                    freqs, coh = signal.coherence(x=data[:, ch_ind],
-                                                  y=data[:, neighbor_ind],
-                                                  fs=self.sampling_freq, axis=0)
-                    # average over all frequencies (might be changed down the road):
-                    pairwise_coherences.append(np.nanmean(coh))
+            # compute average magn. squared coherence with neighboring electrodes before and after spatial filtering:
+            if verbose: print(f"[VALIDATION] Computing local coherence for all electrodes before and after spatial filtering...")
+            for step_ind, data in enumerate([self.np_artefact_free_data, self.np_spatially_filtered_data]):
+                ch_local_coherences = []  # average neighbor coherence list
+                for ch_ind, neighbors in enumerate(tqdm(neighbor_mapping)):  # takes ~2-5s per electrode:
+                    pairwise_coherences = []  # pairwise coherence list
+                    for neighbor_ind in neighbors:
+                        # compute pairwise coherence (magn. squared -> stationary, non-time-lagged):
+                        freqs, coh = signal.coherence(x=data[:, ch_ind],
+                                                      y=data[:, neighbor_ind],
+                                                      fs=self.sampling_freq, axis=0)
+                        # average over all frequencies (might be changed down the road):
+                        pairwise_coherences.append(np.nanmean(coh))
 
-                # average over neighbors:
-                ch_local_coherences.append(np.nanmean(pairwise_coherences))
+                    # average over neighbors:
+                    ch_local_coherences.append(np.nanmean(pairwise_coherences))
 
-            # average over electrodes and store depending on which data was used:
-            if step_ind == 0:  # before
-                local_coherence_before = np.nanmean(ch_local_coherences).item()
-                if verbose: print(f"[VALIDATION] Local Mag.Sq. Coherence BEFORE spatial filtering: {local_coherence_before:.3f}")
-            elif step_ind == 1:  # after
-                local_coherence_after = np.nanmean(ch_local_coherences).item()
-                if verbose: print(f"[VALIDATION] Local Mag.Sq. Coherence AFTER spatial filtering: {local_coherence_after:.3f}")
+                # average over electrodes and store depending on which data was used:
+                if step_ind == 0:  # before
+                    local_coherence_before = np.nanmean(ch_local_coherences).item()
+                    if verbose: print(f"[VALIDATION] Local Mag.Sq. Coherence BEFORE spatial filtering: {local_coherence_before:.3f}")
+                elif step_ind == 1:  # after
+                    local_coherence_after = np.nanmean(ch_local_coherences).item()
+                    if verbose: print(f"[VALIDATION] Local Mag.Sq. Coherence AFTER spatial filtering: {local_coherence_after:.3f}")
 
-        # compute coherence diff:
-        coh_diff = local_coherence_after - local_coherence_before
-        if verbose: print(f"[VALIDATION] Local coherence (~cross talk) hence changed by: {coh_diff:.3f}")
-        return coh_diff
+            # compute coherence diff:
+            coh_diff = local_coherence_after - local_coherence_before
+            if verbose: print(f"[VALIDATION] Local coherence (~cross talk) hence changed by: {coh_diff:.3f}")
+            return coh_diff
 
     # todo: think how to include surrogate data here
     def validate_wavelet_denoising(self,
@@ -1156,19 +1159,20 @@ class BiosignalPreprocessor:
                                    freq_window: float = 8.5,
                                    verbose: bool = True, ) -> float:
         """ Noise is defined as frequencies outside the target band. Default target freq. is 21.5 ±8.5 Hz. """
-        # compute SNR for spatially filtered data (step before):
-        input_snr = features.compute_spectral_snr(self.np_spatially_filtered_data,
-                                                  self.sampling_freq,
-                                                  target_freq=target_freq, freq_window=freq_window)
+        with mne.utils.use_log_level('warning'):  # context manager to keep console output clean
+            # compute SNR for spatially filtered data (step before):
+            input_snr = features.compute_spectral_snr(self.np_spatially_filtered_data,
+                                                      self.sampling_freq,
+                                                      target_freq=target_freq, freq_window=freq_window)
 
-        # compute SNR for wavelet denoised data:
-        filtered_snr = features.compute_spectral_snr(self.np_denoised_data,
-                                                     self.sampling_freq,
-                                                     target_freq=target_freq, freq_window=freq_window)
-        snr_improvement = filtered_snr - input_snr
-        if verbose: print(
-            f'[VALIDATION] Target-band SNR improvement due to wavelet denoising: {snr_improvement:.3f} dB (now {filtered_snr:.3f} dB)')
-        return snr_improvement
+            # compute SNR for wavelet denoised data:
+            filtered_snr = features.compute_spectral_snr(self.np_denoised_data,
+                                                         self.sampling_freq,
+                                                         target_freq=target_freq, freq_window=freq_window)
+            snr_improvement = filtered_snr - input_snr
+            if verbose: print(
+                f'[VALIDATION] Target-band SNR improvement due to wavelet denoising: {snr_improvement:.3f} dB (now {filtered_snr:.3f} dB)')
+            return snr_improvement
 
     ############# PLOTTING METHODS #############
     def plot_independent_component(self, ic_index: int, verbose: bool = True):
@@ -1225,23 +1229,23 @@ if __name__ == '__main__':
         modality=data_modality,
         band_pass_frequencies='auto',
     )
-
-
-    ##### START DEVELOPMENT SECTION
+    ##### VALIDATION:
     filt_snr_increase, filt_psd_diff = prepper.validate_filtering()
     ref_snr_increase = prepper.validate_referencing()
     specificity, selectivity = prepper.validate_amplitude_thresholding()
     spat_filt_local_coh_decrease = prepper.validate_spatial_filtering()
     denoise_snr_increase = prepper.validate_wavelet_denoising()
-    quit()
-    ##### END DEVELOPMENT SECTION
-
-    # input plot:
+    ### input plots:
+    # fourier spectrum:
     features.discrete_fourier_transform(prepper.np_input_data,
                                            sampling_freq=sampling_freq,
                                            frequency_range=(0, 100),
                                            plot_title='Raw Data - Fourier Spectrum',
                                            plot_result=True, )
+    # PSD spectrogram:
+    features.multitaper_psd(input_array=prepper.np_input_data, sampling_freq=prepper.sampling_freq, nw=3,
+                            window_length_sec=1.0, overlap_frac=0.5, axis=0, verbose=True,
+                            plot_result=True, frequency_range=(0, 100), title='Input Averaged PSD Spectrogram')
 
     # automatic artefact rejection:
     _ = prepper.mne_artefact_free_data
@@ -1256,12 +1260,28 @@ if __name__ == '__main__':
     manual_ics = input(
         "Please enter additional independent components to exclude, separated by space (e.g. '10 13 7'): ")
     if manual_ics != '':
-        manual_ics = [int(ind_str) for ind_str in manual_ics]
+        manual_ics = [int(ind_str.strip()) for ind_str in manual_ics.split(' ')]
     prepper.manual_ics_to_exclude = manual_ics
 
-    # output plot:
+    ### output plots:
+    # fourier spectrum:
     features.discrete_fourier_transform(prepper.np_output_data,
-                                        sampling_freq=sampling_freq,
+                                        sampling_freq=prepper.sampling_freq,
                                         frequency_range=(0, 100),
                                         plot_title='Preprocessed Data - Fourier Spectrum',
                                         plot_result=True)
+    # PSD spectrogram:
+    features.multitaper_psd(input_array=prepper.np_output_data, sampling_freq=prepper.sampling_freq, nw=3,
+                            window_length_sec=1.0, overlap_frac=0.5, axis=0, verbose=True,
+                            plot_result=True, frequency_range=(0, 100), title='Output Averaged PSD Spectrogram')
+
+
+
+
+
+    ##### VALIDATION:
+    filt_snr_increase, filt_psd_diff = prepper.validate_filtering()
+    ref_snr_increase = prepper.validate_referencing()
+    specificity, selectivity = prepper.validate_amplitude_thresholding()
+    spat_filt_local_coh_decrease = prepper.validate_spatial_filtering()
+    denoise_snr_increase = prepper.validate_wavelet_denoising()
