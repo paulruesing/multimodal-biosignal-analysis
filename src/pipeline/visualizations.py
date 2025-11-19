@@ -5,15 +5,18 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.patches as patches
-from matplotlib.widgets import Button
+from matplotlib.collections import PatchCollection
+from matplotlib.widgets import Button, Slider
 from matplotlib.animation import FuncAnimation
 from typing import Callable, Literal, Tuple
 import multiprocessing
 import os
+import math
 
 import src.utils.file_management as filemgmt
+import src.pipeline.signal_features as features
 
-mpl.use('TkAgg')
+mpl.use('Qt5Agg')
 
 ##############  CONSTANT PARAMETERS ##############
 ### EEG:
@@ -33,6 +36,13 @@ EEG_CHANNELS = ['Fpz', 'Fp1', 'Fp2',
                 'PO7', 'PO3', 'POz', 'PO4', 'PO8',
                 'O1', 'Oz', 'O2',
                 ]  # according to https://www.bitbrain.com/neurotechnology-products/water-based-eeg/versatile-eeg
+EEG_CHANNELS_BY_AREA = {
+    area_label: [ch for ch in EEG_CHANNELS if (ch[:len(area_abbr)] == area_abbr) and (len(ch) == len(area_abbr)+1)] for area_label, area_abbr in [
+        ('Frontal Pole', 'Fp'), ('Anterior Frontal', 'AF'), ('Fronto-Central', 'FC'), ('Frontal', 'F'),
+        ('Fronto-Temporal', 'FT'), ('Temporal', 'T'), ('Central', 'C'), ('Temporo-Parietal', 'TP'),
+        ('Centro-Parietal', 'CP'), ('Parietal', 'P'), ('Parieto-Occipital', 'PO'), ('Occipital', 'O')]}
+EEG_CHANNEL_IND_DICT = {ch: ind+1 for ind, ch in enumerate(EEG_CHANNELS)}
+
 EEG_POSITIONS = {'Fpz': (0.0, 0.602),
                  'Fp1': (-0.165, 0.5599999999999999),
                  'Fp2': (0.165, 0.5599999999999999),
@@ -115,7 +125,8 @@ def plot_eeg_heatmap(values: dict[str, float] | list[float],
                      value_label: str = 'Heatmap values',
                      plot_size: (int, int) = (8, 8),
                      plot_title: str = 'EEG Heatmap',
-                     save_dir: str | Path = None,):
+                     save_dir: str | Path = None,
+                     continue_code: bool = False,):
     """
     Plot heatmap circles at predefined electrode positions for a 64-channel EEG (10-20 system).
 
@@ -137,6 +148,8 @@ def plot_eeg_heatmap(values: dict[str, float] | list[float],
         Title displayed at the top of the plot.
     save_dir : str or Path, optional
         Directory to save the figure.
+    continue_code: bool, default False
+        Whether to continue code execution while fig is shown.
 
     Returns
     -------
@@ -191,8 +204,174 @@ def plot_eeg_heatmap(values: dict[str, float] | list[float],
     # eventually save:
     if save_dir is not None: smart_save_fig(save_dir, plot_title)
 
-    plt.show()
+    plt.show(block=not continue_code)
     return fig
+
+
+def animate_eeg_heatmap(values: dict[str, float] | list[float],
+                        sampling_rate: float,
+                        include_labels: bool = True,
+                        colormap='viridis',
+                        color_scale=None,
+                        value_label: str = 'Heatmap values',
+                        plot_size: tuple[int, int] = (7, 7),
+                        plot_title: str = 'EEG Heatmap',
+                        animation_fps: int = 15,):
+    """
+    Animate a heatmap of EEG channel values plotted as circles at predefined electrode positions
+    based on the 64-channel 10-20 system.
+
+    Parameters
+    ----------
+    values : dict[str, float] or list[float]
+        Input EEG data values. Can be a dictionary mapping channel names to float values or
+        a list/array representing values over time (timesteps x channels). If a list of lists
+        or array is provided, it should have shape (n_timesteps, 64).
+    sampling_rate : float
+        Original sampling rate (Hz) of the input EEG data, used to resample data for animation.
+    include_labels : bool, default True
+        Flag to indicate whether to display channel labels on the heatmap.
+    colormap : str or matplotlib.colors.Colormap, default 'viridis'
+        Colormap name or instance used to map data values to colors on the heatmap.
+    color_scale : tuple of (float, float) or None, optional
+        Minimum and maximum values for color normalization (vmin, vmax). If None, color
+        limits are derived from the min and max in the data.
+    value_label : str, default 'Heatmap values'
+        Label for the heatmap's colorbar.
+    plot_size : tuple of int, default (7, 7)
+        Width and height (in inches) of the matplotlib figure displaying the heatmap.
+    plot_title : str, default 'EEG Heatmap'
+        Title text displayed above the plot.
+    animation_fps : int, default 15
+        Frame rate (frames per second) used for animating the heatmap.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The matplotlib figure object containing the animated EEG heatmap plot.
+
+    Notes
+    -----
+    - The function initializes a matplotlib figure showing a topographic map with circles representing EEG electrodes.
+    - Circles are colored according to values that update over time to produce the animation effect.
+    - Playback controls such as pause and speed slider are provided to interact with the animation.
+    - The function automatically rescales the input data to match the specified animation FPS if needed.
+    """
+    ##### input preparation:
+    # type conversion:
+    if isinstance(values, list): values = np.array(values)
+
+    # sanity checks:
+    n_channels = values.shape[1]
+    assert n_channels == 64, f"Provided number of channels {n_channels} isn't 64 as required by this method."
+    if animation_fps > 20: print(f"Animation fps are {animation_fps} which is beyond the recommended maximum of 20.")
+
+    # resample values for time-plausible animation:
+    if sampling_rate != animation_fps:
+        print('Resampling data for efficient animation (to prevent this, provide data with sampling_rate equivalent to animation_fps)...')
+        values = features.resample_data(values, axis=0,
+                                        original_sampling_freq=sampling_rate,
+                                        new_sampling_freq=animation_fps)
+
+    ##### initialise figure:
+    print('Initializing EEG animation...')
+    fig, ax = plt.subplots(figsize=plot_size)
+    ax.set_title(plot_title)
+    info_text = ax.text(-.5, -.8, s="Initialising...", ha='center', va='center', fontsize=8)
+
+    # extract value range for normalization (if not provided take minimum and maximum along both dimensions)
+    vmin, vmax = color_scale if color_scale is not None else (np.min(np.min(values)), np.max(np.max(values)))
+    # normalize and setup colormap:
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+    cmap = mpl.colormaps[colormap]
+
+    ### eeg heatmap:
+    # initialise circles for heatmap with PatchCollection for seamless animation (freezes animation):
+    circles = [patches.Circle(pos, radius=0.05) for pos in EEG_POSITIONS.values()]
+    circle_collection = PatchCollection(circles,
+                                        edgecolors='black',
+                                        linewidths=0.8,
+                                        cmap=cmap,  # this leads to circle_collection.set_array directly changing the colors
+                                        norm=norm)
+    ax.add_collection(circle_collection)  # Single add operation"""
+    # channel labels:
+    if include_labels:
+        for label, (x, y) in EEG_POSITIONS.items():
+            txt = ax.text(x, y, label, ha='center', va='center', fontsize=8, color='black')
+
+
+    # add ellipse around head:
+    width, height = 1.256, 1.505
+    ellipse = patches.Ellipse([0, 0], width=width, height=height,
+                              edgecolor='black', facecolor='none', lw=1.5, ls='-')
+    ax.add_patch(ellipse)
+
+    # add nose:
+    half_circle = patches.Wedge(center=(0, height / 2), r=0.1, theta1=-5, theta2=185,
+                                facecolor='none', edgecolor='black', ls='-', lw=1.5)
+    ax.add_patch(half_circle)
+
+    # colorbar:
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array(np.mean(values, axis=0))  # derive color bar from time-averaged values
+    cbar = fig.colorbar(sm, ax=ax)
+    cbar.set_label(value_label)
+
+    # scaling and removing axes:
+    ax.set_aspect('equal')
+    ax.autoscale_view()
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    ### add pause button
+    global is_running; is_running = True
+
+    def pause_button_click(event):  # button clicked method
+        global is_running; is_running = not is_running  # change running status
+        # change button text:
+        if is_running: button.label.set_text("Pause")
+        else: button.label.set_text("Continue")
+
+    ax_button = plt.axes((.1, .025, 0.15, 0.05))  # [left, bottom, width, height]
+    button = Button(ax_button, 'Pause')
+    button.on_clicked(pause_button_click)
+
+    ### add playback speed slider:
+    global playback_speed; playback_speed = 1.0  # multiplied to frame counter increment
+
+    def update(val):  # update function
+        global playback_speed; playback_speed = val
+
+    slider_ax = plt.axes((0.425, 0.035, 0.4, 0.03))
+    freq_slider = Slider(slider_ax, 'Playback Speed', valmin=0.1, valmax=2.0, valinit=1.0)
+    freq_slider.on_changed(update)
+
+    ##### animation update method:
+    total_frames = len(values); total_time = total_frames / animation_fps
+
+    # actual frame counter (pausable and controlled by playback speed)
+    global pausable_frame_ind; pausable_frame_ind = 0
+    def update(frame):
+        if is_running:  # if not paused
+            # info title:
+            global pausable_frame_ind
+            current_time = pausable_frame_ind / animation_fps
+            info_text.set_text(f"Time: {current_time:.1f}s / {total_time:.1f}s")
+
+            # update circle colors dynamically:
+            rounded_pausable_frame_ind = int(math.floor(pausable_frame_ind))
+            circle_collection.set_array(values[rounded_pausable_frame_ind, :])
+
+            # take into account playback speed:
+            global playback_speed
+            pausable_frame_ind = (pausable_frame_ind + 1*playback_speed) % total_frames
+
+        return circles + [info_text]
+
+    global ani  # store animation in global namespace
+    ani = FuncAnimation(fig, update, frames=total_frames, blit=False,
+                        interval=int(1000 / animation_fps), repeat=True)
+    plt.show()
 
 
 def plot_freq_domain(amplitude_spectrum: np.ndarray[float, float] | np.ndarray[float],
@@ -201,7 +380,8 @@ def plot_freq_domain(amplitude_spectrum: np.ndarray[float, float] | np.ndarray[f
                      channel_labels: np.ndarray[str] = None,
                      plot_size: tuple[float, float] = (12, 6),
                      plot_title: str = "Magnitude Spectrum",
-                     save_dir: str | Path = None,):
+                     save_dir: str | Path = None,
+                     continue_code: bool = False,):
     """
     Plot the magnitude spectrum of one or more channels in the frequency domain.
 
@@ -229,6 +409,8 @@ def plot_freq_domain(amplitude_spectrum: np.ndarray[float, float] | np.ndarray[f
         Title displayed at the top of the plot.
     save_dir : str or Path, optional
         Directory to save the figure.
+    continue_code: bool, default False
+        Whether to continue code execution while fig is shown.
 
     Returns
     -------
@@ -253,4 +435,160 @@ def plot_freq_domain(amplitude_spectrum: np.ndarray[float, float] | np.ndarray[f
     # eventually save:
     if save_dir is not None: smart_save_fig(save_dir, plot_title)
 
-    plt.show()
+    plt.show(block=not continue_code)
+
+
+def plot_spectrogram(
+        spectrogram: np.ndarray,
+        timestamps: np.ndarray,
+        frequencies: np.ndarray,
+        cmap: str = 'viridis',
+        frequency_range: tuple[float, float] | None = None,
+        log_scale: bool = True,
+        vmin: float | None = None,
+        vmax: float | None = None,
+        title: str = 'Spectrogram',
+        xlabel: str = 'Time [s]',
+        ylabel: str = 'Frequency [Hz]',
+        cbar_label: str = 'Power [V²/Hz]',
+        figsize: tuple[float, float] = (14, 6),
+        aspect: str = 'auto',
+        save_dir: str | Path = None,
+        continue_code: bool = False,
+) -> Tuple[plt.Figure, plt.Axes]:
+    """
+    Visualize a time-frequency spectrogram.
+
+    Parameters
+    ----------
+    spectrogram : ndarray
+        Power spectral density matrix, shape (n_windows, n_frequencies)
+        Each column represents a time window, each row a frequency bin
+    timestamps : ndarray
+        Time centers of each window (seconds), shape (n_windows,)
+    frequencies : ndarray
+        Frequency array (Hz), shape (n_frequencies,)
+    cmap : str, optional
+        Matplotlib colormap name. Default: 'viridis'
+        Options: 'viridis', 'magma', 'plasma', 'inferno', 'turbo', 'jet', 'cool'
+    frequency_range : tuple, optional
+        (fmin, fmax) to restrict displayed frequency range in Hz.
+        If None, uses full range. Default: None
+    log_scale : bool, optional
+        Apply log10 scaling to the spectrogram for better dynamic range visualization.
+        Recommended for PSD data with high variance. Default: True
+    vmin, vmax : float, optional
+        Min/max values for colormap normalization.
+        If None, automatically determined from data.
+        Useful for fixing the color scale across multiple plots.
+        Default: None
+    title : str, optional
+        Title of the plot. Default: 'Spectrogram'
+    xlabel : str, optional
+        X-axis label. Default: 'Time (s)'
+    ylabel : str, optional
+        Y-axis label. Default: 'Frequency (Hz)'
+    cbar_label : str, optional
+        Colorbar label. Default: 'Power (V²/Hz)'
+    figsize : tuple, optional
+        Figure size (width, height) in inches. Default: (14, 6)
+    aspect : str, optional
+        Aspect ratio control. 'auto' preserves data proportions.
+        Default: 'auto'
+    save_dir : str or Path, optional
+        Directory to save the figure.
+    continue_code: bool, default False
+        Whether to continue code execution while fig is shown.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        Figure object (use for saving with fig.savefig())
+    ax : matplotlib.axes.Axes
+        Axes object with the spectrogram plot
+
+    Raises
+    ------
+    ValueError
+        If array shapes don't match
+
+    Examples
+    --------
+    >>> # Basic usage
+    >>> fig, ax = plot_spectrogram(spec, times, freqs)
+    >>> plt.show()
+
+    >>> # With frequency range restriction
+    >>> fig, ax = plot_spectrogram(
+    ...     spec, times, freqs,
+    ...     frequency_range=(0, 100),
+    ...     cmap='magma',
+    ...     log_scale=True
+    ... )
+
+    >>> # Save figure
+    >>> fig, ax = plot_spectrogram(spec, times, freqs)
+    >>> fig.savefig('spectrogram.png', dpi=300, bbox_inches='tight')
+    """
+
+    # Input validation
+    if spectrogram.shape[1] != len(frequencies):
+        raise ValueError(
+            f"Number of frequencies ({spectrogram.shape[1]}) does not match "
+            f"frequencies array length ({len(frequencies)})"
+        )
+    if spectrogram.shape[0] != len(timestamps):
+        raise ValueError(
+            f"Number of windows ({spectrogram.shape[0]}) does not match "
+            f"timestamps array length ({len(timestamps)})"
+        )
+
+    # Copy to avoid modifying input
+    spec = spectrogram.T.copy()  # transpose spectrogram for visualization (frequency on y-axis)
+    freqs = frequencies.copy()
+    times = timestamps.copy()
+
+    # Apply frequency range filter if specified
+    if frequency_range is not None:
+        fmin, fmax = frequency_range
+        freq_mask = (freqs >= fmin) & (freqs <= fmax)
+        spec = spec[freq_mask, :]
+        freqs = freqs[freq_mask]
+
+    # Apply log scaling if requested
+    if log_scale:
+        spec = np.log10(spec + 1e-10)
+        log_suffix = ' (log10)'  # to amend colorbar label:
+    else: log_suffix = ''
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Calculate extent for proper axis labeling
+    extent = (
+        times[0] - (times[1] - times[0]) / 2,
+        times[-1] + (times[-1] - times[-2]) / 2,
+        freqs[0] - (freqs[1] - freqs[0]) / 2,
+        freqs[-1] + (freqs[-1] - freqs[-2]) / 2
+    )
+
+    # plot spectrogram:
+    im = ax.imshow(spec, aspect=aspect, origin='lower',  # frequency 0 at bottom
+                   extent=extent, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest')
+
+    # labels:
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+
+    # colorbar:
+    cbar = plt.colorbar(im, ax=ax, label=cbar_label + log_suffix)
+    cbar.ax.tick_params(labelsize=10)
+
+    plt.tight_layout()
+    plt.show(block=not continue_code)
+
+    # eventually save fig:
+    if save_dir is not None: smart_save_fig(save_dir, title)
+
+    return fig, ax
