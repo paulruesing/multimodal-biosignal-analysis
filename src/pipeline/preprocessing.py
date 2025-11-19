@@ -4,10 +4,8 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from typing import Callable, Literal, Tuple
 import os
+import json
 from tqdm import tqdm
-import mne
-import mne_icalabel
-import pywt
 import mne
 import mne_icalabel
 import pywt
@@ -142,7 +140,7 @@ class BiosignalPreprocessor:
         # others:
         self._wavelet_coefficients = self._denoised_wavelet_coefficients = None
 
-    ############# MAGIC FUNCTIONS #############
+    ############# DESCRIPTIVE FUNCTIONS #############
     def describe(self) -> str:
         """
         Return a detailed description of the BiosignalPreprocessor instance,
@@ -178,6 +176,60 @@ class BiosignalPreprocessor:
         Return a detailed string representation by using describe().
         """
         return self.describe()
+
+    ############# CLASS INITIALISATION METHODS #############
+    @classmethod
+    def init_from_config(cls, config_file_path: Path | str, np_input_data: np.ndarray):
+        """ Returns class instance from config file (.json path) and input data (np.ndarray). """
+        if str(config_file_path)[-5:] != ".json": raise ValueError("Provided file path must be .json")
+
+        # read json
+        with open(config_file_path, "r") as f:
+            config_dict = json.load(f)
+
+        try:  # read out non-initialisation attributes
+            manual_ics_to_exclude = config_dict.pop('manual_ics_to_exclude')
+        except KeyError:
+            manual_ics_to_exclude = None
+
+        # initialise (from input array and config_dict) and return instance:
+        instance = cls(np_input_data=np_input_data, **config_dict)
+
+        # set (not-initialisation) attributes
+        if manual_ics_to_exclude is not None:
+            instance.manual_ics_to_exclude = manual_ics_to_exclude
+
+        return instance
+
+    ############# EXPORT METHODS #############
+    def export_config(self, save_dir: Path | str, identifier: str = None) -> None:
+        """ Exports config-file with all attributes as .json """
+        # prepare save-title:
+        title = f"Preprocessor Config {self.modality} {self.n_channels}ch"
+        if identifier is not None: title += f" ({identifier})"
+        save_path = save_dir / filemgmt.file_title(f"{title}", ".json")
+
+        # construct json:
+        attr_list = ['sampling_freq', 'modality', 'band_pass_frequencies', 'notch_frequency',
+                     'notch_harmonics', 'notch_width', 'reference_channels', 'amplitude_rejection_threshold',
+                     'n_ica_components', 'automatic_ic_labelling', 'laplacian_filter_neighbor_radius', 'wavelet_type',
+                     'denoising_threshold_mode', 'manual_ics_to_exclude']
+        config_dict = {attr_name: getattr(self, attr_name) for attr_name in attr_list}
+
+        # save:
+        with open(save_path, "w") as json_file:
+            json.dump(config_dict, json_file, indent=4)  # Pretty print with indent=4
+        print('Saved config to ', save_path)
+
+    def export_results(self, save_dir: Path | str, identifier: str = None) -> None:
+        """ Exports results (np_output_data) to .npy """
+        # prepare save-title:
+        title = f"Preprocessed {self.modality} {self.n_channels}ch {self.n_timesteps/self.sampling_freq}sec"
+        if identifier is not None: title += f" ({identifier})"
+        save_path = save_dir / filemgmt.file_title(f"{title}", ".npy")
+        # save:
+        np.save(save_path, self.np_output_data)
+        print('Saved results to ', save_path)
 
     ############# PROPERTIES #############
     ### input properties ###
@@ -1004,16 +1056,6 @@ class BiosignalPreprocessor:
             self._np_output_data = None
         else: raise ValueError(f"change_in category: '{change_in}' is undefined!")
 
-    def export_results(self, save_dir: Path | str, identifier: str = None) -> None:
-        """ Exports results (np_output_data) to .npy """
-        # prepare save-title:
-        title = f"Preprocessed {self.modality} {self.n_channels}ch {self.n_timesteps/self.sampling_freq}sec"
-        if identifier is not None: title += f" ({identifier})"
-        save_path = save_dir / filemgmt.file_title(f"{title}", ".npy")
-        # save:
-        np.save(save_path, self.np_output_data)
-        print('Saved results to ', save_path)
-
     ############# VALIDATION METHODS #############
     def validate_filtering(self,
                            target_freq: float = 21.5,
@@ -1217,24 +1259,25 @@ if __name__ == '__main__':
 
     # load data:
     print('Loading data...')
-    input_file = np.load(subject_data_dir / "motor_eeg_full.npy").T[:2048*60, :]  # 1 minute
-    data_modality: Literal['eeg', 'emg'] = 'eeg'
-    sampling_freq = 2048  # Hz
+    input_file = np.load(subject_data_dir / "motor_eeg_full.npy").T#[:2048*60, :]  # 1 minute
+    config_file = subject_data_dir / "2025-11-19 11_38_47 Preprocessor Config eeg 64ch (motor_eeg_full).json"
+
+    # try initialising from config:
+    prepper = BiosignalPreprocessor.init_from_config(config_file, input_file)
+    print(prepper)
+    quit()
 
     # define prepper:
     print('Initialising BiosignalPreprocessor...')
+    data_modality: Literal['eeg', 'emg'] = 'eeg'
+    sampling_freq = 2048  # Hz
     prepper = BiosignalPreprocessor(
         np_input_data=input_file,
         sampling_freq=sampling_freq,
         modality=data_modality,
         band_pass_frequencies='auto',
     )
-    ##### VALIDATION:
-    filt_snr_increase, filt_psd_diff = prepper.validate_filtering()
-    ref_snr_increase = prepper.validate_referencing()
-    specificity, selectivity = prepper.validate_amplitude_thresholding()
-    spat_filt_local_coh_decrease = prepper.validate_spatial_filtering()
-    denoise_snr_increase = prepper.validate_wavelet_denoising()
+
     ### input plots:
     # fourier spectrum:
     features.discrete_fourier_transform(prepper.np_input_data,
@@ -1262,6 +1305,10 @@ if __name__ == '__main__':
     if manual_ics != '':
         manual_ics = [int(ind_str.strip()) for ind_str in manual_ics.split(' ')]
     prepper.manual_ics_to_exclude = manual_ics
+
+
+    # save to config:
+    prepper.export_config(subject_data_dir, "motor_eeg_full")
 
     ### output plots:
     # fourier spectrum:

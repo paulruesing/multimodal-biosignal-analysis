@@ -235,3 +235,8 @@ class TestBiosignalPreprocessor:
         neighbor_mapping = self.instance.get_neighboring_electrodes_mapping()
         neighbor_mapping = [entry for entry in neighbor_mapping if entry is not None and len(entry) != 0]  # skip NaNs
         assert isinstance(neighbor_mapping, list) and isinstance(neighbor_mapping[0], list) and isinstance(neighbor_mapping[0][0], int)
+
+    def test_init_from_config_raises_error(self):
+        """ Should raise ValueError for non .json path """
+        with pytest.raises(ValueError, match="Provided file path must be .json"):
+            self.instance.init_from_config("test/data/config.txt", self.input_data)
