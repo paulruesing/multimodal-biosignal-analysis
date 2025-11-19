@@ -15,7 +15,7 @@ class TestBiosignalPreprocessor:
         self.input_data = np.random.randn(timesteps, channels)  # 1000 timesteps, 8 channels
         self.sampling_freq = 2048
         self.modality: Literal['eeg', 'emg'] = 'eeg'
-
+        mne.set_log_level('warning')
         # define dummy test instance:
         self.instance = BiosignalPreprocessor(
             np_input_data=self.input_data,
@@ -165,10 +165,37 @@ class TestBiosignalPreprocessor:
 
     def test_annotate_amplitude_based_artefacts_raises_error(self):
         """ Check whether it raises ValueError for missing input. """
+        # ERROR 1: no threshold set:
         self.instance.amplitude_rejection_threshold = None
         # mock object (magic because automatically fits type and structure)
         with pytest.raises(ValueError, match="amplitude_rejection_threshold needs to be defined!"):
             self.instance._annotate_amplitude_based_artefacts()
+        self.instance.amplitude_rejection_threshold = .001  # reset to default value
+
+        # ERROR 2: no _mne_amplitude_compliant_data initialised but inplace operation:
+        self.instance._mne_amplitude_compliant_data = None
+        with pytest.raises(ValueError, match="If inplace operation is desired, _mne_amplitude_compliant_data needs to be initialised beforehand!"):
+            self.instance._annotate_amplitude_based_artefacts(inplace=True)
+
+    @patch('mne.preprocessing.annotate_amplitude')
+    def test_annotate_amplitude_based_artefacts_not_inplace(self, mock_annotate_amplitude):
+        """ Check whether inplace=False leaves instance data unchanged. """
+        # save internal state before:
+        amplitude_compliant_before = None if self.instance._mne_amplitude_compliant_data is None else self.instance._mne_amplitude_compliant_data.copy()
+
+        # requires internal data to be annotated:
+        input_data = self.instance.mne_raw_data  # not inplace requires input data
+        mocked_bad_channels = ['Fpz']; mocked_bad_channel_inds = [1]  # equals channel: 1 (function returns indices)
+        mock_annotate_amplitude.return_value = None, mocked_bad_channels
+        # execute:
+        bad_channels = self.instance._annotate_amplitude_based_artefacts(inplace=False,
+                                                                         input_mne_data=input_data)  # NOT INPLACE!
+
+        # compare before and after:
+        assert self.instance._mne_amplitude_compliant_data == amplitude_compliant_before, "_annotate_amplitude_based_artefacts changed instance attributes although inplace=False!"
+        # assert return values match:
+        assert bad_channels == mocked_bad_channel_inds, "Return value doesn't match, something went wrong with translating the channel names returned to channel indices in _annotate_amplitude_based_artefacts."
+
 
     # todo: test annotate amplitude based artefacts inplace=True!
 
