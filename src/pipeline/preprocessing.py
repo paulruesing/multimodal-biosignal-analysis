@@ -13,9 +13,12 @@ from scipy import signal
 
 import src.pipeline.signal_features as features
 import src.pipeline.data_surrogation as surrogation
-from src.pipeline.visualizations import plot_eeg_heatmap, plot_freq_domain, EEG_CHANNELS, EEG_CHANNEL_IND_DICT
+import src.pipeline.visualizations as visualizations
+from src.pipeline.visualizations import plot_freq_domain, EEG_CHANNELS, EEG_CHANNEL_IND_DICT
 import src.utils.file_management as filemgmt
 
+# constant parameters:
+EMG_CHANNELS = [f"EMG{i:02d}" for i in range(1, 65)]
 
 class BiosignalPreprocessor:
     """
@@ -45,14 +48,14 @@ class BiosignalPreprocessor:
         Reference channels for re-referencing; None disables re-referencing.
         Default is 'average'.
     amplitude_rejection_threshold : float or None, optional
-        Amplitude threshold for rejection; None disables amplitude rejection.
-        Default is 0.001.
+        Amplitude threshold for rejection in peak-to-peak voltage; None disables amplitude rejection.
+        Default is 0.003.
     n_ica_components : int or None, optional
         Number of ICA components for artifact rejection; None disables ICA.
         Default is 25.
-    laplacian_filter_neighbor_radius : float or None, optional
+    laplacian_filter_neighbor_radius : float or 'auto', optional
         Radius for Laplacian spatial filtering neighbor channels; None disables filtering.
-        Default is 0.05.
+        Default is 0.05 for 'eeg' and 0.015 for 'emg' (returned for 'auto').
     wavelet_type : {'db4', 'sym5', 'coif1'} or None, optional
         Wavelet type used for denoising; None disables wavelet denoising.
         Default is 'db4'.
@@ -90,10 +93,10 @@ class BiosignalPreprocessor:
                  notch_harmonics: int = 4,
                  notch_width: float | None = None,
                  reference_channels: str | Literal['average'] | None = 'average',
-                 amplitude_rejection_threshold: float | None = .001,
+                 amplitude_rejection_threshold: float | None = .003,
                  n_ica_components: int | None = 25,
                  automatic_ic_labelling: bool = True,
-                 laplacian_filter_neighbor_radius: float | None = .05,
+                 laplacian_filter_neighbor_radius: float | None | Literal['auto'] = 'auto',
                  wavelet_type: Literal['db4', 'sym5', 'coif1'] | None = 'db4',
                  denoising_threshold_mode: Literal['soft', 'hard'] = 'soft',
                  ):
@@ -465,7 +468,12 @@ class BiosignalPreprocessor:
         float or None
             Radius in same units as channel locations; None disables Laplacian filtering.
         """
-        return self._laplacian_filter_neighbor_radius
+        if self._laplacian_filter_neighbor_radius == 'auto':
+            if self.modality == 'eeg': return .05
+            elif self.modality == 'emg': return .015
+            else: raise ValueError(f"Unknown modality: {self.modality}")
+        else:
+            return self._laplacian_filter_neighbor_radius
 
     @laplacian_filter_neighbor_radius.setter
     def laplacian_filter_neighbor_radius(self, laplacian_filter_neighbor_radius: float | None) -> None:
@@ -520,16 +528,50 @@ class BiosignalPreprocessor:
         if self._mne_raw_data is not None: return self._mne_raw_data
 
         # initialise and return:
-        data_info = mne.create_info(ch_names=EEG_CHANNELS,
+        ch_names = EEG_CHANNELS if self.modality == 'eeg' else EMG_CHANNELS
+        data_info = mne.create_info(ch_names=ch_names,
                                     sfreq=self.sampling_freq,
                                     ch_types=self.modality,)
         raw_data = mne.io.RawArray(self.np_input_data.T, data_info)
 
-        if self.modality == 'eeg': raw_data.set_montage(mne.channels.make_standard_montage('standard_1020'))
-        # todo: implement custom sEMG montage for Laplacian spatial filtering
+        # electrode positions:
+        if self.modality == 'eeg':
+            raw_data.set_montage(mne.channels.make_standard_montage('standard_1020'))
+
+        elif self.modality == 'emg':
+            # GR10MM0808 OT Bioelettronica EMG electrode:
+            #   8x8 with 3mm electrode diameter and 10mm inter-electrode distance -> total 8cm*8cm
+            # positions: array of shape (64, 3) in METERS
+            #   hence add a third dimension (=0) and
+            #   scale the positions from visualizations.py to 8cm*8cm
+            pos_array = np.array(list(visualizations.EMG_POSITIONS.values()))  # (64,2)
+            pos_array = np.concatenate([pos_array, np.zeros_like(pos_array[:, 0:1])], axis=1)  # (64,3)
+            current_x_span = np.max(pos_array[:, 0]) - np.min(pos_array[:, 0])
+            scale_factor = .08 / current_x_span
+            pos_array *= scale_factor
+
+            # save for latter accessing with electrode_positions property:
+            self._electrode_positions = pos_array
+            # we don't use set_montage here because MNE doesn't foresee montages for EMG data
 
         self._mne_raw_data = raw_data
         return self._mne_raw_data
+
+    @property
+    def electrode_positions(self) -> np.ndarray:
+        """ Returns numpy array of shape (n_channels, 3). """
+        if self.modality == 'emg':  # for EMG, MNE doesn't store montages
+            # regularly this private attribute is defined in mne_raw_data property, therefore access such:
+            _ = self.mne_raw_data
+            if hasattr(self, "_electrode_positions"):
+                return self._electrode_positions
+            else:
+                raise ValueError("For EMG data private attribute _electrode_positions needs to be defined before accessing electrode_positions property.")
+
+        # else for EEG data:
+        _ = self.mne_artefact_free_data.get_montage()  # checks whether montage was provided
+        return np.array([self.mne_artefact_free_data.info['chs'][i]['loc'][:3] for i in
+                        range(len(self.mne_artefact_free_data.ch_names))])  # 3D coords of channels
 
     @property
     def mne_filtered_data(self) -> mne.io.RawArray:
@@ -547,7 +589,7 @@ class BiosignalPreprocessor:
         filtered_data = self.mne_raw_data.copy()
         filtered_data.filter(l_freq=self.band_pass_frequencies[0],
                              h_freq=self.band_pass_frequencies[1],
-                             fir_design='firwin')
+                             fir_design='firwin', picks='all')
         self._mne_filtered_data = filtered_data
         if self.notch_frequency is not None: self._apply_notch_filter()
         return self._mne_filtered_data
@@ -555,7 +597,7 @@ class BiosignalPreprocessor:
     @property
     def mne_referenced_data(self) -> mne.io.RawArray:
         """
-        Re-referenced MNE data.
+        Re-referenced MNE data. Currently only re-references EEG data, EMG data remains unaltered.
 
         Returns
         -------
@@ -565,10 +607,10 @@ class BiosignalPreprocessor:
         if self._mne_referenced_data is not None: return self._mne_referenced_data
 
         # compute:
-        if self.reference_channels is None: return self.mne_filtered_data
+        if self.reference_channels is None or self.modality == 'emg': return self.mne_filtered_data
         temp_data = self.mne_filtered_data.copy()
         temp_data.set_eeg_reference(ref_channels=self.reference_channels,
-                                    ch_type='auto' if self.modality == 'eeg' else 'emg')
+                                    ch_type='auto')
         self._mne_referenced_data = temp_data
         return self._mne_referenced_data
 
@@ -622,6 +664,7 @@ class BiosignalPreprocessor:
         if self._mne_ica_result is not None: return self._mne_ica_result
 
         if self.n_ica_components is None: raise ValueError("n_ica_components needs to be defined!")
+        if self.modality == 'emg': raise ValueError("ica fitting only works (and is only intended) for EEG data.")
         # fit ICA:
         ica = mne.preprocessing.ICA(n_components=self.n_ica_components,
                                     max_iter='auto',
@@ -630,7 +673,7 @@ class BiosignalPreprocessor:
                                     # switches between nonlinearities, appears more robust but takes much longer (than FastICA)
                                     fit_params=dict(extended=True))
         # convergence is difficult with too short datasets, rule of thumb appears to be n-components x 20-30 = required_seconds
-        ica.fit(self.mne_amplitude_compliant_data)
+        ica.fit(self.mne_amplitude_compliant_data, picks="all")
         self._mne_ica_result = ica
         return self._mne_ica_result
 
@@ -638,6 +681,7 @@ class BiosignalPreprocessor:
     def mne_artefact_free_data(self) -> mne.io.RawArray:
         """
         Artefact-free data after ICA component exclusion.
+        This step is skipped if n_ica_components=None or for EMG data!
 
         Returns
         -------
@@ -647,7 +691,7 @@ class BiosignalPreprocessor:
         if self._mne_artefact_free_data is not None: return self._mne_artefact_free_data
 
         # otherwise compute
-        if self.n_ica_components is None: return self.mne_amplitude_compliant_data
+        if self.n_ica_components is None or self.modality == 'emg': return self.mne_amplitude_compliant_data
 
         # label ica components:
         if self._ica_automatic_labels is None:  # store internally
@@ -655,10 +699,10 @@ class BiosignalPreprocessor:
                 self.mne_amplitude_compliant_data,
                                                              self.mne_ica_result, method='iclabel')
         probs, labels = self._ica_automatic_labels.values()
-        mne.utils.logger.info("Found the following IC labels:\n", labels)
-        labels_to_exclude = ('heart beat', 'muscle artifact', 'channel noise')
+        mne.utils.logger.info("Found the following IC labels:\n" + str(labels))
+        labels_to_exclude = ('heart beat', 'muscle artifact', 'channel noise', 'eye blink')
         automatically_excluded_ics = [idx for idx, label in enumerate(labels) if label in labels_to_exclude]
-        mne.utils.logger.info(f"Will exclude {labels_to_exclude} ICs, that are: ", automatically_excluded_ics)
+        mne.utils.logger.info(f"Will exclude {labels_to_exclude} ICs, that are: " + str(automatically_excluded_ics))
 
         # exclude such. we can access the private variable _mne_ica... here because we ensured it's computed by accessing the property above
         exclusion_list = automatically_excluded_ics + self.manual_ics_to_exclude
@@ -860,7 +904,7 @@ class BiosignalPreprocessor:
                       sampling_freq: float,
                       modality: Literal['eeg', 'emg'],
                       ) -> mne.io.RawArray:
-        data_info = mne.create_info(ch_names=EEG_CHANNELS,
+        data_info = mne.create_info(ch_names=EEG_CHANNELS if modality == 'eeg' else EMG_CHANNELS,
                                     sfreq=sampling_freq,
                                     ch_types=modality, )
         return mne.io.RawArray(np_data.T, data_info)
@@ -875,12 +919,9 @@ class BiosignalPreprocessor:
         # sanity checks
         if self.laplacian_filter_neighbor_radius is None:
             raise ValueError("laplacian_filter_neighbor_radius needs to be defined!")
-        if self.modality == 'emg':
-            raise ValueError("Laplacian spatial filtering for EMG data is not implemented yet (requires 3D positional electrode mapping). Data remains unchanged.")
 
-        # compute:
-        _ = self.mne_artefact_free_data.get_montage()  # checks whether montage was provided
-        pos = np.array([self.mne_artefact_free_data.info['chs'][i]['loc'][:3] for i in range(len(self.mne_artefact_free_data.ch_names))])  # 3D coords of channels
+        # fetch electrode positions:
+        pos = self.electrode_positions  # 3D coords of channels
 
         # identify proximal EEG channels based on positional mapping:
         neighbors = []
@@ -933,6 +974,7 @@ class BiosignalPreprocessor:
             peak=reject_criteria,
             min_duration=min_duration,  # minimum duration for consecutive samples to exceed or fall below threshold
             bad_percent=max_bad_segments_percent,  # channels with more bad segments will be marked as complete bad channels
+            picks='all',
         )
         mne.utils.logger.info(f"Found {len(bad_channels)} bad channels.")
 
@@ -941,8 +983,9 @@ class BiosignalPreprocessor:
             self._mne_amplitude_compliant_data.set_annotations(annotations)
             self._mne_amplitude_compliant_data.info['bads'].extend(bad_channels)
 
-        # convert to indices (starting at 1 and return):
-        bad_channel_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in bad_channels]
+        # convert to indices (starting at 1 and return), for EMG we can just cut off the first 3 letters (EMG13 -> 13)
+        bad_channel_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in bad_channels] if self.modality == 'eeg' else [int[ch[3:]] for ch in bad_channels]
+        if len(bad_channel_inds) == self.n_channels: raise ValueError("current amplitude_rejection_threshold causes all channels to be marked as bad!")
         return bad_channel_inds
 
     def clean_downstream_results(self,
@@ -1160,7 +1203,7 @@ class BiosignalPreprocessor:
     # later, when multi-trial data is processed
 
     def validate_spatial_filtering(self, verbose: bool = True) -> float:
-        """ Only works for EEG currently. Averages coherence over all frequencies. """
+        """ Averages coherence over all frequencies. """
         with mne.utils.use_log_level('warning'):  # context manager to keep console output clean
             # derive neighbors (based on 3d-positional information from MNE and laplacian_filter_neighbor_radius):
             neighbor_mapping = self.get_neighboring_electrodes_mapping()
@@ -1190,7 +1233,7 @@ class BiosignalPreprocessor:
                     local_coherence_after = np.nanmean(ch_local_coherences).item()
                     if verbose: print(f"[VALIDATION] Local Mag.Sq. Coherence AFTER spatial filtering: {local_coherence_after:.3f}")
 
-            # compute coherence diff:
+            # compute coerence diff:
             coh_diff = local_coherence_after - local_coherence_before
             if verbose: print(f"[VALIDATION] Local coherence (~cross talk) hence changed by: {coh_diff:.3f}")
             return coh_diff
@@ -1254,81 +1297,120 @@ class BiosignalPreprocessor:
 
 if __name__ == '__main__':
     ROOT = Path().resolve().parent.parent
-    QTC_DATA = ROOT / "data" / "qtc_measurements" / "2025_06"
-    subject_data_dir = QTC_DATA / "sub-10"
+    OUTPUT = ROOT / 'output'
+    STUDY_PLOTS = OUTPUT / '250720 jose_data'
+    EXTERNAL_DRIVE = Path("/Volumes/Paul SSD 2/251120 INI Measurements")
+    STUDY_DATA = EXTERNAL_DRIVE / "250720 jose_data"
+    # change these to select subject and trial:
+    subject_data_dir = STUDY_DATA / "sub_03"
+    subject_plot_dir = STUDY_PLOTS / "sub_03"
+    file_title = "mvc_eeg_full"
 
-    # load data:
+    ### DATA LOADING
     print('Loading data...')
-    input_file = np.load(subject_data_dir / "motor_eeg_full.npy").T#[:2048*60, :]  # 1 minute
-    config_file = subject_data_dir / "2025-11-19 11_38_47 Preprocessor Config eeg 64ch (motor_eeg_full).json"
+    # mmap_mode='r': memory-mapped read-only access (would accelerate but sometimes deletes files)
+    input_file = np.load(subject_data_dir / f"{file_title}.npy").T#[:2048*20, :]  # 1 minute
 
-    # try initialising from config:
-    prepper = BiosignalPreprocessor.init_from_config(config_file, input_file)
-    print(prepper)
-    quit()
+    try:  # search matching config
+        config_file = filemgmt.most_recent_file(subject_data_dir, ".json", file_title)
+    except ValueError:
+        print(f"No config file found for {file_title}")
+        config_file = None
 
-    # define prepper:
     print('Initialising BiosignalPreprocessor...')
-    data_modality: Literal['eeg', 'emg'] = 'eeg'
-    sampling_freq = 2048  # Hz
-    prepper = BiosignalPreprocessor(
-        np_input_data=input_file,
-        sampling_freq=sampling_freq,
-        modality=data_modality,
-        band_pass_frequencies='auto',
-    )
+    if config_file is not None:  # try initialising from config:
+        prepper = BiosignalPreprocessor.init_from_config(config_file, input_file)
+    else:
+        data_modality: Literal['eeg', 'emg'] = 'emg' if 'emg' in file_title else 'eeg'
+        sampling_freq = 2048  # Hz
+        prepper = BiosignalPreprocessor(
+            np_input_data=input_file,
+            sampling_freq=sampling_freq,
+            modality=data_modality,
+            band_pass_frequencies='auto',
+            amplitude_rejection_threshold=.005
+        )
 
-    ### input plots:
+    ### INPUT PLOTS
     # fourier spectrum:
     features.discrete_fourier_transform(prepper.np_input_data,
-                                           sampling_freq=sampling_freq,
-                                           frequency_range=(0, 100),
-                                           plot_title='Raw Data - Fourier Spectrum',
-                                           plot_result=True, )
+                                        sampling_freq=prepper.sampling_freq,
+                                        frequency_range=(0, 100),
+                                        plot_title=f'Raw Data - Fourier Spectrum ({file_title})',
+                                        save_dir=subject_plot_dir,
+
+                                        plot_result=True, )
     # PSD spectrogram:
     features.multitaper_psd(input_array=prepper.np_input_data, sampling_freq=prepper.sampling_freq, nw=3,
                             window_length_sec=1.0, overlap_frac=0.5, axis=0, verbose=True,
-                            plot_result=True, frequency_range=(0, 100), title='Input Averaged PSD Spectrogram')
+                            plot_result=True, frequency_range=(0, 100),
+                            save_dir=subject_plot_dir, title=f'Input Averaged PSD ({file_title})')
 
+    ### ARTEFACT REJECTION
     # automatic artefact rejection:
     _ = prepper.mne_artefact_free_data
 
-    # manual inspection of ICs:
-    if input("Do you want to visualize all ICs? Press enter if yes, else type anything: ") == "":
-        for ic_ind in range(prepper.n_ica_components):
-            prepper.plot_independent_component(ic_ind,
-                                               verbose=(ic_ind == 0),  # print only on first iteration
-                                               )
-    # possibility for changes:
-    manual_ics = input(
-        "Please enter additional independent components to exclude, separated by space (e.g. '10 13 7'): ")
-    if manual_ics != '':
-        manual_ics = [int(ind_str.strip()) for ind_str in manual_ics.split(' ')]
-    prepper.manual_ics_to_exclude = manual_ics
-
+    if prepper.modality == 'eeg':  # manual inspection of ICs (only for EEG!)
+        if input("Do you want to visualize all ICs? Press enter if yes, else type anything: ") == "":
+            for ic_ind in range(prepper.n_ica_components):
+                prepper.plot_independent_component(ic_ind,
+                                                   verbose=(ic_ind == 0),  # print only on first iteration
+                                                   )
+        # possibility for changes:
+        manual_ics = input(
+            "Please enter additional independent components to exclude, separated by space (e.g. '10 13 7'): ")
+        if manual_ics != '':
+            manual_ics = [int(ind_str.strip()) for ind_str in manual_ics.split(' ')]
+            prepper.manual_ics_to_exclude = manual_ics
 
     # save to config:
-    prepper.export_config(subject_data_dir, "motor_eeg_full")
+    prepper.export_config(subject_data_dir, file_title)
 
-    ### output plots:
+    ### OUTPUT PLOTS
     # fourier spectrum:
+
     features.discrete_fourier_transform(prepper.np_output_data,
                                         sampling_freq=prepper.sampling_freq,
                                         frequency_range=(0, 100),
-                                        plot_title='Preprocessed Data - Fourier Spectrum',
+                                        plot_title=f'Preprocessed Data - Fourier Spectrum ({file_title})',
+                                        save_dir=subject_plot_dir,
                                         plot_result=True)
     # PSD spectrogram:
-    features.multitaper_psd(input_array=prepper.np_output_data, sampling_freq=prepper.sampling_freq, nw=3,
-                            window_length_sec=1.0, overlap_frac=0.5, axis=0, verbose=True,
-                            plot_result=True, frequency_range=(0, 100), title='Output Averaged PSD Spectrogram')
+    spectrograms, timestamps, freqs = features.multitaper_psd(input_array=prepper.np_output_data,
+                                                              sampling_freq=prepper.sampling_freq, nw=3,
+                                                              window_length_sec=.2, overlap_frac=0.5, axis=0,
+                                                              verbose=True,
+                                                              plot_result=True, frequency_range=(0, 100),
+                                                              save_dir=subject_plot_dir,
+                                                              title=f'Output Averaged PSD ({file_title})')
 
+    # spectrograms shape: (n_channels, n_windows, n_frequencies)
+    # timestamps shape: (n_windows), frequencies shape: (n_frequencies)
+    psd_sampling_freq = spectrograms.shape[1] / (len(prepper.np_output_data) / prepper.sampling_freq)  # new_timesteps / time_duration
 
+    # average (and eventually log-transform) spectrogram across frequency bins:
+    do_log_transform: bool = True
+    freq_averaged_psd_dict = {}  # keys: band-label keys, values: np.ndarrays shaped (n_channels, n_windows)
+    for band_label, band_range in features.FREQUENCY_BANDS.items():
+        frequency_mask = (freqs >= band_range[0]) & (freqs < band_range[1])  # select band frequencies
+        spectrogram_subset = spectrograms[:, :, frequency_mask]
+        if do_log_transform: spectrogram_subset = np.log10(spectrogram_subset + 1e-10)
+        freq_averaged_psd_dict[band_label] = np.squeeze(np.mean(spectrogram_subset, axis=2))  # average across freqs.
 
+    # animation:
+    band_to_scrutinize = 'beta'
+    visualizations.animate_electrode_heatmap(
+        freq_averaged_psd_dict[band_to_scrutinize].T,  # requires shape (n_timesteps, n_channels)
+        positions=visualizations.EEG_POSITIONS if prepper.modality == 'eeg' else visualizations.EMG_POSITIONS,
+        add_head_shape=prepper.modality == 'eeg',
+        sampling_rate=psd_sampling_freq, animation_fps=psd_sampling_freq,
+        value_label="Power [V^2/Hz]" if not do_log_transform else "Power [V^2/Hz] [log10]",
+        plot_title=f"{prepper.modality.upper()} PSD ({band_to_scrutinize}-band)"
+    )
 
-
-    ##### VALIDATION:
+    ### VALIDATION
     filt_snr_increase, filt_psd_diff = prepper.validate_filtering()
-    ref_snr_increase = prepper.validate_referencing()
+    if prepper.modality == 'eeg': ref_snr_increase = prepper.validate_referencing()
     specificity, selectivity = prepper.validate_amplitude_thresholding()
     spat_filt_local_coh_decrease = prepper.validate_spatial_filtering()
     denoise_snr_increase = prepper.validate_wavelet_denoising()
