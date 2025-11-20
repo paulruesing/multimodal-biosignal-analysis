@@ -107,6 +107,12 @@ EEG_POSITIONS = {'Fpz': (0.0, 0.602),
                  'O1': (-0.165, -0.5599999999999999),
                  'Oz': (0.0, -0.602),
                  'O2': (0.165, -0.5599999999999999)}
+# from -.6 to +.6 in both dimensions:
+x_list = list(np.linspace(-.6, .6, 8))*8
+y_list = []
+for element in list(np.linspace(-.6, .6, 8))[::-1]:
+    y_list += [element] * 8
+EMG_POSITIONS = {str(ind+1): (x, y) for ind, (x, y) in enumerate(zip(x_list, y_list))}
 
 
 ##############  AUXILIARY FUNCTIONS ##############
@@ -118,80 +124,71 @@ def smart_save_fig(dir: str | Path,
     plt.savefig(save_dir, bbox_inches='tight')
 
 ##############  PLOTTING FUNCTIONS ##############
-def plot_eeg_heatmap(values: dict[str, float] | list[float],
-                     include_labels: bool = True,
-                     colormap='viridis',
-                     color_scale=None,
-                     value_label: str = 'Heatmap values',
-                     plot_size: (int, int) = (8, 8),
-                     plot_title: str = 'EEG Heatmap',
-                     save_dir: str | Path = None,
-                     continue_code: bool = False,):
-    """
-    Plot heatmap circles at predefined electrode positions for a 64-channel EEG (10-20 system).
+def initialise_electrode_heatmap(
+        values: np.ndarray | list[float],
+        positions: np.ndarray | dict[str, tuple[float, float, float]] | list[tuple[float, float, float]],
+        add_head_shape: bool = False,  # only senseful for EEG
+        include_labels: bool = True,
+        colormap='viridis',
+        color_scale=None,
+        value_label: str = 'Heatmap values',
+        plot_size: tuple[int, int] = (8, 8),
+        plot_title: str = 'EEG Heatmap',
+        hidden: bool = False,
+        save_dir: str | Path = None,
+) -> tuple[plt.Figure, plt.Axes, PatchCollection]:
+    """ Needs to return figure, ax and circle_collection (PatchCollection) for animation. """
+    # type conversion:
+    if isinstance(values, list): values = np.array(values)
+    if not isinstance(positions, dict):  # dummy channel labels if no dict provided
+        positions = {ind+1: entry for ind, entry in enumerate(positions)}
 
-    Parameters
-    ----------
-    values : dict or list of float
-        Heatmap values mapped by channel names if dict, or list of values corresponding to predefined electrode positions.
-    include_labels : bool, default True
-        Whether to include text labels for each electrode.
-    colormap : str or matplotlib.colors.Colormap, default 'viridis'
-        Colormap used to map values to colors.
-    color_scale : tuple of (float, float) or None, optional
-        Tuple specifying (vmin, vmax) for normalization of colors. If None, min and max of values are used.
-    value_label : str, default 'Heatmap values'
-        Label for the colorbar next to the heatmap.
-    plot_size : tuple of int, default (8, 8)
-        Size of the matplotlib figure in inches.
-    plot_title : str, default "Magnitude Spectrum"
-        Title displayed at the top of the plot.
-    save_dir : str or Path, optional
-        Directory to save the figure.
-    continue_code: bool, default False
-        Whether to continue code execution while fig is shown.
+    # sanity checks:
+    n_channels = values.shape[0]
+    assert n_channels == 64, f"Provided number of channels {n_channels} isn't 64 as required by this method."
 
-    Returns
-    -------
-    matplotlib.figure.Figure
-        The figure object containing the heatmap plot.
-    """
+    ##### initialise figure:
+    print('Initializing EEG animation...')
     fig, ax = plt.subplots(figsize=plot_size)
+    ax.set_title(plot_title)
 
-    # Extract values array for normalization
-    vals = list(values.values()) if isinstance(values, dict) else values
-    vmin, vmax = color_scale if color_scale is not None else (min(vals), max(vals))
-
-    # Normalize and colormap setup
+    # extract value range for normalization (if not provided take minimum and maximum along both dimensions)
+    vmin, vmax = color_scale if color_scale is not None else (np.min(values), np.max(values))
+    # normalize and setup colormap:
     norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
     cmap = mpl.colormaps[colormap]
 
-    # Draw circles
-    largest_abs_x = 0; largest_abs_y = 0
-    for ind, (ch, pos) in enumerate(EEG_POSITIONS.items()):
-        val = values.get(ch, vmin) if isinstance(values, dict) else values[ind]
-        color = cmap(norm(val))
-        circle = patches.Circle(pos, radius=0.05, color=color, ec='black', lw=0.8)
-        ax.add_patch(circle)
-        if include_labels:
-            ax.text(pos[0], pos[1], ch, ha='center', va='center', fontsize=8,
-                    color='white' if np.mean(color[:3]) < .5 else 'black',  # use black font for very bright colors (RGB average based)
-                    )
+    ### eeg heatmap:
+    # initialise circles for heatmap with PatchCollection for seamless animation (freezes animation):
+    circles = [patches.Circle(pos, radius=0.05) for pos in positions.values()]
+    circle_collection = PatchCollection(circles,
+                                        edgecolors='black',
+                                        linewidths=0.8,
+                                        cmap=cmap,
+                                        # this leads to circle_collection.set_array directly changing the colors
+                                        norm=norm)
+    ax.add_collection(circle_collection)
 
-    # add elipse around head:
-    width, height = 1.256, 1.505
-    ellipse = patches.Ellipse([0, 0], width=width, height=height,
-                              edgecolor='black', facecolor='none', lw=1.5, ls='-')
-    ax.add_patch(ellipse)
+    # channel labels:
+    if include_labels:
+        for label, (x, y) in positions.items():
+            txt = ax.text(x, y, label, ha='center', va='center', fontsize=8, color='black')
 
-    # add nose:
-    half_circle = patches.Wedge(center=(0, height/2), r=0.1, theta1=-5, theta2=185,
-                                facecolor='none', edgecolor='black', ls='-', lw=1.5)
-    ax.add_patch(half_circle)
+    if add_head_shape:
+        # add ellipse around head:
+        width, height = 1.256, 1.505
+        ellipse = patches.Ellipse([0, 0], width=width, height=height,
+                                  edgecolor='black', facecolor='none', lw=1.5, ls='-')
+        ax.add_patch(ellipse)
 
-    # Colorbar
+        # add nose:
+        half_circle = patches.Wedge(center=(0, height / 2), r=0.1, theta1=-5, theta2=185,
+                                    facecolor='none', edgecolor='black', ls='-', lw=1.5)
+        ax.add_patch(half_circle)
+
+    # colorbar:
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array(vals)
+    sm.set_array(np.mean(values, axis=0))  # derive color bar from time-averaged values
     cbar = fig.colorbar(sm, ax=ax)
     cbar.set_label(value_label)
 
@@ -200,33 +197,28 @@ def plot_eeg_heatmap(values: dict[str, float] | list[float],
     ax.autoscale_view()
     ax.set_xticks([])
     ax.set_yticks([])
-    
+
+    if not hidden: plt.show()
+
     # eventually save:
     if save_dir is not None: smart_save_fig(save_dir, plot_title)
 
-    plt.show(block=not continue_code)
-    return fig
+    return fig, ax, circle_collection
 
 
-def animate_eeg_heatmap(values: dict[str, float] | list[float],
-                        sampling_rate: float,
-                        include_labels: bool = True,
-                        colormap='viridis',
-                        color_scale=None,
-                        value_label: str = 'Heatmap values',
-                        plot_size: tuple[int, int] = (7, 7),
-                        plot_title: str = 'EEG Heatmap',
-                        animation_fps: int = 15,):
+def animate_electrode_heatmap(values: np.ndarray | list[list[float]],
+                              positions: np.ndarray | dict[str, tuple[float, float, float]] | list[tuple[float, float, float]],
+                              sampling_rate: float,
+                              animation_fps: int = 15,
+                              **heatmap_kwargs, ):
     """
-    Animate a heatmap of EEG channel values plotted as circles at predefined electrode positions
+    Animate a heatmap of 64 channel electrode values plotted as circles at predefined electrode positions.
     based on the 64-channel 10-20 system.
 
     Parameters
     ----------
-    values : dict[str, float] or list[float]
-        Input EEG data values. Can be a dictionary mapping channel names to float values or
-        a list/array representing values over time (timesteps x channels). If a list of lists
-        or array is provided, it should have shape (n_timesteps, 64).
+    values : np.ndarray or list[float]
+        Input data values. If a list of lists or array is provided, it should have shape (n_timesteps, 64).
     sampling_rate : float
         Original sampling rate (Hz) of the input EEG data, used to resample data for animation.
     include_labels : bool, default True
@@ -273,57 +265,19 @@ def animate_eeg_heatmap(values: dict[str, float] | list[float],
                                         original_sampling_freq=sampling_rate,
                                         new_sampling_freq=animation_fps)
 
-    ##### initialise figure:
-    print('Initializing EEG animation...')
-    fig, ax = plt.subplots(figsize=plot_size)
-    ax.set_title(plot_title)
+    ### initialise figure:
+    # heatmap:
+    color_scale = (np.min(np.min(values)), np.max(np.max(values)))  # to account for all timesteps
+    fig, ax, circle_collection = initialise_electrode_heatmap(values=values[0, :],
+                                                              positions=positions,
+                                                              color_scale=color_scale,
+                                                              hidden=True,  # should be shown only upon animation start
+                                                              **heatmap_kwargs
+                                                              )
+    # info text:
     info_text = ax.text(-.5, -.8, s="Initialising...", ha='center', va='center', fontsize=8)
 
-    # extract value range for normalization (if not provided take minimum and maximum along both dimensions)
-    vmin, vmax = color_scale if color_scale is not None else (np.min(np.min(values)), np.max(np.max(values)))
-    # normalize and setup colormap:
-    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
-    cmap = mpl.colormaps[colormap]
-
-    ### eeg heatmap:
-    # initialise circles for heatmap with PatchCollection for seamless animation (freezes animation):
-    circles = [patches.Circle(pos, radius=0.05) for pos in EEG_POSITIONS.values()]
-    circle_collection = PatchCollection(circles,
-                                        edgecolors='black',
-                                        linewidths=0.8,
-                                        cmap=cmap,  # this leads to circle_collection.set_array directly changing the colors
-                                        norm=norm)
-    ax.add_collection(circle_collection)  # Single add operation"""
-    # channel labels:
-    if include_labels:
-        for label, (x, y) in EEG_POSITIONS.items():
-            txt = ax.text(x, y, label, ha='center', va='center', fontsize=8, color='black')
-
-
-    # add ellipse around head:
-    width, height = 1.256, 1.505
-    ellipse = patches.Ellipse([0, 0], width=width, height=height,
-                              edgecolor='black', facecolor='none', lw=1.5, ls='-')
-    ax.add_patch(ellipse)
-
-    # add nose:
-    half_circle = patches.Wedge(center=(0, height / 2), r=0.1, theta1=-5, theta2=185,
-                                facecolor='none', edgecolor='black', ls='-', lw=1.5)
-    ax.add_patch(half_circle)
-
-    # colorbar:
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array(np.mean(values, axis=0))  # derive color bar from time-averaged values
-    cbar = fig.colorbar(sm, ax=ax)
-    cbar.set_label(value_label)
-
-    # scaling and removing axes:
-    ax.set_aspect('equal')
-    ax.autoscale_view()
-    ax.set_xticks([])
-    ax.set_yticks([])
-
-    ### add pause button
+    # add pause button:
     global is_running; is_running = True
 
     def pause_button_click(event):  # button clicked method
@@ -336,7 +290,7 @@ def animate_eeg_heatmap(values: dict[str, float] | list[float],
     button = Button(ax_button, 'Pause')
     button.on_clicked(pause_button_click)
 
-    ### add playback speed slider:
+    # add playback speed slider:
     global playback_speed; playback_speed = 1.0  # multiplied to frame counter increment
 
     def update(val):  # update function
@@ -346,7 +300,7 @@ def animate_eeg_heatmap(values: dict[str, float] | list[float],
     freq_slider = Slider(slider_ax, 'Playback Speed', valmin=0.1, valmax=2.0, valinit=1.0)
     freq_slider.on_changed(update)
 
-    ##### animation update method:
+    ### animation:
     total_frames = len(values); total_time = total_frames / animation_fps
 
     # actual frame counter (pausable and controlled by playback speed)
@@ -366,7 +320,7 @@ def animate_eeg_heatmap(values: dict[str, float] | list[float],
             global playback_speed
             pausable_frame_ind = (pausable_frame_ind + 1*playback_speed) % total_frames
 
-        return circles + [info_text]
+        return circle_collection, [info_text]  # if doesn't work -> switch back to return circles + [info_text]
 
     global ani  # store animation in global namespace
     ani = FuncAnimation(fig, update, frames=total_frames, blit=False,
@@ -381,7 +335,8 @@ def plot_freq_domain(amplitude_spectrum: np.ndarray[float, float] | np.ndarray[f
                      plot_size: tuple[float, float] = (12, 6),
                      plot_title: str = "Magnitude Spectrum",
                      save_dir: str | Path = None,
-                     continue_code: bool = False,):
+                     continue_code: bool = False,
+                     include_legend: bool = False,):
     """
     Plot the magnitude spectrum of one or more channels in the frequency domain.
 
@@ -411,6 +366,8 @@ def plot_freq_domain(amplitude_spectrum: np.ndarray[float, float] | np.ndarray[f
         Directory to save the figure.
     continue_code: bool, default False
         Whether to continue code execution while fig is shown.
+    include_legend: bool, default False
+        Whether to include legend in plot (slow for many channels).
 
     Returns
     -------
@@ -428,7 +385,7 @@ def plot_freq_domain(amplitude_spectrum: np.ndarray[float, float] | np.ndarray[f
     plt.xlabel('Frequency [Hz]')
     plt.ylabel('Amplitude')
     plt.title(plot_title)
-    plt.legend(ncols=amplitude_spectrum.shape[1] // 16 + 1)
+    if include_legend: plt.legend(ncols=amplitude_spectrum.shape[1] // 16 + 1)
     if frequency_range is not None: plt.xlim(frequency_range)
     else: print("Consider defining frequency range for improved display.")
     
@@ -586,9 +543,10 @@ def plot_spectrogram(
     cbar.ax.tick_params(labelsize=10)
 
     plt.tight_layout()
-    plt.show(block=not continue_code)
 
     # eventually save fig:
-    if save_dir is not None: smart_save_fig(save_dir, title)
+    if save_dir is not None:
+        smart_save_fig(save_dir, title)
 
+    plt.show(block=not continue_code)
     return fig, ax
