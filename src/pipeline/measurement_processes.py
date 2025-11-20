@@ -593,12 +593,18 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
         fig.suptitle(title)
 
         # trigger buttons (events relate to sampling-process):
+        global recent_event_str
+        recent_event_str = None
         def start_button_click(event):
             start_trigger_event.set()
+            global recent_event_str
+            recent_event_str = 'Start Trigger'
             start_button.label.set_text("Start Trigger (Done)")
             stop_button.label.set_text("Stop Trigger")
         def stop_button_click(event):
             stop_trigger_event.set()
+            global recent_event_str
+            recent_event_str = 'Stop Trigger'
             start_button.label.set_text("Start Trigger")
             stop_button.label.set_text("Stop Trigger (Done)")
 
@@ -611,6 +617,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
 
         # define music control instruments:
         if include_music:
+            # resume and pause buttons:
             music_button_label = fig.text(0.1, 0.6, "Music Control:", ha='left', va='center', fontsize=10)
             resume_button_ax = plt.axes([0.1, .4, 0.1, 0.15])
             resume_button = Button(resume_button_ax, 'Resume')
@@ -621,6 +628,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             def pause_button_clicked(event): music_master.pause()
             pause_button.on_clicked(pause_button_clicked)
 
+            # category buttons:
             n_categories = len(music_master.category_url_dict.keys())
             width_button = (.5 / n_categories) * .95
             button_positions = np.linspace(.225, .775-width_button, n_categories)
@@ -635,6 +643,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
         info_text = fig.text(0.1, 0.25, "", ha='left', va='center', fontsize=10)
         if include_music: music_text = fig.text(0.1, 0.1, "", ha='left', va='center', fontsize=10)
 
+        ### animation methods:
         def init():
             info_text.set_text("Initializing...")
             if include_music: music_text.set_text("Initializing...")
@@ -642,11 +651,14 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
 
         global save_log_counter
         save_log_counter = 1  # for saving log file
-        global log_dict
-        log_dict = {'Time': [], 'Music': []}
+        if control_log_path is not None:
+            global log_dict
+            log_dict = {'Time': [], 'Music': [], 'Event': []}  # content of log file
+            print(f"Initialising log file. Will save and reset full file every {(save_log_working_memory_size/display_refresh_rate_hz):.2f} s and do interim saves every {(save_log_working_memory_size/display_refresh_rate_hz/200):.2f} s!")
         def update(frame):
             """ update view and fetch new observation. (frame is required although unused) """
             # update only if is_running:
+            ### update view:
             info_text.set_text(f"Receiving Serial Measurements: {list(shared_dict.keys())}")
             if include_music:
                 if music_master.current_category_and_counter is not None:  # e.g. Groovy (1/8)
@@ -660,17 +672,25 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
                 except ValueError:  # no music playing currently
                     music_text.set_text("No track playing currently.")
 
-            # logging eventually:
+            ### logging:
             global save_log_counter
+            global recent_event_str
+            # log updating:
             if control_log_path is not None:
                 global log_dict
                 log_dict['Time'].append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 log_dict['Music'].append(music_text.get_text())
+                if recent_event_str is not None:  # save and reset in one block to prevent resetting event str without logging
+                    log_dict['Event'].append(recent_event_str)
+                    recent_event_str = None
+                else: log_dict['Event'].append(recent_event_str)
+
                 save_log_counter += 1  # because this is only increased here, we can omit the condition below:
+            # log saving:
             if save_log_counter % save_log_working_memory_size == 0:  # save and working memory reset
                 pd.DataFrame(log_dict).to_csv(control_log_path / filemgmt.file_title("Experiment Log Working Memory Full Save", ".csv"), index=False)
-                log_dict = {'Time': [], 'Music': []}
-            elif save_log_counter % (save_log_working_memory_size // 100) == 0:  # interim save
+                log_dict = {'Time': [], 'Music': [], 'Event': []}
+            elif save_log_counter % (save_log_working_memory_size // 200) == 0:  # interim save
                 pd.DataFrame(log_dict).to_csv(control_log_path / filemgmt.file_title("Experiment Log Interim Save", ".csv"), index=False)
 
             return (info_text, music_text) if include_music else info_text
@@ -774,7 +794,6 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
     for measurement_label, _, _ in measurement_definitions:
         shared_dict[measurement_label] = .0
         measurement_labels.append(measurement_label)
-
 
     # saving event:
     force_save_event = RobustEventManager()
