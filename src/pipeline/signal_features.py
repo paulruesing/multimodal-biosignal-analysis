@@ -273,43 +273,6 @@ if __name__ == '__main__':
     import matplotlib as mpl
 
     mpl.use('MacOSX')
-    """
-    ####### DEV
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    from matplotlib.collections import PatchCollection
-    from matplotlib.animation import FuncAnimation
-    import numpy as np
-
-    fig, ax = plt.subplots()
-    circles = [patches.Circle((i, 0), 0.05) for i in range(10)]
-    circle_collection = PatchCollection(circles, cmap='viridis')
-    ax.add_collection(circle_collection)
-    ax.set_xlim(-1, 10)
-    ax.set_ylim(-1, 1)
-
-    values = np.random.rand(20, 10)
-    norm = plt.Normalize(vmin=0, vmax=1)
-    cmap = plt.cm.viridis
-
-    def update(frame):
-        print(f"Updating frame {frame}")
-        colors = cmap(norm(values[frame]))
-        ax.set_title('Hi'+str(frame))
-        for circle, color in zip(circles, colors):
-            circle.set_facecolor(color)
-        fig.canvas.draw_idle()
-        return circle_collection,
-
-
-    ani = FuncAnimation(fig, update, frames=20, interval=200, blit=False)
-    plt.show()
-    #### END DEV
-    quit()"""
-
-
-
-
 
     # global vars:
     ROOT = Path().resolve().parent.parent
@@ -321,9 +284,10 @@ if __name__ == '__main__':
     ch_subset = visualizations.EEG_CHANNELS_BY_AREA['Fronto-Central']
     ch_subset_inds = [visualizations.EEG_CHANNEL_IND_DICT[ch]-1 for ch in ch_subset]  # -1 to convert to computer-indices (0 = start)
 
-    # load data:
+    ### load data:
     print('Loading data...')
-    input_file = np.load(subject_data_dir / "motor_eeg_full.npy").T[:2048*20, ch_subset_inds if use_ch_subset else list(range(64))]  # 1 minute
+    # mmap_mode='r' leads to memory-mapped read-only access -> only loads data then accessed through slicing (more efficient!)
+    input_file = np.load(subject_data_dir / "motor_eeg_full.npy", mmap_mode='r').T[:2048*20, ch_subset_inds if use_ch_subset else list(range(64))]  # 1 minute
     sampling_freq = 2048  # Hz
     n_channels = input_file.shape[1]; n_timesteps = input_file.shape[0]
 
@@ -362,8 +326,9 @@ if __name__ == '__main__':
 
     # animation:
     print(psd_sampling_freq)
-    visualizations.animate_eeg_heatmap(
+    visualizations.animate_electrode_heatmap(
         freq_averaged_psd_dict['beta'].T,  # requires shape (n_timesteps, n_channels)
+        positions=visualizations.EMG_POSITIONS, add_head_shape=False,
         sampling_rate=psd_sampling_freq, animation_fps=psd_sampling_freq,
         value_label="Power [V^2/Hz]" if not do_log_transform else "Power [V^2/Hz] [log10]",
         plot_title="EEG PSD (Beta-Band)"
