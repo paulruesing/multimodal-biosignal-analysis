@@ -204,12 +204,14 @@ def sampling_process(shared_dict,
 
             # prepare separate series for each measurement:
             measurement_labels = [measurement_label for measurement_label, _, _ in measurement_definitions]
-            series_list = [pd.Series(index=globals()['timestamps_' + measurement_label],
-                                     data=globals()['measurements_' + measurement_label],
-                                     name=measurement_label,) for measurement_label in measurement_labels]
+            df_list = [pd.DataFrame(index=globals()['timestamps_' + measurement_label],
+                                     data={measurement_label: globals()['measurements_' + measurement_label]},
+                                     ) for measurement_label in measurement_labels]
 
             # merge series to df and save:
-            save_df = pd.concat(series_list, axis=1)
+            save_df = df_list[0]
+            for df in df_list[1:]:
+                save_df = save_df.join(df, how='outer')
             savepath = save_recordings_path / filemgmt.file_title(f"Measurements ({' '.join(measurement_labels)}) {sampling_rate_hz}Hz{title_suffix}", '.csv')
             print(savepath)
             save_df.to_csv(savepath)
@@ -803,7 +805,7 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
 
     # define processes:
     sampler = multiprocessing.Process(
-        target=dummy_sampling_process,
+        target=sampling_process,  # dummy_sampling_process,
         args=(shared_dict, force_save_event, saving_done_event, start_trigger_event, stop_trigger_event,),
         kwargs={'measurement_definitions': measurement_definitions,
                 'sampling_rate_hz': measurement_sampling_rate_hz,
@@ -899,9 +901,9 @@ if __name__ == '__main__':
     MUSIC_CONFIG = ROOT / "config" / "music_selection.txt"
 
     # start process:
-    start_measurement_processes(measurement_definitions=(("fsr", None, "VAL:"),
-                                                         #("ecg", None, "ECG:"),
-                                                         #("gsr", None, "GSR:"),
+    start_measurement_processes(measurement_definitions=(("fsr", None, "FSR:"),
+                                                         ("ecg", None, "ECG:"),
+                                                         ("gsr", None, "GSR:"),
                                                          ),
                                 measurement_saving_path=SERIAL_MEASUREMENTS,
                                 record_measurements=True,
