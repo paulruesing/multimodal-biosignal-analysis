@@ -203,9 +203,10 @@ class SpotifyController:
             if output_type == 'str':
                 return output.decode().strip()
             else:
+                #print(output.decode())
                 title, artist, album, duration_ms, position_s = output.decode().strip().split(' | ')
-                position_s = str_to_float(position_s)
-                duration_ms = str_to_float(duration_ms)
+                position_s = str_to_float(position_s, is_ger_format=("." not in position_s))
+                duration_ms = str_to_float(duration_ms,  is_ger_format=("." not in duration_ms))
                 return {'Title': title, 'Artist': artist, 'Album': album, 'Duration [ms]': duration_ms,
                         'Position [s]': position_s}
         else:
