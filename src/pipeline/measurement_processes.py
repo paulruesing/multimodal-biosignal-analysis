@@ -29,7 +29,6 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
                              # measurement_label, processing_callable, serial_input_marker
 
                              allowed_input_range: tuple[float] = (.0, 3.3),
-                             smoothing_ema_alpha: float = 0.4,  # 1 = no smoothing, -> 0 more smoothing
                              ) -> dict[str, float] | None:
     """
     Reads multiple sensor serial_measurements simultaneously from a serial port and processes each.
@@ -41,6 +40,7 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
         - measurement_label (str): unique label for the measurement.
         - processing_func (callable or None): optional post-processing function for the measurement's raw value.
         - serial_input_marker (str): prefix string that identifies the measurement in the serial input line.
+        - smoothing_ema_alpha
     baud_rate : int, optional
         Baud rate for the serial connection (default is 115200).
     serial_port : str, optional
@@ -78,7 +78,7 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
             line = ser.readline().decode('ascii', errors="ignore").strip()
 
             # process each measurement type:
-            for measurement_label, processing_func, teensy_marker in measurement_definitions:
+            for measurement_label, processing_func, teensy_marker, smoothing_factor in measurement_definitions:
                 if not line.startswith(teensy_marker):  # check whether line contains measurement result
                     # otherwise use last result:
                     output_dict[measurement_label] = globals()['_last_valid_reading_' + measurement_label]
@@ -98,7 +98,7 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
                 if processing_func is not None: value = processing_func(value)
 
                 # Apply EMA smoothing:
-                value = smoothing_ema_alpha * value + (1 - smoothing_ema_alpha) * globals()['_last_valid_reading_' + measurement_label]
+                value = smoothing_factor * value + (1 - smoothing_factor) * globals()['_last_valid_reading_' + measurement_label]
 
                 # overwrite last valid reading:
                 globals()['_last_valid_reading_' + measurement_label] = value
@@ -113,7 +113,7 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
 
     except (ValueError, serial.SerialException) as e:
         print(f"Serial error: {e}")
-        return {measurement_label: globals()['_last_valid_reading_' + measurement_label] for measurement_label, _, _ in measurement_definitions}
+        return {measurement_label: globals()['_last_valid_reading_' + measurement_label] for measurement_label, _, _, _ in measurement_definitions}
 
 
 def force_estimator(voltage: float,
@@ -145,7 +145,7 @@ def sampling_process(shared_dict,
                      saving_done_event,  # saving_done event pausing other processes
                      start_trigger_event,  # send start trigger event ('A' via serial connection)
                      stop_trigger_event,  # send stop trigger event ('B' via serial connection)
-                     measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str]],
+                     measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str, float]],
                      # (measurement_label, processing_callable, serial_input_marker)
                      sampling_rate_hz: int = 1000,
                      record_bool: bool = True,
@@ -170,7 +170,7 @@ def sampling_process(shared_dict,
     saving_done_event : threading.Event or multiprocessing.Event
         Event to signal completion of saving data.
     measurement_definitions : tuple of tuples
-        Each tuple contains measurement_label (str), optional processing callable, and serial input marker (str).
+        Each tuple contains measurement_label (str), optional processing callable, serial input marker (str) and smoothing alpha factor.
     record_bool : bool, optional
         Whether to record the processed values with timestamps (default is True).
     sampling_rate_hz : int, optional
@@ -191,7 +191,7 @@ def sampling_process(shared_dict,
     Mimics real-time sampling with sleep intervals to achieve approximate sampling rate.
     """
     # initialise global variables for read_sensor function:
-    for measurement_label, processing_func, teensy_marker in measurement_definitions:
+    for measurement_label, _, _, _ in measurement_definitions:
         globals()['measurements_' + measurement_label] = []
         globals()['timestamps_' + measurement_label] = []
         globals()['_last_valid_reading_' + measurement_label] = .0
@@ -203,7 +203,7 @@ def sampling_process(shared_dict,
             print(f"Saving recorded data to {save_recordings_path}")
 
             # prepare separate series for each measurement:
-            measurement_labels = [measurement_label for measurement_label, _, _ in measurement_definitions]
+            measurement_labels = [measurement_label for measurement_label, _, _, _ in measurement_definitions]
             df_list = [pd.DataFrame(index=globals()['timestamps_' + measurement_label],
                                      data={measurement_label: globals()['measurements_' + measurement_label]},
                                      ) for measurement_label in measurement_labels]
@@ -236,7 +236,7 @@ def sampling_process(shared_dict,
                                                **read_serial_kwargs)
 
             # store in shared memory:
-            for measurement_label, _, _ in measurement_definitions:
+            for measurement_label, _, _, _ in measurement_definitions:
                 shared_dict[measurement_label] = samples[measurement_label]
                 print(shared_dict)
 
@@ -266,7 +266,7 @@ def dummy_sampling_process(shared_dict,
                            saving_done_event,  # saving_done event pausing other processes
                            start_trigger_event,  # send start trigger event ('A' via serial connection)
                            stop_trigger_event,  # send stop trigger event ('B' via serial connection)
-                           measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str]],
+                           measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str, float]],
                            # measurement_label, processing_callable, serial_input_marker
                            custom_rand_maxs: tuple[float] = None,
                            sampling_rate_hz: int = 1000,
@@ -294,7 +294,7 @@ def dummy_sampling_process(shared_dict,
     saving_done_event : threading.Event or multiprocessing.Event
         Event to signal completion of saving data.
     measurement_definitions : tuple of tuples
-        Each tuple contains measurement_label (str), optional processing callable, and serial input marker (str).
+        Each tuple contains measurement_label (str), optional processing callable, serial input marker (str) and smoothing float (0 = full smoothing, 1 = no smoothing).
     custom_rand_maxs : tuple of floats, optional
         Custom maximum values for random data generation per measurement label (default creates ascending range).
     sampling_rate_hz : int, optional
@@ -331,8 +331,8 @@ def dummy_sampling_process(shared_dict,
 
             # random dummy samples:
             rand_maxs = list(range(1, len(measurement_definitions) + 1)) if custom_rand_maxs is None else custom_rand_maxs
-            samples = {measurement_label: np.random.rand() * rand_max for (measurement_label, _, _), rand_max in zip(measurement_definitions, rand_maxs)}
-            for measurement_label, _, _ in measurement_definitions:
+            samples = {measurement_label: np.random.rand() * rand_max for (measurement_label, _, _, _), rand_max in zip(measurement_definitions, rand_maxs)}
+            for measurement_label, _, _, _ in measurement_definitions:
                 shared_dict[measurement_label] = samples[measurement_label]
 
             # imitate data saving:
@@ -752,7 +752,7 @@ class RobustEventManager:
 
 
 ### MULTIPROCESSING IMPLEMENTATION:
-def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str]],measurement_saving_path: str | Path = None,
+def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str, float]],measurement_saving_path: str | Path = None,
                                 measurement_sampling_rate_hz: int = 1000,
                                 record_measurements: bool = True,
                                 # measurement_label, processing_callable, serial_input_marker
@@ -769,6 +769,7 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
         - measurement_label (str): the key identifying the measurement.
         - processing_callable (callable or None): optional function to process raw serial_measurements.
         - serial_input_marker (str): prefix identifying the measurement line in serial input.
+        - exponential_moving_average smoothing alpha
     measurement_saving_path : str or Path, optional
         Path where recorded measurement data will be saved. If None, data will not be saved persistently.
     measurement_sampling_rate_hz : int, optional
@@ -793,7 +794,7 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
     # initialise shared :
     shared_dict = multiprocessing.Manager().dict()
     measurement_labels = []  # for dynamic object definition below
-    for measurement_label, _, _ in measurement_definitions:
+    for measurement_label, _, _, _ in measurement_definitions:
         shared_dict[measurement_label] = .0
         measurement_labels.append(measurement_label)
 
@@ -901,9 +902,9 @@ if __name__ == '__main__':
     MUSIC_CONFIG = ROOT / "config" / "music_selection.txt"
 
     # start process:
-    start_measurement_processes(measurement_definitions=(("fsr", None, "FSR:"),
-                                                         ("ecg", None, "ECG:"),
-                                                         ("gsr", None, "GSR:"),
+    start_measurement_processes(measurement_definitions=(("fsr", None, "FSR:", .2),
+                                                         ("ecg", None, "ECG:", .4),
+                                                         ("gsr", None, "GSR:", .4),
                                                          ),
                                 measurement_saving_path=SERIAL_MEASUREMENTS,
                                 record_measurements=True,
