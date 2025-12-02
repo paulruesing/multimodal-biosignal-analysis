@@ -26,7 +26,7 @@ def file_title(title: str, dtype_suffix=".svg", short=False):
     else:
         return datetime.now().strftime('%Y-%m-%d %H_%M_%S') + " " + title + dtype_suffix
 
-def most_recent_file(directory: Union[Path, str], suffix_to_consider: str = None, file_title_keywords: [str] = None,
+def most_recent_file(directory: Path | str, suffix_to_consider: str | None = None, file_title_keywords: list[str] | None = None,
                      search_by: Literal["file-title", "meta-data"]= "file-title") -> str:
     """ search_by='file-title' works only with file-titles starting with YYYY-MM-DD HH_MM_SS (as created by the file_title method above) """
     if "." not in str(directory).split('/')[-1]:
