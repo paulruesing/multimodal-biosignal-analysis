@@ -21,7 +21,7 @@ import pandas as pd
 
 ############### READOUT METHODS ###############
 # todo: ponder, whether prefixes are the best way to distinguish serial_measurements (I think they might work well)
-def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[[float], float], str, float]],
+def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[[float], float] | tuple[Callable, float], str, float]],
                              baud_rate: int = 115200,
                              serial_port: str = '/dev/tty.usbmodem143309601',
                              record_bool: bool = True,
@@ -38,7 +38,9 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
     measurement_definitions : tuple of tuples
         Each tuple contains:
         - measurement_label (str): unique label for the measurement.
-        - processing_func (callable or None): optional post-processing function for the measurement's raw value.
+        - processing_func (callable or tuple with callable and MVC arg):
+            optional post-processing function for the measurement's raw value. If provided a tuple (callable, float) the
+            float defines the first argument to pass to such function.
         - serial_input_marker (str): prefix string that identifies the measurement in the serial input line.
         - smoothing_ema_alpha
     baud_rate : int, optional
@@ -65,6 +67,13 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
     Uses dynamic global variables for each measurement label to keep track of last valid readings, timestamps, and recorded serial_measurements.
     Handles serial communication and parsing errors gracefully by reverting to last valid readings.
     """
+    # sanity check (whether last valid reading is initialised)
+    for measurement_label, _, _, _ in measurement_definitions:
+        try:
+            _ = globals()["_last_valid_reading_" + measurement_label]
+        except KeyError:
+            raise AttributeError(f"Define global argument named {'_last_valid_reading_' + measurement_label} for {measurement_label} measurement before calling read_serial_measurements!")
+
     # we deploy globals() function here for dynamic global object naming and accessing (depending on included serial_measurements)
     try:
         output_dict = {}  # will be returned
@@ -95,7 +104,9 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
                     continue  # and jump to next measurement
 
                 # measurement-specific processing function:
-                if processing_func is not None: value = processing_func(value)
+                if processing_func is not None:  # apply processing func (with or without argument)
+                    if isinstance(processing_func, tuple):  value = processing_func[0](value, processing_func[1])
+                    else: value = processing_func(value)
 
                 # Apply EMA smoothing:
                 value = smoothing_factor * value + (1 - smoothing_factor) * globals()['_last_valid_reading_' + measurement_label]
@@ -116,9 +127,9 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
         return {measurement_label: globals()['_last_valid_reading_' + measurement_label] for measurement_label, _, _, _ in measurement_definitions}
 
 
-def force_estimator(voltage: float,
-                    fsr_a: float = 5.0869,
-                    fsr_b: float = 1.8544) -> float:
+def force_estimator_fsr(voltage: float,
+                        fsr_a: float = 5.0869,
+                        fsr_b: float = 1.8544) -> float:
     """
     Estimates force from voltage reading based on a calibration model for an FSR sensor.
 
@@ -140,17 +151,26 @@ def force_estimator(voltage: float,
     return force_estimation
 
 
+def dynamometer_force_mapping(v, mvc_kg: float | None = None):  # here with default params
+    """
+    Fitted but added manual offset (-2) to force closer to 0
+    Returns [kg] if global var. _current_mvc_kg is None else [% MVC].
+    """
+    factor = 1 if mvc_kg is None else 100 / mvc_kg  # consider MVC
+    return (2.8708 * (v ** 4.1071) - 3) * factor
+
+
 def sampling_process(shared_dict,
                      force_save_event,  # save_event callable through other functions
                      saving_done_event,  # saving_done event pausing other processes
                      start_trigger_event,  # send start trigger event ('A' via serial connection)
                      stop_trigger_event,  # send stop trigger event ('B' via serial connection)
                      measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str, float]],
-                     # (measurement_label, processing_callable, serial_input_marker)
+                     # (measurement_label, processing_callable, serial_input_marker, smoothing_alpha)
                      sampling_rate_hz: int = 1000,
                      record_bool: bool = True,
                      save_recordings_path: str | Path = None,
-                     store_every_n_measurements: int = 10000,
+                     store_every_n_measurements: int = 60000,  # equals 1 min
                      working_memory_size: int = 600000,  # equals 10 min, serial_measurements to store in RAM before clean-up
                      **read_serial_kwargs,
                      ):
@@ -165,10 +185,10 @@ def sampling_process(shared_dict,
         Event to trigger saving of the current buffered data to disk.
     saving_done_event : threading.Event or multiprocessing.Event
         Event to send start trigger event ('A' via serial connection)
+    start_trigger_event : threading.Event or multiprocessing.Event
+        Event to signal sending of start trigger.
     stop_trigger_event : threading.Event or multiprocessing.Event
-        Event to send stop trigger event ('B' via serial connection).
-    saving_done_event : threading.Event or multiprocessing.Event
-        Event to signal completion of saving data.
+        Event to signal sending of stop trigger.
     measurement_definitions : tuple of tuples
         Each tuple contains measurement_label (str), optional processing callable, serial input marker (str) and smoothing alpha factor.
     record_bool : bool, optional
@@ -190,6 +210,9 @@ def sampling_process(shared_dict,
     Saves intermediate and final data as CSV files when triggered or memory limit reached.
     Mimics real-time sampling with sleep intervals to achieve approximate sampling rate.
     """
+    # info:
+    print("[INFO] If possible, operate the measuring computer in floating mode (from battery) to prevent power line noise influencing serial measurement!")
+
     # initialise global variables for read_sensor function:
     for measurement_label, _, _, _ in measurement_definitions:
         globals()['measurements_' + measurement_label] = []
@@ -238,7 +261,6 @@ def sampling_process(shared_dict,
             # store in shared memory:
             for measurement_label, _, _, _ in measurement_definitions:
                 shared_dict[measurement_label] = samples[measurement_label]
-                print(shared_dict)
 
             # eventually store:
             if sample_counter % store_every_n_measurements == 0:
@@ -356,7 +378,8 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
                     display_window_len_s: int = 3,
                     display_refresh_rate_hz: int = 15,
                     y_limits: tuple[float, float] = (0, 3.3),
-                    target_value: float | None = None,
+                    target_value: float | tuple[float, float, float] | None = None,  # either fixed line or sine-wave (tuple[min, max, freq])
+                    target_corridor: float | None = None,  # draw corridor around target
                     dynamically_update_y_limits: bool = True,
                     plot_size: tuple[float, float] = (15, 10),
                     input_unit_label: str = 'Input [V]',
@@ -401,19 +424,31 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
     - Handles dynamic rescaling of plots if incoming values exceed current y-limits.
     """
     try:
+        ### PREPARE PLOT
         matplotlib.use('TkAgg')  # select backend (suitable for animation)
 
         global dynamic_y_limit  # variables that are dynamically adjusted during update() need to be defined globally
         dynamic_y_limit = y_limits
-
-        # define display refreshment counter and sanity check:
-        global update_counter; update_counter = 0
+        global update_counter; update_counter = 0  # define display refreshment counter and sanity check
         if display_refresh_rate_hz > 20: print(f"Fps are {display_refresh_rate_hz}, which is > 20 and potentially leads to rendering issues.")
 
-        # Initial data
+        # initial data:
         x = np.linspace(-display_window_len_s, 0, display_window_len_s*display_refresh_rate_hz)
         global y; y = np.zeros_like(x)
 
+        if isinstance(target_value, tuple):  # for changing (sine) target
+            sine_min, sine_max, sine_freq_hz = target_value  # tuple structure
+
+            # shown y values:
+            global target_y; target_y = np.zeros_like(x)  # will be updated later, same as measurement y
+
+            # sine values (with distinct min., max. and freq. as defined in target_value) to fetch new targets from:
+            sine_frames = int(display_refresh_rate_hz // sine_freq_hz)  # how many frames per sine wave (this captures sine_freq)
+            target_sine_x = np.linspace(0, 2 * np.pi, sine_frames)  # whole rad range split on that amount of frames
+            global target_sine_y  # these will be read out during update
+            target_sine_y = sine_min + (np.sin(target_sine_x)*.5 + .5) * (sine_max - sine_min)  # scaled to min and max
+
+        ## LINE PLOT
         # initialise figure:
         fig, dummy_ax = plt.subplots(figsize=plot_size)
         dummy_ax.grid(False)  # Disable grid lines
@@ -427,35 +462,69 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
         line_ax.set_xlabel(x_label)
         line_ax.set_ylabel(input_unit_label)
         line_ax.set_title('Rolling Input View')
-        if target_value is not None:
-            line_ax.axhline(y=target_value, color='green', lw=1, label='Target Value')
-            assert y_limits[0] < target_value < y_limits[1]; "target_value must lie within defined y_limits!"
-        line, = line_ax.plot([], [], lw=2, label='History')
-        end_point, = line_ax.plot([], [], 'ro', ms=9, label='Current Value')
 
+        # include target:
+        if target_value is not None:
+            if isinstance(target_value, float):  # if fixed
+                target_line = line_ax.axhline(y=target_value, color='green', lw=1, label='Target Value')
+                assert y_limits[0] < target_value < y_limits[1]; "target_value must lie within defined y_limits!"
+
+                if target_corridor is not None:  # mark target corridor
+                    target_corridor_line_low = line_ax.axhline(y=target_value - target_corridor/2, color='darkgreen',
+                                                               alpha=.5, lw=1, label='Target Corridor')
+                    target_corridor_line_low = line_ax.axhline(y=target_value + target_corridor / 2, color='darkgreen',
+                                                               alpha=.5, lw=1)
+
+            elif isinstance(target_value, tuple):  # if sine-wave
+                target_line, = line_ax.plot([], [], lw=1, color='green', label='Target Value')
+                target_end_point, = line_ax.plot([], [], 'go')
+
+                if target_corridor is not None:
+                    target_corridor_line_low, = line_ax.plot([], [], lw=1, alpha=.5, color='darkgreen', label='Target Corridor')
+                    target_corridor_line_high, = line_ax.plot([], [], lw=1, alpha=.5, color='darkgreen')
+
+        line, = line_ax.plot([], [], lw=2, color='red', label='Measurement Value')
+        end_point, = line_ax.plot([], [], 'ro', ms=9)
+
+        ## GAUGE PLOT
         if include_gauge:  # format and initialise gauge plot:
+            # parameters:
             gauge_radius = 10  # arbitrary, is scaled anyway
-            n_xticks = 8
+            n_xticks = 11  # number of ax ticklabels
             gauge_circumference = 7/4 * np.pi  # rad
+
+            # initialise plot:
             gauge_ax = fig.add_subplot(121, projection='polar')
             gauge_ax.set_theta_offset(np.pi * ((gauge_circumference/np.pi-1)/2+1))  # Rotate start for gauge to be open downwards and "laying" on the ground
             gauge_ax.set_theta_direction(-1)  # Clockwise direction
             gauge_ax.set_ylim(0, gauge_radius)  # same y-limit as lineplot
             gauge_ax.grid(False)  # Disable grid lines
             gauge_ax.set_yticklabels([])  # turn off the radial ax labels
+
+            # annotate ax:
             gauge_ax.set_xticks(np.linspace(0, gauge_circumference, n_xticks))
             gauge_ax.set_xticklabels([f"{tick:.2f}" for tick in np.linspace(dynamic_y_limit[0], dynamic_y_limit[1], n_xticks)])
             gauge_ax.set_xlabel(input_unit_label)
             gauge_ax.set_title('Force Level')
+
+            # beautify gauge:
             gauge_ax.spines['polar'].set_visible(False)  # hide polar spine (replaced below) because we don't use full circle
             angles = np.linspace(0,  gauge_circumference, 100)  # gauge background semicircle
             radii = np.full_like(angles, gauge_radius)
             gauge_ax.plot(angles, radii, color='lightgray', linewidth=20, solid_capstyle='round')
             gauge_ax.bar([0, gauge_circumference], [gauge_radius]*2, width=0.03, color='black')  # mark ends
-            needle_line, = gauge_ax.plot([], [], lw=3, color='red', label='Current Value')
-            if target_value is not None:  # initialise target line
-                target_needle_line, = gauge_ax.plot([], [], lw=2, color='green', label='Target Value')
 
+            # initialise current value line:
+            needle_line, = gauge_ax.plot([], [], lw=3, color='red', label='Current Value')
+
+            # include target:
+            if target_value is not None:  # is set during update anyway so need to differentiate constant and sine here
+                target_needle_line, = gauge_ax.plot([], [], lw=2, color='green', label='Target Value')
+                if target_corridor is not None:
+                    target_corridor_low_needle_line, = gauge_ax.plot([], [], lw=1, alpha=.5, color='darkgreen', label='Target Corridor')
+                    target_corridor_high_needle_line, = gauge_ax.plot([], [], lw=1, alpha=.5, color='darkgreen')
+
+            # function later required to update values:
             def convert_y_to_angle(y_value: float) -> float:
                 return (y_value / dynamic_y_limit[1]) * gauge_circumference
 
@@ -473,24 +542,51 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
         button = Button(ax_button, 'Pause')
         button.on_clicked(pause_button_click)
 
+        ### ANIMATION METHODS
         def init():
             # initialise lineplot:
             line_ax.legend()
             line.set_data(x, y)  # set data of line
             end_point.set_data([x.max()], [0])
 
+            if isinstance(target_value, tuple):
+                target_line.set_data(x, target_y)
+                target_end_point.set_data([x.max()], [0])
+
+                if target_corridor is not None:
+                    target_corridor_line_low.set_data(x, target_y)
+                    target_corridor_line_high.set_data(x, target_y)
+
             if include_gauge:  # initialise gauge
                 gauge_ax.legend()
                 needle_line.set_data([0, 0], [0, gauge_radius])
-                if target_value is not None:  # mark target
+                if target_value is not None and isinstance(target_value, float):  # mark target if constant (= float type)
                     target_needle_line.set_data([0, convert_y_to_angle(target_value)], [0, gauge_radius])
 
-            return (line, end_point) if not include_gauge else ((needle_line, line, end_point) if target_value is None else (needle_line, line, end_point, target_needle_line))
+                    if target_corridor is not None:  # mark target corridor
+                        target_corridor_low_needle_line.set_data(
+                            [0, convert_y_to_angle(target_value - target_corridor / 2)], [0, gauge_radius])
+                        target_corridor_high_needle_line.set_data(
+                            [0, convert_y_to_angle(target_value + target_corridor / 2)], [0, gauge_radius])
+
+            # return only what's necessary:
+            output_tuple = (line, end_point)  # measurement line and its endpoint
+            if target_value is not None: output_tuple = output_tuple + (target_line,)   # target line
+            if include_gauge:
+                output_tuple = output_tuple + (needle_line,)   # gauge measurement needle
+                if target_value is not None: output_tuple = output_tuple + (target_needle_line,)   # gauge target needle
+            return output_tuple
+
+        if isinstance(target_value, tuple):  # for sine varying target
+            # define global counter (within sine wave data)
+            global current_sine_ind
+            current_sine_ind = 0
 
         def update(frame):
             """ update view and fetch new observation. (frame is required although unused) """
             # update only if is_running:
             if is_running:
+                ## MEASUREMENTS
                 new_obs = shared_dict[measurement_dict_label]  # retrieve new information
                 if dynamically_update_y_limits:  # update y limit if it doesn't fit
                     # check if update necessary and change parameters:
@@ -506,27 +602,67 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
 
                     # refresh display:
                     if update_y_lim:
-                        if include_gauge:
+                        if include_gauge:  # adjust gauge ticks and target:
                             gauge_ax.set_xticklabels([f"{tick:.2f}" for tick in np.linspace(dynamic_y_limit[0], dynamic_y_limit[1], n_xticks)])
-                            if target_value is not None: target_needle_line.set_data([0, convert_y_to_angle(target_value)], [0, gauge_radius])
-                        line_ax.set_ylim(*dynamic_y_limit)
-                        fig.canvas.draw_idle()
 
-                # Shift data and append
-                global y
-                y = np.roll(y, -1)
-                y[-1] = new_obs
+                            if target_value is not None and isinstance(target_value, float):  # constant target
+                                target_needle_line.set_data([0, convert_y_to_angle(target_value)], [0, gauge_radius])
+
+                                if target_corridor is not None:  # mark target corridor
+                                    target_corridor_low_needle_line.set_data(
+                                        [0, convert_y_to_angle(target_value - target_corridor / 2)], [0, gauge_radius])
+                                    target_corridor_high_needle_line.set_data(
+                                        [0, convert_y_to_angle(target_value + target_corridor / 2)], [0, gauge_radius])
+
+                        line_ax.set_ylim(*dynamic_y_limit)  # adjust lineplot
+                        fig.canvas.draw_idle()  # redraw
+
+                # shift data and append new observation:
+                global y; y = np.roll(y, -1); y[-1] = new_obs
 
                 # update line plot:
-                line.set_ydata(y)
-                end_point.set_ydata([y[-1]])
+                line.set_ydata(y); end_point.set_ydata([y[-1]])
 
                 # update gauge plot:
-                if include_gauge:
-                    needle_line.set_data([0, convert_y_to_angle(new_obs)], [0, gauge_radius])
+                if include_gauge: needle_line.set_data([0, convert_y_to_angle(new_obs)], [0, gauge_radius])
 
+                ## TODO: COMPUTE ACCURACY HERE
+                # based on current target (before adapting because that is what user saw)
 
-            return (line, end_point) if not include_gauge else ((needle_line, line, end_point) if target_value is None else (needle_line, line, end_point, target_needle_line))
+                ## TARGET VALUES
+                if isinstance(target_value, tuple):  # for varying target
+                    # shift and append new target:
+                    global current_sine_ind  # current sine counter (counts within target_sine_y)
+                    new_target = target_sine_y[current_sine_ind]  # read current sine position
+                    global target_y; target_y = np.roll(target_y, -1); target_y[-1] = new_target
+
+                    # update line plot:
+                    target_line.set_ydata(target_y); target_end_point.set_ydata([target_y[-1]])
+
+                    if target_corridor is not None:  # update_target_corridor
+                        target_corridor_line_low.set_ydata(target_y - target_corridor / 2)
+                        target_corridor_line_high.set_ydata(target_y + target_corridor / 2)
+
+                    # update gauge plot:
+                    if include_gauge:
+                        target_needle_line.set_data([0, convert_y_to_angle(target_y[-1])], [0, gauge_radius])
+                        if target_corridor is not None:  # update target corridor
+                            target_corridor_low_needle_line.set_data(
+                                [0, convert_y_to_angle(target_y[-1] - target_corridor / 2)], [0, gauge_radius])
+                            target_corridor_high_needle_line.set_data(
+                                [0, convert_y_to_angle(target_y[-1] + target_corridor / 2)], [0, gauge_radius])
+
+                    # update sine counter (pause is considered by having it in is_running condition):
+                    current_sine_ind = (current_sine_ind + 1) % (len(target_sine_y)-1)
+
+            # return only what's necessary:
+            output_tuple = (line, end_point)  # measurement line and its endpoint
+            if target_value is not None: output_tuple = output_tuple + (target_line,)  # target line
+            if include_gauge:
+                output_tuple = output_tuple + (needle_line,)  # gauge measurement needle
+                if target_value is not None: output_tuple = output_tuple + (
+                    target_needle_line,)  # gauge target needle
+            return output_tuple
 
         # run and show animation:
         ani = FuncAnimation(fig, update, frames=len(x)+1,
@@ -538,17 +674,17 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
         plt.close('all')
 
 
-# todo: eventually include analog input from QTC?
+# todo: include music pre-listening phase indicator
 def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from sampling process
-                        start_trigger_event,
-                        stop_trigger_event,
-                        plot_size: tuple[float, float] = (10, 2),
-                        title: str = "Quattrocento Control Master",
-                        display_refresh_rate_hz: float = 3,
-                        music_category_txt: str | Path | None = None,
-                        control_log_path: str | Path | None = None,
-                        save_log_working_memory_size: int = 60000,
-                        ):
+                            start_trigger_event,
+                            stop_trigger_event,
+                            plot_size: tuple[float, float] = (10, 2),
+                            title: str = "Quattrocento Control Master",
+                            display_refresh_rate_hz: float = 3,
+                            music_category_txt: str | Path | None = None,
+                            control_log_path: str | Path | None = None,
+                            save_log_working_memory_size: int = 60000,
+                            ):
     """
     Displays a control master view for managing start/stop triggers and monitoring shared biosignal measurement keys.
 
@@ -791,7 +927,10 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
     - Currently uses a dummy sampling process; replace with actual serial sampling target as needed.
     - Handles KeyboardInterrupt for clean termination and saves any buffered data before exit.
     """
-    # initialise shared :
+    # sanity check:
+    if not record_measurements: print("[WARNING] Measurement recording is deactivated! No measurements and control logs will be saved.")
+
+    # initialise shared:
     shared_dict = multiprocessing.Manager().dict()
     measurement_labels = []  # for dynamic object definition below
     for measurement_label, _, _, _ in measurement_definitions:
@@ -806,7 +945,7 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
 
     # define processes:
     sampler = multiprocessing.Process(
-        target=sampling_process,  # dummy_sampling_process,
+        target=dummy_sampling_process if not record_measurements else sampling_process,  # if not recording use dummy,
         args=(shared_dict, force_save_event, saving_done_event, start_trigger_event, stop_trigger_event,),
         kwargs={'measurement_definitions': measurement_definitions,
                 'sampling_rate_hz': measurement_sampling_rate_hz,
@@ -820,9 +959,12 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
             target=plot_input_view,
             args=(shared_dict,),
             kwargs={'measurement_dict_label': 'fsr',
-                    'target_value': 1.2,
+                    'target_value': (5, 20, .1),  # target value as sine wave with .1 Hz
+                    'target_corridor': 10,
                     'include_gauge': True,
-                    'title': 'FSR Input'
+                    'title': 'FSR Input',
+                    'input_unit_label': 'Force [% MVC]',
+                    'y_limits': (0, 100),
                     },
             name="FSRDisplayProcess")
 
@@ -852,7 +994,7 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
         target=qtc_control_master_view,
         args=(shared_dict, start_trigger_event, stop_trigger_event,),
         kwargs={'music_category_txt': music_category_txt,
-                'control_log_path': control_log_path,
+                'control_log_path': control_log_path if record_measurements else None,
                 },
         name="MasterDisplayProcess")
 
@@ -899,16 +1041,21 @@ if __name__ == '__main__':
     ROOT = Path().resolve().parent.parent
     SERIAL_MEASUREMENTS = ROOT / "data" / "serial_measurements"
     EXPERIMENT_LOG = ROOT / "data" / "experiment_logs"
-    MUSIC_CONFIG = ROOT / "config" / "music_selection.txt"
+    CONFIG_DIR = ROOT / "config"
+    MUSIC_CONFIG = CONFIG_DIR / "music_selection.txt"
 
     # start process:
-    start_measurement_processes(measurement_definitions=(("fsr", None, "FSR:", .2),
+    start_measurement_processes(measurement_definitions=(("fsr",  # measurement label
+                                                          (dynamometer_force_mapping, 60),  # 60 = MVC [kg]
+                                                          "FSR:",  # serial connection measurement identifier
+                                                          .1),  # smoothing alpha
                                                          ("ecg", None, "ECG:", .4),
                                                          ("gsr", None, "GSR:", .4),
                                                          ),
                                 measurement_saving_path=SERIAL_MEASUREMENTS,
-                                record_measurements=True,
+                                record_measurements=True,  # False: start dummy_sampling, True: start real sampling
                                 music_category_txt=MUSIC_CONFIG,
                                 control_log_path=EXPERIMENT_LOG,
                                 )
+
 
