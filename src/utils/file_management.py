@@ -92,6 +92,10 @@ def most_recent_file(directory: Path | str, suffix_to_consider: str | None = Non
         raise NotADirectoryError("Provided path is not a directory (i.e. contains dots)!")
 
 
+def assert_dir(dir_path: str | Path):
+    """ Ensure that dir is present, else create. """
+    Path(dir_path).mkdir(parents=True, exist_ok=True)
+
 class TxtConfig:
     def __init__(self,
                  txt_file_path: Union[Path, str],):
