@@ -1,14 +1,22 @@
+"""
+This script contains process definitions and relevant auxiliary functions to be called in an experiment workflow.
+That external workflow needs to manage shared memory allocation and multiprocessing.
+®Paul Rüsing, INI ETH / UZH
+"""
+
+
 import serial
 import time
+import json
 from datetime import datetime
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Button
+from matplotlib.widgets import Button, TextBox, RadioButtons, Slider
 from matplotlib.animation import FuncAnimation
 from pynput import keyboard
 from scipy.optimize import curve_fit
-from typing import Callable, Literal
+from typing import Callable, Literal, Optional
 import multiprocessing
 from ctypes import c_char
 
@@ -18,9 +26,10 @@ from src.pipeline.music_control import SpotifyController
 from pathlib import Path
 import pandas as pd
 
+matplotlib.use('TkAgg')
+
 
 ############### READOUT METHODS ###############
-# todo: ponder, whether prefixes are the best way to distinguish serial_measurements (I think they might work well)
 def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[[float], float] | tuple[Callable, float], str, float]],
                              baud_rate: int = 115200,
                              serial_port: str = '/dev/tty.usbmodem143309601',
@@ -161,6 +170,7 @@ def dynamometer_force_mapping(v, mvc_kg: float | None = None):  # here with defa
 
 
 def sampling_process(shared_dict,
+                     shared_dict_lock,
                      force_save_event,  # save_event callable through other functions
                      saving_done_event,  # saving_done event pausing other processes
                      start_trigger_event,  # send start trigger event ('A' via serial connection)
@@ -259,8 +269,9 @@ def sampling_process(shared_dict,
                                                **read_serial_kwargs)
 
             # store in shared memory:
-            for measurement_label, _, _, _ in measurement_definitions:
-                shared_dict[measurement_label] = samples[measurement_label]
+            with shared_dict_lock:
+                for measurement_label, _, _, _ in measurement_definitions:
+                    shared_dict[measurement_label] = samples[measurement_label]
 
             # eventually store:
             if sample_counter % store_every_n_measurements == 0:
@@ -284,6 +295,7 @@ def sampling_process(shared_dict,
 
 
 def dummy_sampling_process(shared_dict,
+                           shared_dict_lock,
                            force_save_event,  # save_event callable through other functions
                            saving_done_event,  # saving_done event pausing other processes
                            start_trigger_event,  # send start trigger event ('A' via serial connection)
@@ -354,8 +366,9 @@ def dummy_sampling_process(shared_dict,
             # random dummy samples:
             rand_maxs = list(range(1, len(measurement_definitions) + 1)) if custom_rand_maxs is None else custom_rand_maxs
             samples = {measurement_label: np.random.rand() * rand_max for (measurement_label, _, _, _), rand_max in zip(measurement_definitions, rand_maxs)}
-            for measurement_label, _, _, _ in measurement_definitions:
-                shared_dict[measurement_label] = samples[measurement_label]
+            with shared_dict_lock:
+                for measurement_label, _, _, _ in measurement_definitions:
+                    shared_dict[measurement_label] = samples[measurement_label]
 
             # imitate data saving:
             if force_save_event.is_set():
@@ -371,8 +384,217 @@ def dummy_sampling_process(shared_dict,
         saving_done_event.set()
         print('[SAMPLER] saved!')
 
+
 ############### PLOTTING METHODS ###############
+def plot_onboarding_form(result_json_dir: str | Path,
+                         shared_questionnaire_str):
+    ### DISABLE MPL KEYBOARD SHORTCUTS
+    # default keyboard shortcuts:
+    keymaps = ['back', 'forward', 'fullscreen', 'grid', 'help', 'home', 'pan', 'save', 'xscale', 'yscale']
+
+    for keymap in keymaps:  # try disabling:
+        try:
+            plt.rcParams[f'keymap.{keymap}'] = []
+        except KeyError:
+            print("Couldn't disable shortcut for ", keymap)
+            pass
+
+    ### PLOT
+    fig, ax = plt.subplots(figsize=(6, 6))
+    fig.subplots_adjust(bottom=0.25)  # space for widgets
+    manager = plt.get_current_fig_manager()  # change TkAgg window title
+    manager.set_window_title("Participant Registration Form")
+    ax.axis('off')  # hide axes (borders and ticklabels)
+    fig.suptitle('Welcome to the study :)')
+    ax.set_title("Please enter your personal details below. Thank you!")
+
+    ### INPUT TEXTBOXES
+    input_dict = {}  # input dict
+
+    # define text boxes (callback_function, ax, object, on_submit(func)):
+    # full name:
+    def submit_name_textbox(text):
+        input_dict["Name"] = text
+    name_textbox_ax = fig.add_axes((0.55, 0.8, 0.39, 0.05))  # x, y, w, h
+    name_textbox = TextBox(name_textbox_ax, 'Full Name (FIRST LAST):')
+    name_textbox.on_submit(submit_name_textbox)
+
+    # birthdate: text
+    def submit_birthdate_textbox(text):
+        input_dict["Birthdate"] = text
+    birthdate_textbox_ax = fig.add_axes((0.55, 0.7, 0.39, 0.05))  # x, y, w, h
+    birthdate_textbox = TextBox(birthdate_textbox_ax, 'Birthdate (DD/MM/YYYY):')
+    birthdate_textbox.on_submit(submit_birthdate_textbox)
+
+    # gender: (radiobutton) female / male / other
+    gender_dropdown_label = ax.text(.42, .6, "Gender:", transform=ax.transAxes, va='center', ha='left')
+    gender_dropdown_ax = fig.add_axes((0.51, 0.57, 0.4, 0.11))  # x, y, w, h
+    gender_dropdown_ax.axis('off')
+    gender_dropdown_ax.set_facecolor('gold')
+    gender_options = ['Female', 'Male', 'Non-binary', 'Not selected']  # options for selector
+    gender_dropdown = RadioButtons(gender_dropdown_ax, gender_options, active=3)
+    def submit_gender_dropdown(label):
+        if label != "Not selected": input_dict["Gender"] = label
+    gender_dropdown.on_clicked(submit_gender_dropdown)
+
+    # dominant hand: left / right
+    dominand_hand_dropdown_label = ax.text(.3, .44, "Dominant hand:", transform=ax.transAxes, va='center', ha='left')
+    dominand_hand_dropdown_ax = fig.add_axes((0.51, 0.47, 0.4, 0.1))  # x, y, w, h
+    dominand_hand_dropdown_ax.axis('off')
+    dominand_hand_dropdown_ax.set_facecolor('gold')
+    dominant_hand_options = ['Left', 'Right', 'Not selected']  # options for selector
+    dominand_hand_dropdown = RadioButtons(dominand_hand_dropdown_ax, dominant_hand_options, active=2)
+    def submit_dominand_hand_dropdown(label):
+        if label != "Not selected": input_dict["Dominant hand"] = label
+    dominand_hand_dropdown.on_clicked(submit_dominand_hand_dropdown)
+
+    # "Do you play an instrument? If yes, which:"
+    def submit_instrument_textbox(text):
+        input_dict["Instrument"] = text
+    instrument_textbox_ax = fig.add_axes((0.55, 0.4, 0.39, 0.05))  # x, y, w, h
+    instrument_textbox = TextBox(instrument_textbox_ax, 'Do you play an instrument? If yes, which:')
+    instrument_textbox.on_submit(submit_instrument_textbox)
+
+    # "If yes, how well:" 1-7
+    skill_slider_ax = fig.add_axes((.55, .32, .39, .05))
+    skill_slider = Slider(skill_slider_ax, 'If yes, how well:', 0, 7, valinit=0, valstep=1, valfmt='%i')
+    def update_skill_slider(val):
+        input_dict["Musical skill"] = int(val)
+        fig.canvas.draw_idle()  # update view
+    skill_slider.on_changed(update_skill_slider)
+
+    # "How often do you listen to music?" Most of the day / a small part of the day / every 2 or 3 days / seldom
+    listening_habit_dropdown_label = ax.text(.03, -.02, "How often do you listen to music?", transform=ax.transAxes, va='center', ha='left')
+    listening_habit_dropdown_ax = fig.add_axes((0.51, 0.16, 0.4, 0.14))  # x, y, w, h
+    listening_habit_dropdown_ax.axis('off')
+    listening_habit_dropdown_ax.set_facecolor('gold')
+    listening_habit_options = ['Most of the day', 'A small part of the day', 'Every 2 or 3 days', 'Seldom', 'Not selected']  # options for selector
+    listening_habit_dropdown = RadioButtons(listening_habit_dropdown_ax, listening_habit_options, active=4)
+    def submit_listening_habit_dropdown(label):
+        if label != "Not selected": input_dict["Listening habit"] = label
+    listening_habit_dropdown.on_clicked(submit_listening_habit_dropdown)
+
+
+    ### SUBMISSION and SAVING
+    # define submission_button (callback_function, ax, object, on_submit(func))
+    #   on submit: check whether data is missing, otherwise save to result_json_dir and quit func
+    def click_submission_button(event):
+        # check for missing inputs:
+        input_missing = False
+
+        # check whether there is correct input for mandatory input fields:
+        key_object_dict = {'Name': name_textbox.label, 'Birthdate': birthdate_textbox.label,
+                           'Gender': gender_dropdown_label, 'Dominant hand': dominand_hand_dropdown_label,
+                           'Listening habit': listening_habit_dropdown_label,}
+        for key, object in key_object_dict.items():
+            if key not in input_dict:  # check only mandatory fields
+                key_object_dict[key].set_color('red')
+                fig.canvas.draw_idle()  # update view
+                input_missing = True
+            else:
+                incorrect_format = False  # distinct format checks below
+                if key == 'Name':
+                    if len(input_dict[key].split(" ")) <= 1: incorrect_format = True
+                if key == 'Birthdate':  # 10 digits with two "/"
+                    if len(input_dict[key].split("/")) != 3 or len(input_dict[key]) != 10: incorrect_format = True
+                # if one failed -> mark cell:
+                if incorrect_format:
+                    key_object_dict[key].set_color('red')
+                    fig.canvas.draw_idle()  # update view
+                    input_missing = True
+                else:  # if now correct, reset color to black
+                    key_object_dict[key].set_color('black')
+                    fig.canvas.draw_idle()  # update view
+
+        if not input_missing:
+            print("Input dict: ", input_dict)
+            save_path = result_json_dir / filemgmt.file_title(f"Subject {input_dict['Name']} Data", ".json")
+            with open(save_path, "w") as json_file:
+                json.dump(input_dict, json_file, indent=4)  # Pretty print with indent=4
+            print('Saved config to ', save_path)
+
+            # write to shared memory:
+            result = f"{input_dict['Name']} registered successfully!"
+            shared_questionnaire_str.write(result)
+
+            # close fig:
+            plt.close()
+
+    submission_button_ax = plt.axes([0.4, .05, 0.2, 0.075])
+    submission_button = Button(submission_button_ax, 'Submit')
+    submission_button.on_clicked(click_submission_button)
+
+    plt.show()
+
+
+def plot_pretrial_familiarity_check(result_json_dir: str | Path,  # dir to save results to
+                                    shared_questionnaire_str,  # shared memory for master process
+                                    ):
+    ### PLOT
+    fig, ax = plt.subplots(figsize=(12, 2))
+    manager = plt.get_current_fig_manager()  # change TkAgg window title
+    manager.set_window_title("Pre-Trial Familiarity Check")
+    ax.axis('off')  # hide axes (borders and ticklabels)
+    ax.set_title("Please listen to this song and answer within 30 seconds. Your trial will start soon.")
+
+    ### INPUT TEXTBOXES
+    input_dict = {}  # input dict
+
+    # define familiarity slider (callback_function, ax, object, on_submit(func)):
+    slider_ax = fig.add_axes((.55, .5, .39, .1))
+    slider = Slider(slider_ax, 'How well do you know this song? (0 = never heard it, 7 = can sing/hum along)', 0, 7, valinit=0, valstep=1, valfmt='%i')
+    def update_slider(val):
+        input_dict["Familiarity"] = int(val)
+        fig.canvas.draw_idle()  # update view
+    slider.on_changed(update_slider)
+
+    ### SUBMISSION and SAVING
+    # define submission_button (callback_function, ax, object, on_submit(func))
+    #   on submit: check whether data is missing, otherwise save to result_json_dir and quit func
+    def click_submission_button(event):
+        # check for missing inputs:
+        input_missing = False
+
+        # check whether there is correct input for mandatory input fields:
+        key_object_dict = {'Familiarity': slider.label,}
+        for key, object in key_object_dict.items():
+            if key not in input_dict:  # check only mandatory fields
+                key_object_dict[key].set_color('red')
+                fig.canvas.draw_idle()  # update view
+                input_missing = True
+            else:
+                key_object_dict[key].set_color('black')
+                fig.canvas.draw_idle()  # update view
+
+        if not input_missing:
+            print("Input dict: ", input_dict)
+            save_path = result_json_dir / filemgmt.file_title(f"Pre-Trial Familiarity Check Data", ".json")
+            with open(save_path, "w") as json_file:
+                json.dump(input_dict, json_file, indent=4)  # Pretty print with indent=4
+            print('Saved pre-trial check data to ', save_path)
+
+            # write to shared string:
+            result = f"Familiarity check result: {input_dict['Familiarity']}"
+            shared_questionnaire_str.write(result)
+
+            # close fig:
+            plt.close()
+
+    submission_button_ax = plt.axes([0.4, .05, 0.2, 0.15])
+    submission_button = Button(submission_button_ax, 'Submit')
+    submission_button.on_clicked(click_submission_button)
+
+    plt.show()
+
+
+# todo: add post-trial questionnaire
+
+
+# todo: include pause screen (target=0 + no accuracy + text)
+# todo: include time?
+# todo: add accuracy metric (how to store?)
 def plot_input_view(shared_dict: dict[str, float],  # shared memory from sampling process
+                    shared_dict_lock,
                     measurement_dict_label: str,
                     include_gauge: bool = True,
                     display_window_len_s: int = 3,
@@ -384,7 +606,8 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
                     plot_size: tuple[float, float] = (15, 10),
                     input_unit_label: str = 'Input [V]',
                     x_label: str = 'Time [s]',
-                    title: str = 'Live Input View'):
+                    title: str = 'Live Input View',
+                    window_title: str = 'Serial Input'):
     """
     Displays a live updating plot for a biosignal input from shared memory with optional gauge visualization.
 
@@ -454,6 +677,8 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
         dummy_ax.grid(False)  # Disable grid lines
         dummy_ax.set_axis_off()  # Turn off the entire polar axis frame
         fig.suptitle(title)
+        manager = plt.get_current_fig_manager()  # change TkAgg window title
+        manager.set_window_title(window_title)
 
         # format and initialise line plot:
         line_ax = fig.add_subplot(122) if include_gauge else fig.add_subplot(111)
@@ -587,7 +812,8 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
             # update only if is_running:
             if is_running:
                 ## MEASUREMENTS
-                new_obs = shared_dict[measurement_dict_label]  # retrieve new information
+                with shared_dict_lock:
+                    new_obs = shared_dict[measurement_dict_label]  # retrieve new information
                 if dynamically_update_y_limits:  # update y limit if it doesn't fit
                     # check if update necessary and change parameters:
                     global dynamic_y_limit  # this also affects convert_y_to_angle
@@ -674,16 +900,26 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
         plt.close('all')
 
 
-# todo: include music pre-listening phase indicator
+# todo: include shared memory to extract song info for such
+# todo: phase / progress indicator (show and include in log)
+# todo: show familiarity check results (to eventually restart song)
 def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from sampling process
+                            shared_dict_lock,
                             start_trigger_event,
                             stop_trigger_event,
-                            plot_size: tuple[float, float] = (10, 2),
+                            start_onboarding_event,
+                            start_mvc_calibration_event,
+                            start_sampling_event,
+                            start_motor_task_event,
+                            shared_questionnaire_result_str,
+                            shared_song_info_dict,
+                            plot_size: tuple[float, float] = (12, 3),
                             title: str = "Quattrocento Control Master",
                             display_refresh_rate_hz: float = 3,
                             music_category_txt: str | Path | None = None,
-                            control_log_path: str | Path | None = None,
+                            control_log_dir: str | Path | None = None,
                             save_log_working_memory_size: int = 60000,
+                            window_title: str = "Master",
                             ):
     """
     Displays a control master view for managing start/stop triggers and monitoring shared biosignal measurement keys.
@@ -729,109 +965,175 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
         dummy_ax.grid(False)  # Disable grid lines
         dummy_ax.set_axis_off()  # Turn off the entire polar axis frame
         fig.suptitle(title)
+        manager = plt.get_current_fig_manager()  # change TkAgg window title
+        manager.set_window_title(window_title)
 
-        # trigger buttons (events relate to sampling-process):
+        ### BUTTONS
+        # quattrocento triggers::
         global recent_event_str
         recent_event_str = None
         def start_button_click(event):
             start_trigger_event.set()
             global recent_event_str
             recent_event_str = 'Start Trigger'
-            start_button.label.set_text("Start Trigger (Done)")
+            start_button.label.set_text("Start Trigger\n(Done)")
             stop_button.label.set_text("Stop Trigger")
         def stop_button_click(event):
             stop_trigger_event.set()
             global recent_event_str
             recent_event_str = 'Stop Trigger'
             start_button.label.set_text("Start Trigger")
-            stop_button.label.set_text("Stop Trigger (Done)")
-
-        start_button_ax = plt.axes([0.1, .7, 0.35, 0.15])
+            stop_button.label.set_text("Stop Trigger\n(Done)")
+        trigger_label = fig.text(0.1, 0.85, "OTB400 Control:", ha='left', va='center', fontsize=10)
+        start_button_ax = plt.axes([0.1, .65, 0.175, 0.175])
         start_button = Button(start_button_ax, 'Start Trigger')
         start_button.on_clicked(start_button_click)
-        stop_button_ax = plt.axes([0.55, .7, 0.35, 0.15])
+        stop_button_ax = plt.axes([0.3, .65, 0.175, 0.175])
         stop_button = Button(stop_button_ax, 'Stop Trigger')
         stop_button.on_clicked(stop_button_click)
+
+        # experiment phase triggers:
+        def click_onboarding_button(event):
+            start_onboarding_event.set()
+            global recent_event_str
+            recent_event_str = 'Onboarding Phase'
+            onboarding_button.label.set_text("Onboarding\n(Done)")
+        trigger_label = fig.text(0.525, 0.85, "Experiment Control:", ha='left', va='center', fontsize=10)
+        onboarding_button_ax = plt.axes([0.525, .65, 0.1125, 0.175])
+        onboarding_button = Button(onboarding_button_ax, 'Onboarding')
+        onboarding_button.on_clicked(click_onboarding_button)
+
+        def click_mvc_button(event):
+            start_mvc_calibration_event.set()
+            global recent_event_str
+            recent_event_str = 'MVC Calibration Phase'
+            mvc_button.label.set_text("MVC Calibration\n(Done)")
+        mvc_button_ax = plt.axes([0.655, .65, 0.1125, 0.175])
+        mvc_button = Button(mvc_button_ax, 'MVC Calibration')
+        mvc_button.on_clicked(click_mvc_button)
+
+        def click_sampling_button(event):
+            start_sampling_event.set()
+            global recent_event_str
+            recent_event_str = 'Sampling Phase'
+            sampling_button.label.set_text("Sampling\n(Done)")
+        sampling_button_ax = plt.axes([0.78, .65, 0.1125, 0.175])
+        sampling_button = Button(sampling_button_ax, 'Sampling')
+        sampling_button.on_clicked(click_sampling_button)
 
         # define music control instruments:
         if include_music:
             # resume and pause buttons:
-            music_button_label = fig.text(0.1, 0.6, "Music Control:", ha='left', va='center', fontsize=10)
-            resume_button_ax = plt.axes([0.1, .4, 0.1, 0.15])
+            music_button_label = fig.text(0.1, 0.55, "Music Control:", ha='left', va='center', fontsize=10)
+            resume_button_ax = plt.axes([0.1, .35, 0.1, 0.175])
             resume_button = Button(resume_button_ax, 'Resume')
             def resume_button_clicked(event): music_master.resume()
             resume_button.on_clicked(resume_button_clicked)
-            pause_button_ax = plt.axes([0.8, .4, 0.1, 0.15])
+            pause_button_ax = plt.axes([0.8, .35, 0.1, 0.175])
             pause_button = Button(pause_button_ax, 'Pause')
             def pause_button_clicked(event): music_master.pause()
             pause_button.on_clicked(pause_button_clicked)
 
-            # category buttons:
+            # category buttons (dynamically created based on amount of defined categories):
             n_categories = len(music_master.category_url_dict.keys())
-            width_button = (.5 / n_categories) * .95
-            button_positions = np.linspace(.225, .775-width_button, n_categories)
-            for category, button_pos in zip(music_master.category_url_dict.keys(), button_positions):
-                temp_button_ax = plt.axes([button_pos, .4, width_button, .15])
-                globals()[f'{category}_button'] = Button(temp_button_ax, f'Next {category}')
+            n_rows = 2
+            width_button = (.5 / n_categories * n_rows) * 1
+            button_x_positions = list(np.linspace(.225, .775-width_button, int(n_categories / n_rows))) * n_rows
+            button_y_positions = [.455] * int(n_categories / n_rows)
+            for row_ind in range(1, n_rows):  # add n_categories / n_rows downshifted y_coords
+                button_y_positions += [button_y_positions[-1] - .105 * row_ind] * int(n_categories / n_rows)
+            for category, button_x_pos, button_y_pos in zip(music_master.category_url_dict.keys(), button_x_positions, button_y_positions):
+                temp_button_ax = plt.axes((button_x_pos, button_y_pos, width_button, .07))
+                globals()[f'{category}_button'] = Button(temp_button_ax, f'{category}')
                 # define function (category needs to be saved as default value due to late binding)
-                globals()[f'{category}_button_clicked'] = lambda event, cat=category: music_master.play_next_from(cat)
+                globals()[f'{category}_button_clicked'] = lambda event, cat=category:(
+                    music_master.play_next_from(cat), start_motor_task_event.set())
                 globals()[f'{category}_button'].on_clicked(globals()[f'{category}_button_clicked'])
 
-        # status text:
-        info_text = fig.text(0.1, 0.25, "", ha='left', va='center', fontsize=10)
-        if include_music: music_text = fig.text(0.1, 0.1, "", ha='left', va='center', fontsize=10)
+        # status texts:
+        measurement_info_text = fig.text(0.1, 0.25, "", ha='left', va='center', fontsize=10)
+        if include_music: song_info_text = fig.text(0.1, 0.1, "", ha='left', va='center', fontsize=10)
+        rating_result_info_text = fig.text(.1, .175, "", ha='left', va='center', fontsize=10)
 
         ### animation methods:
         def init():
-            info_text.set_text("Initializing...")
-            if include_music: music_text.set_text("Initializing...")
-            return (info_text, music_text) if include_music else info_text
+            measurement_info_text.set_text("Initializing...")
+            if include_music: song_info_text.set_text("Initializing...")
+            rating_result_info_text.set_text("Initializing...")
+            return (measurement_info_text, song_info_text) if include_music else measurement_info_text
 
+        # for log saving:
         global save_log_counter
         save_log_counter = 1  # for saving log file
-        if control_log_path is not None:
+        global last_rating_result; last_rating_result = ""  # to only log new rating results
+        global current_rating_result; current_rating_result = ""  # to store current rating results and compare
+
+        if control_log_dir is not None:  # initialise log file
             global log_dict
-            log_dict = {'Time': [], 'Music': [], 'Event': []}  # content of log file
+            log_dict = {'Time': [], 'Music': [], 'Event': [], 'Questionnaire': []}  # content of log file
             print(f"Initialising log file. Will save and reset full file every {(save_log_working_memory_size/display_refresh_rate_hz):.2f} s and do interim saves every {(save_log_working_memory_size/display_refresh_rate_hz/200):.2f} s!")
+
         def update(frame):
             """ update view and fetch new observation. (frame is required although unused) """
             # update only if is_running:
-            ### update view:
-            info_text.set_text(f"Receiving Serial Measurements: {list(shared_dict.keys())}")
+            ### update view (info texts):
+            with shared_dict_lock:
+                measurement_info_text.set_text(f"Receiving Serial Measurements: {list(shared_dict.keys())}")
+
             if include_music:
                 if music_master.current_category_and_counter is not None:  # e.g. Groovy (1/8)
                     current_cat_str = f"{music_master.current_category_and_counter[0]} ({music_master.current_category_and_counter[1]+1}/{len(music_master.category_url_dict[music_master.current_category_and_counter[0]])})"" | "
                 else: current_cat_str = ""
                 try:
                     current_track_info = music_master.get_current_track(output_type='dict')
-                    # e.g. Hallelujah by Leonard Cohen | 34.29s / 194.38s
+                    # update displayed song info text: (e.g. "Hallelujah by Leonard Cohen | 34.29s / 194.38s")
                     current_track_str = f"{current_track_info['Title']} by {current_track_info['Artist']} | {current_track_info['Position [s]']:.2f}s / {current_track_info['Duration [ms]']/1000:.2f}s"
-                    music_text.set_text(current_cat_str + current_track_str)
+                    song_info_text.set_text(current_cat_str + current_track_str)
+
+                    # store in shared song info dict:
+                    _ = current_track_info.pop('Position [s]')  # remove position argument
+                    with shared_dict_lock:
+                        shared_song_info_dict.update(current_track_info)  # store rest
+                        if music_master.current_category_and_counter is not None:  # add category information
+                            shared_song_info_dict['Category'] = music_master.current_category_and_counter[0]
+                            shared_song_info_dict['Category Index'] = music_master.current_category_and_counter[1]
+
                 except ValueError:  # no music playing currently
-                    music_text.set_text("No track playing currently.")
+                    song_info_text.set_text("No track playing currently.")
+
+            global current_rating_result
+            current_rating_result = shared_questionnaire_result_str.read()
+            rating_result_info_text.set_text(current_rating_result)
 
             ### logging:
             global save_log_counter
             global recent_event_str
+            global last_rating_result
             # log updating:
-            if control_log_path is not None:
+            if control_log_dir is not None:
                 global log_dict
                 log_dict['Time'].append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                log_dict['Music'].append(music_text.get_text())
+                log_dict['Music'].append(song_info_text.get_text())
+
                 if recent_event_str is not None:  # save and reset in one block to prevent resetting event str without logging
                     log_dict['Event'].append(recent_event_str)
                     recent_event_str = None
                 else: log_dict['Event'].append(recent_event_str)
 
+                if current_rating_result != last_rating_result:  # log only new rating results
+                    log_dict['Questionnaire'].append(current_rating_result)
+                    last_rating_result = current_rating_result
+                else: log_dict['Questionnaire'].append(None)
+
                 save_log_counter += 1  # because this is only increased here, we can omit the condition below:
             # log saving:
             if save_log_counter % save_log_working_memory_size == 0:  # save and working memory reset
-                pd.DataFrame(log_dict).to_csv(control_log_path / filemgmt.file_title("Experiment Log Working Memory Full Save", ".csv"), index=False)
-                log_dict = {'Time': [], 'Music': [], 'Event': []}
+                pd.DataFrame(log_dict).to_csv(control_log_dir / filemgmt.file_title("Experiment Log Working Memory Full Save", ".csv"), index=False)
+                log_dict = {'Time': [], 'Music': [], 'Event': [], 'Questionnaire': []}
             elif save_log_counter % (save_log_working_memory_size // 200) == 0:  # interim save
-                pd.DataFrame(log_dict).to_csv(control_log_path / filemgmt.file_title("Experiment Log Interim Save", ".csv"), index=False)
+                pd.DataFrame(log_dict).to_csv(control_log_dir / filemgmt.file_title("Experiment Log Interim Save", ".csv"), index=False)
 
-            return (info_text, music_text) if include_music else info_text
+            return (measurement_info_text, song_info_text) if include_music else measurement_info_text
 
         # run and show animation:
         ani = FuncAnimation(fig, update, frames=1,
@@ -887,46 +1189,145 @@ class RobustEventManager:
             self.trigger_count.value = 0
 
 
-### MULTIPROCESSING IMPLEMENTATION:
+class SharedString:
+    """
+    Thread-safe wrapper for shared string storage using multiprocessing.Array.
+
+    Creates an instance object that can be passed between processes and provides
+    instance methods for safe read/write operations with automatic lock management.
+
+    Attributes:
+        buffer (multiprocessing.Array): Shared character buffer
+        lock (multiprocessing.Lock): Synchronization lock
+        max_size (int): Maximum buffer capacity
+    """
+
+    def __init__(self, size: int, initial_value: str = ""):
+        """
+        Initialize shared string instance with specified size.
+
+        Parameters:
+            size (int): Maximum buffer size in bytes (includes null terminator)
+            initial_value (str): Optional initial string value
+
+        Raises:
+            ValueError: If initial_value exceeds size limit
+            TypeError: If size is not positive integer
+        """
+        # Validate inputs
+        if not isinstance(size, int) or size <= 0:
+            raise TypeError(f"size must be positive integer, got {size}")
+
+        if not isinstance(initial_value, str):
+            raise TypeError(f"initial_value must be str, got {type(initial_value)}")
+
+        # Check overflow
+        encoded_init = initial_value.encode('utf-8')
+        if len(encoded_init) >= size:
+            raise ValueError(
+                f"initial_value too long: {len(encoded_init)} bytes "
+                f"exceeds buffer size {size}"
+            )
+
+        # Create shared buffer and lock
+        self.buffer = multiprocessing.Array('c', size)
+        self.lock = multiprocessing.Lock()
+        self.max_size = size
+
+        # Write initial value
+        if initial_value:
+            self.write(initial_value)
+
+    def write(self, value: str) -> None:
+        """
+        Safely write string to shared buffer with null termination.
+
+        Parameters:
+            value (str): String to write
+
+        Raises:
+            ValueError: If value exceeds buffer capacity
+            TypeError: If value is not string
+        """
+        if not isinstance(value, str):
+            raise TypeError(f"value must be str, got {type(value)}")
+
+        # Encode and validate size
+        encoded = value.encode('utf-8')
+        if len(encoded) >= self.max_size:
+            raise ValueError(
+                f"value too long: {len(encoded)} bytes "
+                f"exceeds buffer capacity {self.max_size}"
+            )
+
+        # Write to buffer with lock
+        with self.lock:
+            # Clear previous data
+            self.buffer[:] = [0] * self.max_size
+
+            # Write encoded string as list of byte integers
+            self.buffer[:len(encoded)] = list(encoded)
+
+            # Add null terminator at end of string
+            self.buffer[len(encoded)] = 0
+
+    def read(self) -> str:
+        """
+        Safely read string from shared buffer with null-termination handling.
+
+        Returns:
+            str: Decoded string with null bytes stripped
+
+        Raises:
+            UnicodeDecodeError: If buffer contains invalid UTF-8
+        """
+        # Read from buffer with lock
+        with self.lock:
+            # Convert buffer slice to bytes
+            raw_bytes = bytes(self.buffer[:])
+
+            # Strip null bytes and decode
+            try:
+                decoded = raw_bytes.rstrip(b'\x00').decode('utf-8')
+            except UnicodeDecodeError as e:
+                raise UnicodeDecodeError(
+                    e.encoding,
+                    e.object,
+                    e.start,
+                    e.end,
+                    f"Invalid UTF-8 in shared buffer: {e.reason}"
+                ) from e
+
+        return decoded
+
+    def get_lock(self) -> multiprocessing.Lock:
+        """
+        Retrieve the synchronization lock for manual context management.
+
+        Returns:
+            multiprocessing.Lock: Lock object
+        """
+        return self.lock
+
+    def get_size(self) -> int:
+        """
+        Get maximum buffer capacity.
+
+        Returns:
+            int: Max size in bytes
+        """
+        return self.max_size
+
+
+### OLD MULTIPROCESSING IMPLEMENTATION:
+
 def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str, float]],measurement_saving_path: str | Path = None,
                                 measurement_sampling_rate_hz: int = 1000,
                                 record_measurements: bool = True,
                                 # measurement_label, processing_callable, serial_input_marker
                                 music_category_txt: str | Path | None = None,
-                                control_log_path: str | Path | None = None,
+                                control_log_dir: str | Path | None = None,
                                 ) -> None:
-    """
-    Starts multiprocessing setup for simultaneous measurement sampling and live plotting for multiple biosignal channels.
-
-    Parameters
-    ----------
-    measurement_definitions : tuple of tuples
-        Configuration for each measurement, where each tuple contains:
-        - measurement_label (str): the key identifying the measurement.
-        - processing_callable (callable or None): optional function to process raw serial_measurements.
-        - serial_input_marker (str): prefix identifying the measurement line in serial input.
-        - exponential_moving_average smoothing alpha
-    measurement_saving_path : str or Path, optional
-        Path where recorded measurement data will be saved. If None, data will not be saved persistently.
-    measurement_sampling_rate_hz : int, optional
-        Sampling frequency in Hertz for the measurement acquisition process (default is 1000).
-    record_measurements : bool, optional
-        Whether to record serial_measurements to disk (default is True).
-
-    Returns
-    -------
-    None
-        Function initializes and starts multiprocessing processes for sampling and plotting.
-        Manages graceful shutdown and data saving on KeyboardInterrupt.
-
-    Notes
-    -----
-    - Launches separate processes for each display: FSR (force-sensitive resistor), ECG, and GSR (galvanic skin response).
-    - Uses a shared multiprocessing dictionary to communicate latest measurement values among processes.
-    - Implements `RobustEventManager` for safe inter-process signaling of save events to avoid deadlocks.
-    - Currently uses a dummy sampling process; replace with actual serial sampling target as needed.
-    - Handles KeyboardInterrupt for clean termination and saves any buffered data before exit.
-    """
     # sanity check:
     if not record_measurements: print("[WARNING] Measurement recording is deactivated! No measurements and control logs will be saved.")
 
@@ -942,6 +1343,10 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
     saving_done_event = RobustEventManager()
     start_trigger_event = RobustEventManager()
     stop_trigger_event = RobustEventManager()
+    start_onboarding_event = RobustEventManager()
+    start_mvc_calibration_event = RobustEventManager()
+    start_sampling_event = RobustEventManager()
+    start_motor_task_event = RobustEventManager()  # called upon starting a song
 
     # define processes:
     sampler = multiprocessing.Process(
@@ -959,7 +1364,7 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
             target=plot_input_view,
             args=(shared_dict,),
             kwargs={'measurement_dict_label': 'fsr',
-                    'target_value': (5, 20, .1),  # target value as sine wave with .1 Hz
+                    'target_value': (15, 30, 1),  # target value as sine wave with .1 Hz
                     'target_corridor': 10,
                     'include_gauge': True,
                     'title': 'FSR Input',
@@ -992,9 +1397,10 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
 
     master_displayer = multiprocessing.Process(
         target=qtc_control_master_view,
-        args=(shared_dict, start_trigger_event, stop_trigger_event,),
+        args=(shared_dict, start_trigger_event, stop_trigger_event,
+              start_onboarding_event, start_mvc_calibration_event, start_sampling_event, start_motor_task_event),
         kwargs={'music_category_txt': music_category_txt,
-                'control_log_path': control_log_path if record_measurements else None,
+                'control_log_dir': control_log_dir if record_measurements else None,
                 },
         name="MasterDisplayProcess")
 
@@ -1044,18 +1450,24 @@ if __name__ == '__main__':
     CONFIG_DIR = ROOT / "config"
     MUSIC_CONFIG = CONFIG_DIR / "music_selection.txt"
 
-    # start process:
+    # important:
+    SUBJECT_DIR = ROOT / "data" / "experiment_results" / "subject_00"
+    SONG_ONE_DIR = SUBJECT_DIR / "song_00"
+
+
+
     start_measurement_processes(measurement_definitions=(("fsr",  # measurement label
-                                                          (dynamometer_force_mapping, 60),  # 60 = MVC [kg]
+                                                          (dynamometer_force_mapping, 100),  # 60 = MVC [kg]
                                                           "FSR:",  # serial connection measurement identifier
                                                           .1),  # smoothing alpha
-                                                         ("ecg", None, "ECG:", .4),
-                                                         ("gsr", None, "GSR:", .4),
+                                                         #("ecg", None, "ECG:", .4),
+                                                         #("gsr", None, "GSR:", .4),
                                                          ),
                                 measurement_saving_path=SERIAL_MEASUREMENTS,
                                 record_measurements=True,  # False: start dummy_sampling, True: start real sampling
                                 music_category_txt=MUSIC_CONFIG,
-                                control_log_path=EXPERIMENT_LOG,
+                                control_log_dir=EXPERIMENT_LOG,
                                 )
+
 
 
