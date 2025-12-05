@@ -22,7 +22,7 @@ class SpotifyController:
     def __init__(self,
                  category_url_dict: dict[str, tuple[tuple[str, int] | str]] | str | None = None,
                  # {category_name: [(song_url, start_at_second), (song_url2, start_at_second)]}
-                 randomly_shuffle_category_lists: bool = False,
+                 randomly_shuffle_category_lists: bool = True,
                  ):
         """
         Initialize SpotifyController instance.
@@ -41,7 +41,7 @@ class SpotifyController:
         # set and eventually shuffle
         self.category_url_dict = category_url_dict
         if category_url_dict is not None and randomly_shuffle_category_lists:  # randomly shuffle songs
-            category_url_dict = {cat: random.sample(entries, len(entries)) for cat, entries in category_url_dict.items()}
+            self.category_url_dict = {cat: random.sample(entries, len(entries)) for cat, entries in category_url_dict.items()}
 
         # initialise counter (for play_next_from)
         self.current_category_and_counter: tuple[str, int] | None = None
