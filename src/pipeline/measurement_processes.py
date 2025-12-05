@@ -171,8 +171,8 @@ def dynamometer_force_mapping(v, mvc_kg: float | None = None):  # here with defa
 
 def sampling_process(shared_dict,
                      shared_dict_lock,
-                     force_save_event,  # save_event callable through other functions
-                     saving_done_event,  # saving_done event pausing other processes
+                     force_serial_save_event,  # save_event callable through other functions
+                     serial_saving_done_event,  # saving_done event pausing other processes
                      start_trigger_event,  # send start trigger event ('A' via serial connection)
                      stop_trigger_event,  # send stop trigger event ('B' via serial connection)
                      measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str, float]],
@@ -191,9 +191,9 @@ def sampling_process(shared_dict,
     ----------
     shared_dict : multiprocessing.Manager.dict
         Shared dictionary object to store the latest sample values for each measurement label.
-    force_save_event : threading.Event or multiprocessing.Event
+    force_serial_save_event : threading.Event or multiprocessing.Event
         Event to trigger saving of the current buffered data to disk.
-    saving_done_event : threading.Event or multiprocessing.Event
+    serial_saving_done_event : threading.Event or multiprocessing.Event
         Event to send start trigger event ('A' via serial connection)
     start_trigger_event : threading.Event or multiprocessing.Event
         Event to signal sending of start trigger.
@@ -282,10 +282,10 @@ def sampling_process(shared_dict,
                 save_data(title_suffix=f' Interim Save WorkMem Full')
                 sample_counter = 1
 
-            if force_save_event.is_set():
+            if force_serial_save_event.is_set():
                 save_data(title_suffix=f' Final Save')
-                force_save_event.clear()
-                saving_done_event.set()
+                force_serial_save_event.clear()
+                serial_saving_done_event.set()
 
             # simulate sampling frequency:
             time.sleep(1/sampling_rate_hz)
@@ -296,8 +296,8 @@ def sampling_process(shared_dict,
 
 def dummy_sampling_process(shared_dict,
                            shared_dict_lock,
-                           force_save_event,  # save_event callable through other functions
-                           saving_done_event,  # saving_done event pausing other processes
+                           force_serial_save_event,  # save_event callable through other functions
+                           serial_saving_done_event,  # saving_done event pausing other processes
                            start_trigger_event,  # send start trigger event ('A' via serial connection)
                            stop_trigger_event,  # send stop trigger event ('B' via serial connection)
                            measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str, float]],
@@ -319,13 +319,13 @@ def dummy_sampling_process(shared_dict,
     ----------
     shared_dict : multiprocessing.Manager.dict
         Shared dictionary to store generated sample values.
-    force_save_event : threading.Event or multiprocessing.Event
+    force_serial_save_event : threading.Event or multiprocessing.Event
         Event to trigger dummy save operation.
-    saving_done_event : threading.Event or multiprocessing.Event
+    serial_saving_done_event : threading.Event or multiprocessing.Event
         Event to signal completion of dummy save.
     stop_trigger_event : threading.Event or multiprocessing.Event
         Event to send stop trigger event ('B' via serial connection).
-    saving_done_event : threading.Event or multiprocessing.Event
+    serial_saving_done_event : threading.Event or multiprocessing.Event
         Event to signal completion of saving data.
     measurement_definitions : tuple of tuples
         Each tuple contains measurement_label (str), optional processing callable, serial input marker (str) and smoothing float (0 = full smoothing, 1 = no smoothing).
@@ -371,17 +371,17 @@ def dummy_sampling_process(shared_dict,
                     shared_dict[measurement_label] = samples[measurement_label]
 
             # imitate data saving:
-            if force_save_event.is_set():
-                print('[SAMPLER] saving...')
-                force_save_event.clear()
-                saving_done_event.set()
-                print('[SAMPLER] saved!')
+            if force_serial_save_event.is_set():
+                print('[SAMPLER] imitate (dummy) saving...')
+                force_serial_save_event.clear()
+                serial_saving_done_event.set()
+                print('[SAMPLER] imitate (dummy) saved!')
 
             # simulate sampling frequency:
             time.sleep(1/sampling_rate_hz)
             sample_counter += 1
     finally:
-        saving_done_event.set()
+        serial_saving_done_event.set()
         print('[SAMPLER] saved!')
 
 
@@ -527,6 +527,52 @@ def plot_onboarding_form(result_json_dir: str | Path,
     plt.show()
 
 
+def plot_breakout_screen(time_sec: float, title="Have a break. Please wait."):
+    """ Plot countdown during break. Figure clouses after time_sec. """
+    ### PLOT
+    try:
+        # initialise:
+        matplotlib.use('TkAgg')  # select backend (suitable for animation)
+        fig, ax = plt.subplots(figsize=(6, 3))
+        manager = plt.get_current_fig_manager()  # change TkAgg window title
+        manager.set_window_title("Breakout Screen")
+        ax.axis('off')  # hide axes (borders and ticklabels)
+        ax.set_title(title)
+
+        # countdown:
+        global remaining_time
+        remaining_time = time_sec
+        countdown_text = fig.text(0.3, 0.4, f"Remaining waiting time: {remaining_time:.2f}s", ha='left', va='center', fontsize=10)
+
+        # animation:
+        display_refresh_rate_hz = 10
+        def update(frame):
+            """ update view and fetch new observation. (frame is required although unused) """
+            # reduce countdown:
+            global remaining_time
+            remaining_time -= 1/display_refresh_rate_hz
+
+            # close figure upon countdown end:
+            if remaining_time <= 0.0: plt.close()
+
+            # else update text:
+            countdown_text.set_text(f"Remaining waiting time: {remaining_time:.2f}s")
+
+            # redraw and return:
+            fig.canvas.draw_idle()
+            return countdown_text,
+
+        # run and show animation:
+        ani = FuncAnimation(fig, update, frames=1, blit=False,
+                            interval=int(1000/display_refresh_rate_hz), repeat=True)
+        plt.show()
+
+    finally:
+        plt.close('all')
+
+
+
+
 def plot_pretrial_familiarity_check(result_json_dir: str | Path,  # dir to save results to
                                     shared_questionnaire_str,  # shared memory for master process
                                     ):
@@ -575,6 +621,95 @@ def plot_pretrial_familiarity_check(result_json_dir: str | Path,  # dir to save 
 
             # write to shared string:
             result = f"Familiarity check result: {input_dict['Familiarity']}"
+            shared_questionnaire_str.write(result)
+
+            # close fig:
+            plt.close()
+
+    submission_button_ax = plt.axes([0.4, .05, 0.2, 0.15])
+    submission_button = Button(submission_button_ax, 'Submit')
+    submission_button.on_clicked(click_submission_button)
+    plt.show()
+
+
+# todo: ponder, whether to enter one lyric adds value
+def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
+                          shared_questionnaire_str,  # shared memory for master process
+                          category_string: str | None = None,  # for question
+                                    ):
+    """ Includes music questions only if category string is provided. """
+    ### PLOT
+    fig, ax = plt.subplots(figsize=(15, 2))
+    manager = plt.get_current_fig_manager()  # change TkAgg window title
+    manager.set_window_title("Post-Trial Rating")
+    ax.axis('off')  # hide axes (borders and ticklabels)
+    # title (user instruction):
+    ax.set_title(f"Please take a break and answer the below {'three' if category_string is not None else 'one'} question{'s' if category_string is not None else ''}.")
+
+    ### INPUT TEXTBOXES
+    input_dict = {}  # input dict
+
+    if category_string is not None:
+        # define liking slider (callback_function, ax, object, on_submit(func)):
+        liking_slider_ax = fig.add_axes((.55, .7, .39, .1))
+        liking_slider = Slider(liking_slider_ax, 'How did you like the song? (0: terrible, 7: extremely well)', 0, 7, valinit=0, valstep=1, valfmt='%i')
+        def update_liking_slider(val):
+            input_dict["Liking"] = int(val)
+            fig.canvas.draw_idle()  # update view
+        liking_slider.on_changed(update_liking_slider)
+
+        # define category validation slider (callback_function, ax, object, on_submit(func)):
+        category_slider_ax = fig.add_axes((.55, .5, .39, .1))
+        category_slider = Slider(category_slider_ax, f"Do you think the song matches the category '{category_string.capitalize()}'? (0: not at all, 7: perfect match)", 0, 7,
+                        valinit=0, valstep=1, valfmt='%i')
+        def update_category_slider(val):
+            input_dict["Fitting Category"] = int(val)
+            fig.canvas.draw_idle()  # update view
+        category_slider.on_changed(update_category_slider)
+
+    # define mood slider (callback_function, ax, object, on_submit(func)):
+    emotion_slider_ax = fig.add_axes((.55, .3 if category_string is not None else .5, .39, .1))
+    emotion_slider = Slider(emotion_slider_ax,
+                             f"Please rate your overall emotional state right now. (0: extremely unhappy/distressed, 7 = extremely happy/peaceful",
+                             0, 7,
+                             valinit=0, valstep=1, valfmt='%i')
+    def update_emotion_slider(val):
+        input_dict["Emotional State"] = int(val)
+        fig.canvas.draw_idle()  # update view
+
+    emotion_slider.on_changed(update_emotion_slider)
+
+    ### SUBMISSION and SAVING
+    # define submission_button (callback_function, ax, object, on_submit(func))
+    #   on submit: check whether data is missing, otherwise save to result_json_dir and quit func
+    def click_submission_button(event):
+        # check for missing inputs:
+        input_missing = False
+
+        # check whether there is correct input for mandatory input fields:
+        key_object_dict = {"Emotional State": emotion_slider.label}
+        if category_string is not None:
+            key_object_dict['Liking'] = liking_slider.label
+            key_object_dict['Fitting Category'] = category_slider.label
+
+        for key, object in key_object_dict.items():
+            if key not in input_dict:  # check only mandatory fields
+                key_object_dict[key].set_color('red')
+                fig.canvas.draw_idle()  # update view
+                input_missing = True
+            else:
+                key_object_dict[key].set_color('black')
+                fig.canvas.draw_idle()  # update view
+
+        if not input_missing:
+            print("Input dict: ", input_dict)
+            save_path = result_json_dir / filemgmt.file_title(f"Post-Trial Rating Data", ".json")
+            with open(save_path, "w") as json_file:
+                json.dump(input_dict, json_file, indent=4)  # Pretty print with indent=4
+            print('Saved post-trial rating data to ', save_path)
+
+            # write to shared string:
+            result = f"Post trial rating result: {input_dict}"
             shared_questionnaire_str.write(result)
 
             # close fig:
@@ -763,7 +898,7 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
             if is_running: button.label.set_text("Pause")
             else: button.label.set_text("Continue")
 
-        ax_button = plt.axes([0.8, .9, 0.1, 0.075])
+        ax_button = plt.axes([0.8, .9, 0.1, 0.04])
         button = Button(ax_button, 'Pause')
         button.on_clicked(pause_button_click)
 
@@ -910,9 +1045,12 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
                             start_onboarding_event,
                             start_mvc_calibration_event,
                             start_sampling_event,
-                            start_motor_task_event,
+                            start_music_motor_task_event,
+                            start_silent_motor_task_event,
                             shared_questionnaire_result_str,
                             shared_song_info_dict,
+                            force_log_saving_event,
+                            log_saving_done_event,
                             plot_size: tuple[float, float] = (12, 3),
                             title: str = "Quattrocento Control Master",
                             display_refresh_rate_hz: float = 3,
@@ -956,7 +1094,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
 
         if music_category_txt is not None:  # initialise spotify controller
             print("Initialising SpotifyController instance. Remember opening spotify!")
-            music_master = SpotifyController(category_url_dict=music_category_txt)
+            music_master = SpotifyController(category_url_dict=music_category_txt, randomly_shuffle_category_lists=True)
             include_music = True
         else: include_music = False
 
@@ -1024,17 +1162,29 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
         # define music control instruments:
         if include_music:
             # resume and pause buttons:
-            music_button_label = fig.text(0.1, 0.55, "Music Control:", ha='left', va='center', fontsize=10)
-            resume_button_ax = plt.axes([0.1, .35, 0.1, 0.175])
-            resume_button = Button(resume_button_ax, 'Resume')
-            def resume_button_clicked(event): music_master.resume()
-            resume_button.on_clicked(resume_button_clicked)
-            pause_button_ax = plt.axes([0.8, .35, 0.1, 0.175])
-            pause_button = Button(pause_button_ax, 'Pause')
-            def pause_button_clicked(event): music_master.pause()
-            pause_button.on_clicked(pause_button_clicked)
+            music_button_label = fig.text(0.1, 0.55, "Music / Task Control:", ha='left', va='center', fontsize=10)
 
-            # category buttons (dynamically created based on amount of defined categories):
+            # todo: replace this by silence trial button:
+            silence_trial_button_ax = plt.axes([0.1, .35, 0.1, 0.175])
+            silence_trial_button = Button(silence_trial_button_ax, 'Silence Trial')
+            def silence_trial_button_clicked(event):
+                music_master.pause()
+                start_silent_motor_task_event.set()  # start silent motor task
+            silence_trial_button.on_clicked(silence_trial_button_clicked)
+
+            pause_resume_button_ax = plt.axes([0.8, .35, 0.1, 0.175])
+            pause_resume_button = Button(pause_resume_button_ax, 'Pause/Resume')
+            def pause_resume_button_clicked(event):
+                if song_info_text.get_text() == "No track playing currently.":
+                    music_master.resume()
+                    pause_resume_button.label.set_text("Pause")
+                else:
+                    music_master.pause()
+                    pause_resume_button.label.set_text("Resume")
+            pause_resume_button.on_clicked(pause_resume_button_clicked)
+
+            ## category buttons (dynamically created based on amount of defined categories):
+            # define positions:
             n_categories = len(music_master.category_url_dict.keys())
             n_rows = 2
             width_button = (.5 / n_categories * n_rows) * 1
@@ -1042,12 +1192,15 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             button_y_positions = [.455] * int(n_categories / n_rows)
             for row_ind in range(1, n_rows):  # add n_categories / n_rows downshifted y_coords
                 button_y_positions += [button_y_positions[-1] - .105 * row_ind] * int(n_categories / n_rows)
+
+            # create category buttons:
             for category, button_x_pos, button_y_pos in zip(music_master.category_url_dict.keys(), button_x_positions, button_y_positions):
                 temp_button_ax = plt.axes((button_x_pos, button_y_pos, width_button, .07))
                 globals()[f'{category}_button'] = Button(temp_button_ax, f'{category}')
                 # define function (category needs to be saved as default value due to late binding)
-                globals()[f'{category}_button_clicked'] = lambda event, cat=category:(
-                    music_master.play_next_from(cat), start_motor_task_event.set())
+                globals()[f'{category}_button_clicked'] = lambda event, cat=category: (
+                    music_master.play_next_from(cat), start_music_motor_task_event.set()  # play music and start music motor task
+                )
                 globals()[f'{category}_button'].on_clicked(globals()[f'{category}_button_clicked'])
 
         # status texts:
@@ -1068,10 +1221,20 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
         global last_rating_result; last_rating_result = ""  # to only log new rating results
         global current_rating_result; current_rating_result = ""  # to store current rating results and compare
 
-        if control_log_dir is not None:  # initialise log file
-            global log_dict
-            log_dict = {'Time': [], 'Music': [], 'Event': [], 'Questionnaire': []}  # content of log file
-            print(f"Initialising log file. Will save and reset full file every {(save_log_working_memory_size/display_refresh_rate_hz):.2f} s and do interim saves every {(save_log_working_memory_size/display_refresh_rate_hz/200):.2f} s!")
+        # log helper functions:
+        def initialise_log_dict(verbose: bool = True):
+            if control_log_dir is not None:  # initialise log file
+                global log_dict
+                log_dict = {'Time': [], 'Music': [], 'Event': [], 'Questionnaire': []}  # content of log file
+                if verbose: print(f"Initialising log file. Will save and reset full file every {(save_log_working_memory_size/display_refresh_rate_hz):.2f} s and do interim saves every {(save_log_working_memory_size/display_refresh_rate_hz/200):.2f} s!")
+        initialise_log_dict()
+        global save_log_dict
+        def save_log_dict(suffix: str | None = None, verbose: bool = True):
+            if control_log_dir is not None:
+                savepath = control_log_dir / filemgmt.file_title(f"Experiment Log{f' {suffix}' if suffix is not None else ''}", ".csv")
+                pd.DataFrame(log_dict).to_csv(savepath, index=False)
+                if verbose:  # status message
+                    print(f"Saved master control log to: {savepath}")
 
         def update(frame):
             """ update view and fetch new observation. (frame is required although unused) """
@@ -1109,6 +1272,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             global save_log_counter
             global recent_event_str
             global last_rating_result
+
             # log updating:
             if control_log_dir is not None:
                 global log_dict
@@ -1126,13 +1290,19 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
                 else: log_dict['Questionnaire'].append(None)
 
                 save_log_counter += 1  # because this is only increased here, we can omit the condition below:
+
             # log saving:
             if save_log_counter % save_log_working_memory_size == 0:  # save and working memory reset
-                pd.DataFrame(log_dict).to_csv(control_log_dir / filemgmt.file_title("Experiment Log Working Memory Full Save", ".csv"), index=False)
-                log_dict = {'Time': [], 'Music': [], 'Event': [], 'Questionnaire': []}
+                save_log_dict(suffix="Working Memory Full Save")
+                initialise_log_dict(verbose=False)  # resets working memory
             elif save_log_counter % (save_log_working_memory_size // 200) == 0:  # interim save
-                pd.DataFrame(log_dict).to_csv(control_log_dir / filemgmt.file_title("Experiment Log Interim Save", ".csv"), index=False)
+                save_log_dict(suffix="Interim Save")
+            elif force_log_saving_event.is_set():  # forced full save
+                save_log_dict(suffix="Forced Full Save")
+                force_log_saving_event.clear()
+                log_saving_done_event.set()
 
+            ## return
             return (measurement_info_text, song_info_text) if include_music else measurement_info_text
 
         # run and show animation:
@@ -1142,6 +1312,9 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
         plt.show()
 
     finally:
+        save_log_dict(suffix="Final Full Save")
+        force_log_saving_event.clear()
+        log_saving_done_event.set()
         plt.close('all')
 
 
@@ -1319,6 +1492,20 @@ class SharedString:
         return self.max_size
 
 
+def save_terminate_process(process: multiprocessing.Process) -> None:
+    """ First request termination, then force-kill process."""
+    if process.is_alive():  # terminate process (request)
+        process.terminate()
+        process.join(timeout=1.0)
+
+        if process.is_alive():  # if still alive kill (force)
+            process.kill()
+            process.join()
+
+    if process.pid is not None:  # then process was started at some point
+        process.join()
+
+
 ### OLD MULTIPROCESSING IMPLEMENTATION:
 
 def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str, float]],measurement_saving_path: str | Path = None,
@@ -1339,19 +1526,19 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
         measurement_labels.append(measurement_label)
 
     # saving event:
-    force_save_event = RobustEventManager()
-    saving_done_event = RobustEventManager()
+    force_serial_save_event = RobustEventManager()
+    serial_saving_done_event = RobustEventManager()
     start_trigger_event = RobustEventManager()
     stop_trigger_event = RobustEventManager()
     start_onboarding_event = RobustEventManager()
     start_mvc_calibration_event = RobustEventManager()
     start_sampling_event = RobustEventManager()
-    start_motor_task_event = RobustEventManager()  # called upon starting a song
+    start_music_motor_task_event = RobustEventManager()  # called upon starting a song
 
     # define processes:
     sampler = multiprocessing.Process(
         target=dummy_sampling_process if not record_measurements else sampling_process,  # if not recording use dummy,
-        args=(shared_dict, force_save_event, saving_done_event, start_trigger_event, stop_trigger_event,),
+        args=(shared_dict, force_serial_save_event, serial_saving_done_event, start_trigger_event, stop_trigger_event,),
         kwargs={'measurement_definitions': measurement_definitions,
                 'sampling_rate_hz': measurement_sampling_rate_hz,
                 'save_recordings_path': measurement_saving_path,
@@ -1398,7 +1585,7 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
     master_displayer = multiprocessing.Process(
         target=qtc_control_master_view,
         args=(shared_dict, start_trigger_event, stop_trigger_event,
-              start_onboarding_event, start_mvc_calibration_event, start_sampling_event, start_motor_task_event),
+              start_onboarding_event, start_mvc_calibration_event, start_sampling_event, start_music_motor_task_event),
         kwargs={'music_category_txt': music_category_txt,
                 'control_log_dir': control_log_dir if record_measurements else None,
                 },
@@ -1421,9 +1608,9 @@ def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callab
 
     except KeyboardInterrupt:
         print("Terminating processes...")
-        force_save_event.set()  # trigger sampler saving
+        force_serial_save_event.set()  # trigger sampler saving
         print('Waiting for saving...')
-        saving_done_event.wait(timeout=5)  # wait until done
+        serial_saving_done_event.wait(timeout=5)  # wait until done
         print('Saving done!')
 
         # stop all processes:
