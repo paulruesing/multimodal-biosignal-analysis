@@ -28,10 +28,8 @@ def start_experiment_processes(
         measurement_saving_path: str | Path,
         mvc_saving_dir: str | Path,
         control_log_dir: str | Path,
-
         measurement_sampling_rate_hz: int = 1000,
         record_measurements: bool = True,
-        # measurement_label, processing_callable, serial_input_marker
         music_category_txt: str | Path | None = None,
 
 ) -> None:
@@ -83,23 +81,23 @@ def start_experiment_processes(
         print("[WARNING] Serial connection not working properly. Will show random samples for test purposes.")
         serial_connection_intact = False
 
-    # initialise shared memory:
-    #   measurement dict:
+    ### SHARED MEMORY DEFINITIONS
+    # measurement dict:
     mp_manager = multiprocessing.Manager()
-    shared_dict = mp_manager.dict()
+    shared_measurement_dict = mp_manager.dict()
     measurement_labels = []  # for dynamic object definition below
     for measurement_label in ['fsr', 'ecg', 'gsr']:
-        shared_dict[measurement_label] = .0
+        shared_measurement_dict[measurement_label] = .0
         measurement_labels.append(measurement_label)
 
-    #   song info dict:
+    # song info dict:
     shared_song_info_dict = mp_manager.dict()
     shared_dict_lock = mp_manager.Lock()  # holds for both dicts
 
-    #   rating result str:
+    # rating result str:
     shared_questionnaire_str = SharedString(256, initial_value="Questionnaire results will be displayed here...")
 
-    # initialise multiprocessing events:
+    # multiprocessing events:
     force_serial_save_event = RobustEventManager()  # force serial save
     serial_saving_done_event = RobustEventManager()
     force_log_saving_event = RobustEventManager()  # force master log save
@@ -111,16 +109,18 @@ def start_experiment_processes(
     start_sampling_event = RobustEventManager()
     start_music_motor_task_event = RobustEventManager()  # called upon starting a song
     start_silent_motor_task_event = RobustEventManager()  # called upon silent trial
+    start_test_motor_task_event = RobustEventManager()  # called upon test trial
+
 
     ### PROCESS DEFINITIONS
     filemgmt.assert_dir(control_log_dir)
     master_displayer = multiprocessing.Process(
         target=qtc_control_master_view,
-        args=(shared_dict, shared_dict_lock, start_trigger_event, stop_trigger_event,
+        args=(shared_measurement_dict, shared_dict_lock, start_trigger_event, stop_trigger_event,
               start_onboarding_event, start_mvc_calibration_event, start_sampling_event,
               start_music_motor_task_event, start_silent_motor_task_event,
               shared_questionnaire_str, shared_song_info_dict,
-              force_log_saving_event, log_saving_done_event),
+              force_log_saving_event, log_saving_done_event, start_test_motor_task_event),
         kwargs={'music_category_txt': music_category_txt,
                 'control_log_dir': control_log_dir,
                 'title': 'Experiment Master - Close this window to end the experiment.'
@@ -142,7 +142,7 @@ def start_experiment_processes(
         # 1) start sampling only fsr (without defining MVC):
         mvc_sampler = multiprocessing.Process(
             target=sampling_process if serial_connection_intact else dummy_sampling_process,
-            args=(shared_dict, shared_dict_lock, force_serial_save_event, serial_saving_done_event, start_trigger_event, stop_trigger_event,),
+            args=(shared_measurement_dict, shared_dict_lock, force_serial_save_event, serial_saving_done_event, start_trigger_event, stop_trigger_event,),
             kwargs={'measurement_definitions': (("fsr", dynamometer_force_mapping, "FSR:",
                                                  .1),),  # smoothing alpha
                     'sampling_rate_hz': measurement_sampling_rate_hz,
@@ -155,8 +155,9 @@ def start_experiment_processes(
         # 2) open live_input_view:
         mvc_displayer = multiprocessing.Process(
             target=plot_input_view,
-            args=(shared_dict, shared_dict_lock, ),
+            args=(shared_measurement_dict, shared_dict_lock, ),
             kwargs={'measurement_dict_label': 'fsr',
+                    'shared_questionnaire_result_str': shared_questionnaire_str,
                     'include_gauge': True,
                     'title': 'Please apply as much force as possible! You have 30 seconds. If done, wait or close window.',
                     'window_title': 'Dynamometer Serial Input View' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES",
@@ -196,8 +197,9 @@ def start_experiment_processes(
 
     ecg_displayer = multiprocessing.Process(
         target=plot_input_view,
-        args=(shared_dict, shared_dict_lock,),
+        args=(shared_measurement_dict, shared_dict_lock,),
         kwargs={'measurement_dict_label': 'ecg',
+                'shared_questionnaire_result_str': shared_questionnaire_str,
                 'target_value': None,
                 'include_gauge': False,
                 'title': 'ECG Input', 'window_title': 'ECG Serial Input View' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES"
@@ -206,13 +208,15 @@ def start_experiment_processes(
 
     gsr_displayer = multiprocessing.Process(
             target=plot_input_view,
-            args=(shared_dict, shared_dict_lock,),
+            args=(shared_measurement_dict, shared_dict_lock,),
             kwargs={'measurement_dict_label': 'gsr',
+                    'shared_questionnaire_result_str': shared_questionnaire_str,
                     'target_value': 1.2,
                     'include_gauge': False,
                     'title': 'GSR Input', 'window_title': 'GSR Serial Input View' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES"
                     },
             name="ECGDisplayProcess")
+
 
     ### PROCESS MANAGEMENT
     try:
@@ -255,7 +259,7 @@ def start_experiment_processes(
                 filemgmt.assert_dir(measurement_saving_path)  # create dir if necessary
                 sampler = multiprocessing.Process(
                     target=sampling_process if serial_connection_intact else dummy_sampling_process,
-                    args=(shared_dict, shared_dict_lock, force_serial_save_event, serial_saving_done_event, start_trigger_event, stop_trigger_event,),
+                    args=(shared_measurement_dict, shared_dict_lock, force_serial_save_event, serial_saving_done_event, start_trigger_event, stop_trigger_event,),
                     kwargs={'measurement_definitions': measurement_definitions,  # reflects MVC
                             'sampling_rate_hz': measurement_sampling_rate_hz,
                             'save_recordings_path': measurement_saving_path,
@@ -278,137 +282,192 @@ def start_experiment_processes(
 
                 start_sampling_event.clear()
 
+            # todo: allow for test trial
+            if start_test_motor_task_event.is_set():
+                try:  # not if, because we would need to catch a NameError if not defined yet
+                    assert sampler.is_alive()
 
-            ## Motor Task
-            if start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set():
-                # check whether it's silent or music trial:
-                is_music_trial = start_music_motor_task_event.is_set()
-
-                # prepare directory:
-                trial_label = f"song_{song_counter:03}" if is_music_trial else "silence"
-                song_data_dir = personal_data_dir / trial_label
-                filemgmt.assert_dir(song_data_dir)  # create dir
-
-                # wait shortly for spotify to start song:
-                time.sleep(1)
-
-                if is_music_trial:  # store song information (from shared_song_info_dict):
-                    with shared_dict_lock:
-                        temp_dict = dict(shared_song_info_dict)  # snapshot dict
-                        # example structure: {
-                        #     "Title": "Blurred Lines",
-                        #     "Artist": "Robin Thicke",
-                        #     "Album": "Blurred Lines (Deluxe)",
-                        #     "Duration [ms]": 263826.0,
-                        #     "Category": "Familiar Groovy",
-                        #     "Category Index": 0
-                        # }
-                    print(f"Starting song_{song_counter:03}. Song info: ", temp_dict)
-                    save_path = song_data_dir / filemgmt.file_title(f"song_{song_counter:03} information", ".json")
-                    with open(save_path, "w") as json_file:  # save as json file
-                        json.dump(temp_dict, json_file, indent=4)  # Pretty print with indent=4
-                    print('Saved song information to ', save_path)
-
-                    # pretrial_familiarity_check:
-                    pretrial_process = multiprocessing.Process(
-                        target=plot_pretrial_familiarity_check,
-                        args=(song_data_dir, shared_questionnaire_str,),
-                        kwargs={},
-                        name=f"Pretrial Process {trial_label}")
-                    pretrial_process.start()
-
-                else:
-                    # breakout_screen:
-                    pretrial_process = multiprocessing.Process(
-                        target=plot_breakout_screen,
-                        args=(30.0,  # waiting time
-                              ),
-                        kwargs={'title': 'Have a break. Your trial will start soon.'},
-                        name=f"Pretrial Process {trial_label}")
-                    pretrial_process.start()
-
-                # prepare for possible restart of motor task during pre-trial phase:
-                start_music_motor_task_event.clear()  # clear event to allow for restarting
-                start_silent_motor_task_event.clear()
-                if is_music_trial: song_counter += 1  # increase song counter already (if music trial)
-
-                # wait at least 30seconds until pretrial process is closed, or experiment is restarted:
-                start = time.time()
-                while (pretrial_process.is_alive()) and not (
-                        start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set()):  # allow for restarting
-                    time.sleep(0.1)  # check every
-
-                # stop pre_trial process:
-                save_terminate_process(pretrial_process)
-
-                # breakout screen if time remains and no restart triggered
-                if time.time() - start < 30 and not (start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set()):
-                    # if process is closed, show waiting screen:
-                    pretrial_break_process = multiprocessing.Process(
-                        target=plot_breakout_screen,
-                        args=(30 - (time.time() - start),  # remaining waiting time
-                              ),
-                        kwargs={'title': 'Have a break. Your trial will start soon.'},
-                        name=f"Pretrial Break Process {trial_label}")
-                    # only show if not already breakup screen (during silence trial) was shown
-                    if is_music_trial: pretrial_break_process.start()
-                    while time.time() - start < 30 and not (  # waiting time but still allow for restart
-                        start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set()):
-                        time.sleep(.1)  # check every 100ms
-                    else:
-                        save_terminate_process(pretrial_break_process)  # end pretrial process
-
-                # pretrial time over:
-                if start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set():  # if restart
-                    pass  # go to next iteration
-                else:  # if we can continue with trial
-                    # define motor task process:
+                    ###### continue if sampler's running #####
                     target_freq = .1
-                    dynamic_motor_task = multiprocessing.Process(
+                    test_motor_task = multiprocessing.Process(
                         target=plot_input_view,
-                        args=(shared_dict, shared_dict_lock,),
+                        args=(shared_measurement_dict, shared_dict_lock,),
                         kwargs={'measurement_dict_label': 'fsr',
+                                'shared_questionnaire_result_str': shared_questionnaire_str,
                                 'target_value': (5, 20, target_freq),  # target value as sine wave with .1 Hz
-                                # todo: change target frequency based on music characteristics (if not silent)
+                                'accuracy_save_dir': None,  # no accuracy saving!
                                 'target_corridor': 10,
                                 'include_gauge': True,
                                 'title': 'Your grip force controls the red line. Try to keep it close to the moving green target line within the green target corridor!',
                                 'input_unit_label': 'Force [% MVC]',
                                 'y_limits': (0, 100),
-                                'window_title': 'Dynamic Motor Task' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES"
+                                'window_title': 'Test Dynamic Motor Task' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES"
                                 },
-                        name=f"DynamicMotorTask {trial_label}")
-                    # todo: accuracy implementation (compute and store only after some seconds)
+                        name=f"TestMotorTask")
 
                     # start motor task:
-                    if not dynamic_motor_task.is_alive():  # dont start twice
-                        status_msg = f"Starting motor task process with target frequency {target_freq}Hz!"
+                    if not test_motor_task.is_alive():  # dont start twice
+                        status_msg = f"Starting test motor task process with target frequency {target_freq}Hz!"
                         print(status_msg); shared_questionnaire_str.write(status_msg)
-                        dynamic_motor_task.start()
-                    # wait for ending of motor task:
+                        test_motor_task.start()
+
+                    # wait for ending of test motor task:
                     start = time.time()  # run for 60 seconds or until window is closed
-                    while time.time() - start < 60 and dynamic_motor_task.is_alive(): time.sleep(0.1)
+                    while time.time() - start < 60 and test_motor_task.is_alive():
+                        time.sleep(0.1)
                     else:  # if done, terminate process
-                        save_terminate_process(dynamic_motor_task)
+                        save_terminate_process(test_motor_task)
 
-                    # define and start post trial rating: (includes music questions only if category string is provided)
-                    posttrial_process = multiprocessing.Process(
-                        target=plot_posttrial_rating,
-                        args=(song_data_dir, shared_questionnaire_str,
-                              ),
-                        kwargs={
-                            "category_string": temp_dict['Category'].replace("Unfamiliar ",  # drop familiarity label
-                                                                             "").replace("Familiar ", "") if is_music_trial else None,
-                        },
-                        name=f"Posttrial Process {trial_label}")
-                    posttrial_process.start()
+                    # clean-up:
+                    status_msg = f"Test motor task done!"
+                    print(status_msg); shared_questionnaire_str.write(status_msg)
+                    start_test_motor_task_event.clear()
 
-                    # wait until post trial rating is submitted:
-                    while posttrial_process.is_alive():
-                        time.sleep(0.1)  # check every 100 ms
+
+                except (AssertionError, NameError):  # if sampler wasn't yet defined
+                    shared_questionnaire_str.write("First start sampling process please!")
+                    start_test_motor_task_event.clear()
+
+            ## Motor Task
+            if start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set():
+                try:  # not if, because we would need to catch a NameError if not defined yet
+                    assert sampler.is_alive()
+
+                    ###### continue if sampler's running #####
+                    # check whether it's silent or music trial:
+                    is_music_trial = start_music_motor_task_event.is_set()
+
+                    # prepare directory:
+                    trial_label = f"song_{song_counter:03}" if is_music_trial else "silence"
+                    current_song_data_dir = personal_data_dir / trial_label
+                    filemgmt.assert_dir(current_song_data_dir)  # create dir
+
+                    # wait shortly for spotify to start song:
+                    time.sleep(1)
+
+                    if is_music_trial:  # store song information (from shared_song_info_dict):
+                        with shared_dict_lock:
+                            temp_dict = dict(shared_song_info_dict)  # snapshot dict
+                            # example structure: {
+                            #     "Title": "Blurred Lines",
+                            #     "Artist": "Robin Thicke",
+                            #     "Album": "Blurred Lines (Deluxe)",
+                            #     "Duration [ms]": 263826.0,
+                            #     "Category": "Familiar Groovy",
+                            #     "Category Index": 0
+                            # }
+                        print(f"Starting song_{song_counter:03}. Song info: ", temp_dict)
+                        save_path = current_song_data_dir / filemgmt.file_title(f"song_{song_counter:03} information", ".json")
+                        with open(save_path, "w") as json_file:  # save as json file
+                            json.dump(temp_dict, json_file, indent=4)  # Pretty print with indent=4
+                        print('Saved song information to ', save_path)
+
+                        # pretrial_familiarity_check:
+                        pretrial_process = multiprocessing.Process(
+                            target=plot_pretrial_familiarity_check,
+                            args=(current_song_data_dir, shared_questionnaire_str,),
+                            kwargs={},
+                            name=f"Pretrial Process {trial_label}")
+                        pretrial_process.start()
+
                     else:
-                        # stop post_trial process:
-                        save_terminate_process(posttrial_process)
+                        # breakout_screen:
+                        pretrial_process = multiprocessing.Process(
+                            target=plot_breakout_screen,
+                            args=(30.0,  # waiting time
+                                  ),
+                            kwargs={'title': 'Have a break. Your trial will start soon.'},
+                            name=f"Pretrial Process {trial_label}")
+                        pretrial_process.start()
+
+                    # prepare for possible restart of motor task during pre-trial phase:
+                    start_music_motor_task_event.clear()  # clear event to allow for restarting
+                    start_silent_motor_task_event.clear()
+                    if is_music_trial: song_counter += 1  # increase song counter already (if music trial)
+
+                    # wait at least 30seconds until pretrial process is closed, or experiment is restarted:
+                    start = time.time()
+                    while (pretrial_process.is_alive()) and not (
+                            start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set()):  # allow for restarting
+                        time.sleep(0.1)  # check every
+
+                    # stop pre_trial process:
+                    save_terminate_process(pretrial_process)
+
+                    # breakout screen if time remains and no restart triggered
+                    if time.time() - start < 30 and not (start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set()):
+                        # if process is closed, show waiting screen:
+                        pretrial_break_process = multiprocessing.Process(
+                            target=plot_breakout_screen,
+                            args=(30 - (time.time() - start),  # remaining waiting time
+                                  ),
+                            kwargs={'title': 'Have a break. Your trial will start soon.'},
+                            name=f"Pretrial Break Process {trial_label}")
+                        # only show if not already breakup screen (during silence trial) was shown
+                        if is_music_trial: pretrial_break_process.start()
+                        while time.time() - start < 30 and not (  # waiting time but still allow for restart
+                            start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set()):
+                            time.sleep(.1)  # check every 100ms
+                        else:
+                            save_terminate_process(pretrial_break_process)  # end pretrial process
+
+                    # pretrial time over:
+                    if start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set():  # if restart
+                        pass  # go to next iteration
+                    else:  # if we can continue with trial
+                        # define motor task process:
+                        target_freq = .1
+                        dynamic_motor_task = multiprocessing.Process(
+                            target=plot_input_view,
+                            args=(shared_measurement_dict, shared_dict_lock,),
+                            kwargs={'measurement_dict_label': 'fsr',
+                                    'shared_questionnaire_result_str': shared_questionnaire_str,
+                                    'target_value': (5, 20, target_freq),  # target value as sine wave with .1 Hz
+                                    'accuracy_save_dir': current_song_data_dir,
+                                    # todo: change target frequency based on music characteristics (if not silent)
+                                    'target_corridor': 10,
+                                    'include_gauge': True,
+                                    'title': 'Your grip force controls the red line. Try to keep it close to the moving green target line within the green target corridor!',
+                                    'input_unit_label': 'Force [% MVC]',
+                                    'y_limits': (0, 100),
+                                    'window_title': 'Dynamic Motor Task' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES"
+                                    },
+                            name=f"DynamicMotorTask {trial_label}")
+
+                        # start motor task:
+                        if not dynamic_motor_task.is_alive():  # dont start twice
+                            status_msg = f"Starting motor task process with target frequency {target_freq}Hz!"
+                            print(status_msg); shared_questionnaire_str.write(status_msg)
+                            dynamic_motor_task.start()
+                        # wait for ending of motor task:
+                        start = time.time()  # run for 60 seconds or until window is closed
+                        while time.time() - start < 60 and dynamic_motor_task.is_alive(): time.sleep(0.1)
+                        else:  # if done, terminate process
+                            save_terminate_process(dynamic_motor_task)
+
+                        # define and start post trial rating: (includes music questions only if category string is provided)
+                        posttrial_process = multiprocessing.Process(
+                            target=plot_posttrial_rating,
+                            args=(current_song_data_dir, shared_questionnaire_str,
+                                  ),
+                            kwargs={
+                                "category_string": temp_dict['Category'].replace("Unfamiliar ",  # drop familiarity label
+                                                                                 "").replace("Familiar ", "") if is_music_trial else None,
+                            },
+                            name=f"Posttrial Process {trial_label}")
+                        posttrial_process.start()
+
+                        # wait until post trial rating is submitted:
+                        while posttrial_process.is_alive():
+                            time.sleep(0.1)  # check every 100 ms
+                        else:
+                            # stop post_trial process:
+                            save_terminate_process(posttrial_process)
+
+                except (AssertionError, NameError):  # if sampler wasn't defined yet
+                    shared_questionnaire_str.write("First start sampling process please!")
+                    start_music_motor_task_event.clear()
+                    start_silent_motor_task_event.clear()
 
 
         else:
