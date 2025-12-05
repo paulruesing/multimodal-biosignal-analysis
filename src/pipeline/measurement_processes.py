@@ -8,6 +8,7 @@ That external workflow needs to manage shared memory allocation and multiprocess
 import serial
 import time
 import json
+import random
 from datetime import datetime
 import numpy as np
 import matplotlib
@@ -527,6 +528,7 @@ def plot_onboarding_form(result_json_dir: str | Path,
     plt.show()
 
 
+# todo: updates too fast
 def plot_breakout_screen(time_sec: float, title="Have a break. Please wait."):
     """ Plot countdown during break. Figure clouses after time_sec. """
     ### PLOT
@@ -546,11 +548,14 @@ def plot_breakout_screen(time_sec: float, title="Have a break. Please wait."):
 
         # animation:
         display_refresh_rate_hz = 10
+        global display_start_time
+        display_start_time = time.time()  # store to compute remaining time
         def update(frame):
             """ update view and fetch new observation. (frame is required although unused) """
             # reduce countdown:
             global remaining_time
-            remaining_time -= 1/display_refresh_rate_hz
+            global display_start_time
+            remaining_time = time_sec - (time.time() - display_start_time)  # total time - passed time
 
             # close figure upon countdown end:
             if remaining_time <= 0.0: plt.close()
@@ -714,7 +719,6 @@ def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
 
             # close fig:
             plt.close()
-
     submission_button_ax = plt.axes([0.4, .05, 0.2, 0.15])
     submission_button = Button(submission_button_ax, 'Submit')
     submission_button.on_clicked(click_submission_button)
@@ -722,21 +726,20 @@ def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
     plt.show()
 
 
-# todo: add post-trial questionnaire
-
-
 # todo: include pause screen (target=0 + no accuracy + text)
-# todo: include time?
 # todo: add accuracy metric (how to store?)
 def plot_input_view(shared_dict: dict[str, float],  # shared memory from sampling process
                     shared_dict_lock,
                     measurement_dict_label: str,
+                    shared_questionnaire_result_str,
                     include_gauge: bool = True,
                     display_window_len_s: int = 3,
                     display_refresh_rate_hz: int = 15,
                     y_limits: tuple[float, float] = (0, 3.3),
                     target_value: float | tuple[float, float, float] | None = None,  # either fixed line or sine-wave (tuple[min, max, freq])
                     target_corridor: float | None = None,  # draw corridor around target
+                    accuracy_save_dir: Path | str | None = None,
+                    pre_accuracy_phase_dur_sec: float = 5.0,
                     dynamically_update_y_limits: bool = True,
                     plot_size: tuple[float, float] = (15, 10),
                     input_unit_label: str = 'Input [V]',
@@ -902,6 +905,24 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
         button = Button(ax_button, 'Pause')
         button.on_clicked(pause_button_click)
 
+        ## gamification
+        global record_accuracy_bool
+        record_accuracy_bool = False  # will be set to True after trial phase, remains False if accuracy_save_dir not defined
+        if accuracy_save_dir is not None:
+            # accuracy measurement:
+            global accuracy_list; accuracy_list = []  # will hold measurements
+            global store_accuracy  # called to store measurements
+            def store_accuracy(current: float, target: float) -> None:
+                """ Squared distance. """
+                accuracy_list.append((target - current) ** 2)
+
+        # trial status:
+        trial_status_text = line_ax.text(.0, 1.05, "", transform=line_ax.transAxes)
+        global time_until_accuracy_measurement  # will define remaining pre-accuracy time
+        time_until_accuracy_measurement = pre_accuracy_phase_dur_sec
+        global display_start_time  # store to compute remaining pre-accuracy time
+        display_start_time = time.time()
+
         ### ANIMATION METHODS
         def init():
             # initialise lineplot:
@@ -916,6 +937,10 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
                 if target_corridor is not None:
                     target_corridor_line_low.set_data(x, target_y)
                     target_corridor_line_high.set_data(x, target_y)
+
+            # if gamification desired (accuracy storing):
+            if accuracy_save_dir is not None:
+                trial_status_text.set_text(f"Accuracy measurement starts in: {time_until_accuracy_measurement:.2f}sec")
 
             if include_gauge:  # initialise gauge
                 gauge_ax.legend()
@@ -944,6 +969,12 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
 
         def update(frame):
             """ update view and fetch new observation. (frame is required although unused) """
+            global target_y  # global definition at begin of function
+            global time_until_accuracy_measurement
+            global record_accuracy_bool
+            global accuracy_list
+            global display_start_time
+
             # update only if is_running:
             if is_running:
                 ## MEASUREMENTS
@@ -987,15 +1018,32 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
                 # update gauge plot:
                 if include_gauge: needle_line.set_data([0, convert_y_to_angle(new_obs)], [0, gauge_radius])
 
-                ## TODO: COMPUTE ACCURACY HERE
+                ## accuracy computation:
+                # store measurement
+                if record_accuracy_bool:  # remains False if accuracy_save_dir is None
+                    store_accuracy(current=new_obs, target=target_y[-1] if isinstance(target_value, tuple) else target_value)
                 # based on current target (before adapting because that is what user saw)
+
+                # manage pre-measurement phase and show measurement status:
+                if accuracy_save_dir is not None:
+                    if time_until_accuracy_measurement > 0:
+                        trial_status_text.set_text(f"Accuracy measurement starts in: {time_until_accuracy_measurement:.2f}sec")
+                        time_until_accuracy_measurement = pre_accuracy_phase_dur_sec - (time.time() - display_start_time)
+                        record_accuracy_bool = False
+                    else:  # show recent accuracy and set record bool to True:
+                        current_accuracy = accuracy_list[-1] if len(accuracy_list) > 0 else None
+                        if current_accuracy is not None:
+                            new_color = 'darkgreen' if current_accuracy < 50 else ('red' if current_accuracy > 250 else 'black')
+                            trial_status_text.set_text(f"Current accuracy (sq. dist.): {current_accuracy:.2f}")
+                            trial_status_text.set_color(new_color)
+                        record_accuracy_bool = True
 
                 ## TARGET VALUES
                 if isinstance(target_value, tuple):  # for varying target
                     # shift and append new target:
                     global current_sine_ind  # current sine counter (counts within target_sine_y)
                     new_target = target_sine_y[current_sine_ind]  # read current sine position
-                    global target_y; target_y = np.roll(target_y, -1); target_y[-1] = new_target
+                    target_y = np.roll(target_y, -1); target_y[-1] = new_target
 
                     # update line plot:
                     target_line.set_ydata(target_y); target_end_point.set_ydata([target_y[-1]])
@@ -1032,12 +1080,20 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
         plt.show()
 
     finally:
+        if accuracy_save_dir is not None:
+            # compute RMSE and display:
+            rmse = np.sqrt(np.nanmean(accuracy_list))  # RMSE
+            result_str = f"Achieved RMSE: {rmse:.3f}"
+            print(result_str); shared_questionnaire_result_str.write(result_str)
+
+            # store as csv:
+            save_path = accuracy_save_dir / filemgmt.file_title("Trial Accuracy Results", ".csv")
+            pd.Series(data=accuracy_list).to_csv(save_path)
+            print("Saved accuracy results to: ", save_path)
+
         plt.close('all')
 
 
-# todo: include shared memory to extract song info for such
-# todo: phase / progress indicator (show and include in log)
-# todo: show familiarity check results (to eventually restart song)
 def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from sampling process
                             shared_dict_lock,
                             start_trigger_event,
@@ -1051,8 +1107,9 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
                             shared_song_info_dict,
                             force_log_saving_event,
                             log_saving_done_event,
+                            start_test_motor_task_event,
                             plot_size: tuple[float, float] = (12, 3),
-                            title: str = "Quattrocento Control Master",
+                            title: str = "Experiment Control Master",
                             display_refresh_rate_hz: float = 3,
                             music_category_txt: str | Path | None = None,
                             control_log_dir: str | Path | None = None,
@@ -1122,7 +1179,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             recent_event_str = 'Stop Trigger'
             start_button.label.set_text("Start Trigger")
             stop_button.label.set_text("Stop Trigger\n(Done)")
-        trigger_label = fig.text(0.1, 0.85, "OTB400 Control:", ha='left', va='center', fontsize=10)
+        otb_control_label = fig.text(0.1, 0.86, "OTB400 Control:", ha='left', va='center', fontsize=10)
         start_button_ax = plt.axes([0.1, .65, 0.175, 0.175])
         start_button = Button(start_button_ax, 'Start Trigger')
         start_button.on_clicked(start_button_click)
@@ -1136,8 +1193,8 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             global recent_event_str
             recent_event_str = 'Onboarding Phase'
             onboarding_button.label.set_text("Onboarding\n(Done)")
-        trigger_label = fig.text(0.525, 0.85, "Experiment Control:", ha='left', va='center', fontsize=10)
-        onboarding_button_ax = plt.axes([0.525, .65, 0.1125, 0.175])
+        experiment_control_label = fig.text(0.525, 0.86, "Experiment Control:", ha='left', va='center', fontsize=10)
+        onboarding_button_ax = plt.axes([0.55, .65, 0.08, 0.175])
         onboarding_button = Button(onboarding_button_ax, 'Onboarding')
         onboarding_button.on_clicked(click_onboarding_button)
 
@@ -1145,9 +1202,9 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             start_mvc_calibration_event.set()
             global recent_event_str
             recent_event_str = 'MVC Calibration Phase'
-            mvc_button.label.set_text("MVC Calibration\n(Done)")
-        mvc_button_ax = plt.axes([0.655, .65, 0.1125, 0.175])
-        mvc_button = Button(mvc_button_ax, 'MVC Calibration')
+            mvc_button.label.set_text("MVC\n(Done)")
+        mvc_button_ax = plt.axes([0.64, .65, 0.08, 0.175])
+        mvc_button = Button(mvc_button_ax, 'MVC')
         mvc_button.on_clicked(click_mvc_button)
 
         def click_sampling_button(event):
@@ -1155,23 +1212,42 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             global recent_event_str
             recent_event_str = 'Sampling Phase'
             sampling_button.label.set_text("Sampling\n(Done)")
-        sampling_button_ax = plt.axes([0.78, .65, 0.1125, 0.175])
+        sampling_button_ax = plt.axes([0.73, .65, 0.08, 0.175])
         sampling_button = Button(sampling_button_ax, 'Sampling')
         sampling_button.on_clicked(click_sampling_button)
 
+        def click_test_task_button(event):
+            start_test_motor_task_event.set()
+            global recent_event_str
+            recent_event_str = 'Test Task Phase'
+            test_task_button.label.set_text("Test Task\n(Done)")
+        test_task_button_ax = plt.axes([0.82, .65, 0.08, 0.175])
+        test_task_button = Button(test_task_button_ax, 'Test Task')
+        test_task_button.on_clicked(click_test_task_button)
+
         # define music control instruments:
         if include_music:
-            # resume and pause buttons:
-            music_button_label = fig.text(0.1, 0.55, "Music / Task Control:", ha='left', va='center', fontsize=10)
+            # display random category order:
+            n_categories = len(music_master.category_url_dict.keys()) / 2 + 1  # /2 to remove familiar/unfamiliar, +1 for silence
+            n_buttons = len(music_master.category_url_dict.keys())
+            button_indices = list(range(1, int(n_categories)+1))
+            random.shuffle(button_indices)  # random sequence
+            # extend so that all elements occur twice after silence:
+            final_button_indices = button_indices[:1]
+            for element in button_indices[1:]: final_button_indices += [element]*2
 
-            # todo: replace this by silence trial button:
+            # resume and pause buttons:
+            music_button_label = fig.text(0.1, 0.56, "Music / Task Control: (button indices propose a random category sequence)", ha='left', va='center', fontsize=10)
+
+            # silence trial:
             silence_trial_button_ax = plt.axes([0.1, .35, 0.1, 0.175])
-            silence_trial_button = Button(silence_trial_button_ax, 'Silence Trial')
+            silence_trial_button = Button(silence_trial_button_ax, f'Silence Trial ({final_button_indices[0]})')
             def silence_trial_button_clicked(event):
                 music_master.pause()
                 start_silent_motor_task_event.set()  # start silent motor task
             silence_trial_button.on_clicked(silence_trial_button_clicked)
 
+            # pause / resume:
             pause_resume_button_ax = plt.axes([0.8, .35, 0.1, 0.175])
             pause_resume_button = Button(pause_resume_button_ax, 'Pause/Resume')
             def pause_resume_button_clicked(event):
@@ -1185,18 +1261,20 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
 
             ## category buttons (dynamically created based on amount of defined categories):
             # define positions:
-            n_categories = len(music_master.category_url_dict.keys())
             n_rows = 2
-            width_button = (.5 / n_categories * n_rows) * 1
-            button_x_positions = list(np.linspace(.225, .775-width_button, int(n_categories / n_rows))) * n_rows
-            button_y_positions = [.455] * int(n_categories / n_rows)
-            for row_ind in range(1, n_rows):  # add n_categories / n_rows downshifted y_coords
-                button_y_positions += [button_y_positions[-1] - .105 * row_ind] * int(n_categories / n_rows)
+            width_button = (.5 / n_buttons * n_rows) * 1
+            button_x_positions = list(np.linspace(.225, .775-width_button, int(n_buttons / n_rows))) * n_rows
+            button_y_positions = [.455] * int(n_buttons / n_rows)
+            for row_ind in range(1, n_rows):  # add n_buttons / n_rows downshifted y_coords
+                button_y_positions += [button_y_positions[-1] - .105 * row_ind] * int(n_buttons / n_rows)
 
             # create category buttons:
-            for category, button_x_pos, button_y_pos in zip(music_master.category_url_dict.keys(), button_x_positions, button_y_positions):
+            for category, button_x_pos, button_y_pos, button_index in zip(music_master.category_url_dict.keys(),
+                                                                          button_x_positions, button_y_positions,
+                                                                          final_button_indices[1:]  # exclude silence
+                                                                          ):
                 temp_button_ax = plt.axes((button_x_pos, button_y_pos, width_button, .07))
-                globals()[f'{category}_button'] = Button(temp_button_ax, f'{category}')
+                globals()[f'{category}_button'] = Button(temp_button_ax, f'{category} ({button_index})')
                 # define function (category needs to be saved as default value due to late binding)
                 globals()[f'{category}_button_clicked'] = lambda event, cat=category: (
                     music_master.play_next_from(cat), start_music_motor_task_event.set()  # play music and start music motor task
