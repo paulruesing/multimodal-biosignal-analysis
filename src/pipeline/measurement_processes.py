@@ -8,6 +8,7 @@ That external workflow needs to manage shared memory allocation and multiprocess
 import serial
 import time
 import json
+import os
 import random
 from datetime import datetime
 import numpy as np
@@ -1104,7 +1105,6 @@ def accuracy_sampler(sampling_rate: float,
                      save_accuracy_and_close_event,
                      save_accuracy_done_event,
                      pre_accuracy_phase_dur_sec: float = 5.0,
-
                      ):
     """
     Computes, stores and finally saves RMSE between a measurement and its target.
@@ -1475,7 +1475,47 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
         plt.close('all')
 
 
-def plot_performance_view():
+def _get_rmse_recursively(dir: str | Path,
+                          file_identifier: str = "Trial Summary",
+                          rmse_key: str = "RMSE") -> list[float]:
+    """Recursively find all RMSE values from JSON files matching file_identifier in all subdirectories."""
+    if not isinstance(dir, Path):
+        dir = Path(dir)
+
+    rmse_values = []  # Collect all matches
+
+    for item in dir.iterdir():
+        if item.is_dir():
+            # Recurse into subdirectory and ADD results (don't return early)
+            rmse_values.extend(_get_rmse_recursively(item, file_identifier, rmse_key))
+        elif item.is_file():
+            # Check if it's a matching JSON file
+            name_without_ext = item.stem  # "Trial Summary" from "Trial Summary.json"
+            if file_identifier in name_without_ext and item.suffix == '.json':
+                try:
+                    with open(item, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    rmse = data[rmse_key]
+                    rmse_values.append(rmse)  # Collect this value
+                except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                    print(f"Warning: Could not read RMSE from {item}: {e}")
+
+    return rmse_values
+
+
+def plot_performance_view(this_subject_dir: str | Path,
+                          other_subject_dirs: list[str | Path] | None = None,):
+    # todo: define recursive read_performance function iterating through dirs (defining dirs)
+
+    # todo: upon launch read historic performances of all other participants via above func (if not None!)
+
+    # todo: display boxplot of historic performance
+
+    # todo: ponder how to visualize own performance
+
+    # todo: upon register_new_performance_event: insert recent performance into own performance array
+
+    # todo:
     pass
 
 
@@ -1676,8 +1716,10 @@ if __name__ == '__main__':
     EXPERIMENT_LOG = ROOT / "data" / "experiment_logs"
     CONFIG_DIR = ROOT / "config"
     MUSIC_CONFIG = CONFIG_DIR / "music_selection.txt"
+    RESULT_DIR = ROOT / "data" / "experiment_results"
 
     # important:
-    SUBJECT_DIR = ROOT / "data" / "experiment_results" / "subject_00"
+    SUBJECT_DIR = RESULT_DIR / "subject_00"
     SONG_ONE_DIR = SUBJECT_DIR / "song_00"
 
+    print(_get_rmse_recursively(SUBJECT_DIR))
