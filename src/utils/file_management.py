@@ -108,6 +108,10 @@ class TxtConfig:
             for line in file:
                 line.strip()
 
+                # skip comments and empty lines:
+                if line.startswith("#"): continue
+                if line == "\n": continue
+
                 # read entry and sanity check:
                 entry = line.split(' --- ')
                 if len(entry) != 2:
@@ -125,6 +129,7 @@ class TxtConfig:
     def _set_dict_to_file(self, new_dict):
         # overwrite txt file with current dictionary content
         with open(self.txt_file_path, "w") as file:
+            file.write("# This file was changed during runtime.\n# The structure is 'PROPERTY_NAME --- ENTRY'. Lines starting with '#' are ignored.\n")
             for key, value in new_dict.items():
                 if isinstance(value, list):
                     value = ", ".join([str(e) for e in value])  # list formatting (can be retrieved via get_as_type)
@@ -132,11 +137,10 @@ class TxtConfig:
 
     def get_as_type(self, key, value_type: Literal["int", "float", "float_list", "str_list", "list", "bool", "str"]):
         value = self.settings_dict[key]  # retrieve value
-
         # format and return value:
         if value_type == "int": return int(value)
         elif value_type == "float": return float(value)
-        elif value_type == "bool": return bool(value)
+        elif value_type == "bool": return value == 'True' or value == '1'
         elif value_type == "str": return str(value)
         elif value_type == "float_list":
             entries = value.split(', ')
