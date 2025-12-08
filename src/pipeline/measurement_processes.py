@@ -27,7 +27,18 @@ from src.pipeline.music_control import SpotifyController
 from pathlib import Path
 import pandas as pd
 
-matplotlib.use('TkAgg')
+############### MATPLOTLIB PREP ###############
+matplotlib.use('Qt5Agg')  # TkAgg
+theme: Literal['dark', 'light'] = 'dark'
+
+matplotlib.rcParams["toolbar"] = "none"
+plt.style.use('dark_background' if theme == 'dark' else 'seaborn-v0_8-whitegrid')
+button_background_color = textbox_background_color = 'darkslategray' if theme == 'dark' else 'white'
+button_hover_color = textbox_hover_color = 'darkcyan' if theme == 'dark' else 'lightgrey'
+slider_background_color = 'darkslategray' if theme == 'dark' else 'grey'
+slider_bar_color = 'darkcyan' if theme == 'dark' else 'darkturquoise'
+font_color = "white" if theme == 'dark' else "black"
+radio_button_selected_color = 'aqua' if theme == 'dark' else 'darkturquoise'
 
 
 ############### READOUT METHODS ###############
@@ -387,6 +398,7 @@ def dummy_sampling_process(shared_dict,
 
 
 ############### PLOTTING METHODS ###############
+# todo: ask for motor impediments?
 def plot_onboarding_form(result_json_dir: str | Path,
                          shared_questionnaire_str):
     ### DISABLE MPL KEYBOARD SHORTCUTS
@@ -417,14 +429,18 @@ def plot_onboarding_form(result_json_dir: str | Path,
     def submit_name_textbox(text):
         input_dict["Name"] = text
     name_textbox_ax = fig.add_axes((0.55, 0.8, 0.39, 0.05))  # x, y, w, h
-    name_textbox = TextBox(name_textbox_ax, 'Full Name (FIRST LAST):')
+    name_textbox = TextBox(name_textbox_ax, 'Full Name (FIRST LAST):',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
     name_textbox.on_submit(submit_name_textbox)
 
     # birthdate: text
     def submit_birthdate_textbox(text):
         input_dict["Birthdate"] = text
     birthdate_textbox_ax = fig.add_axes((0.55, 0.7, 0.39, 0.05))  # x, y, w, h
-    birthdate_textbox = TextBox(birthdate_textbox_ax, 'Birthdate (DD/MM/YYYY):')
+    birthdate_textbox = TextBox(birthdate_textbox_ax, 'Birthdate (DD/MM/YYYY):',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
     birthdate_textbox.on_submit(submit_birthdate_textbox)
 
     # gender: (radiobutton) female / male / other
@@ -433,7 +449,8 @@ def plot_onboarding_form(result_json_dir: str | Path,
     gender_dropdown_ax.axis('off')
     gender_dropdown_ax.set_facecolor('gold')
     gender_options = ['Female', 'Male', 'Non-binary', 'Not selected']  # options for selector
-    gender_dropdown = RadioButtons(gender_dropdown_ax, gender_options, active=3)
+    gender_dropdown = RadioButtons(gender_dropdown_ax, gender_options, active=3, activecolor=radio_button_selected_color,
+                                   radio_props={'edgecolor': radio_button_selected_color,})
     def submit_gender_dropdown(label):
         if label != "Not selected": input_dict["Gender"] = label
     gender_dropdown.on_clicked(submit_gender_dropdown)
@@ -444,7 +461,8 @@ def plot_onboarding_form(result_json_dir: str | Path,
     dominand_hand_dropdown_ax.axis('off')
     dominand_hand_dropdown_ax.set_facecolor('gold')
     dominant_hand_options = ['Left', 'Right', 'Not selected']  # options for selector
-    dominand_hand_dropdown = RadioButtons(dominand_hand_dropdown_ax, dominant_hand_options, active=2)
+    dominand_hand_dropdown = RadioButtons(dominand_hand_dropdown_ax, dominant_hand_options, active=2, activecolor=radio_button_selected_color,
+                                   radio_props={'edgecolor': radio_button_selected_color,})
     def submit_dominand_hand_dropdown(label):
         if label != "Not selected": input_dict["Dominant hand"] = label
     dominand_hand_dropdown.on_clicked(submit_dominand_hand_dropdown)
@@ -453,12 +471,16 @@ def plot_onboarding_form(result_json_dir: str | Path,
     def submit_instrument_textbox(text):
         input_dict["Instrument"] = text
     instrument_textbox_ax = fig.add_axes((0.55, 0.4, 0.39, 0.05))  # x, y, w, h
-    instrument_textbox = TextBox(instrument_textbox_ax, 'Do you play an instrument? If yes, which:')
+    instrument_textbox = TextBox(instrument_textbox_ax, 'Do you play an instrument? If yes, which:',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
     instrument_textbox.on_submit(submit_instrument_textbox)
 
     # "If yes, how well:" 1-7
     skill_slider_ax = fig.add_axes((.55, .32, .39, .05))
-    skill_slider = Slider(skill_slider_ax, 'If yes, how well:', 0, 7, valinit=0, valstep=1, valfmt='%i')
+    skill_slider = Slider(skill_slider_ax, 'If yes, how well: ', 0, 7, valinit=0, valstep=1, valfmt='%i',
+                          color=slider_bar_color, track_color=slider_background_color,
+                          initcolor='None', handle_style={'facecolor': 'white', 'edgecolor': 'white', 'size': 10})
     def update_skill_slider(val):
         input_dict["Musical skill"] = int(val)
         fig.canvas.draw_idle()  # update view
@@ -468,9 +490,10 @@ def plot_onboarding_form(result_json_dir: str | Path,
     listening_habit_dropdown_label = ax.text(.03, -.02, "How often do you listen to music?", transform=ax.transAxes, va='center', ha='left')
     listening_habit_dropdown_ax = fig.add_axes((0.51, 0.16, 0.4, 0.14))  # x, y, w, h
     listening_habit_dropdown_ax.axis('off')
-    listening_habit_dropdown_ax.set_facecolor('gold')
+    listening_habit_dropdown_ax.set_facecolor('white')
     listening_habit_options = ['Most of the day', 'A small part of the day', 'Every 2 or 3 days', 'Seldom', 'Not selected']  # options for selector
-    listening_habit_dropdown = RadioButtons(listening_habit_dropdown_ax, listening_habit_options, active=4)
+    listening_habit_dropdown = RadioButtons(listening_habit_dropdown_ax, listening_habit_options, active=4, activecolor=radio_button_selected_color,
+                                   radio_props={'edgecolor': radio_button_selected_color,})
     def submit_listening_habit_dropdown(label):
         if label != "Not selected": input_dict["Listening habit"] = label
     listening_habit_dropdown.on_clicked(submit_listening_habit_dropdown)
@@ -504,7 +527,7 @@ def plot_onboarding_form(result_json_dir: str | Path,
                     fig.canvas.draw_idle()  # update view
                     input_missing = True
                 else:  # if now correct, reset color to black
-                    key_object_dict[key].set_color('black')
+                    key_object_dict[key].set_color(font_color)
                     fig.canvas.draw_idle()  # update view
 
         if not input_missing:
@@ -522,19 +545,19 @@ def plot_onboarding_form(result_json_dir: str | Path,
             plt.close()
 
     submission_button_ax = plt.axes([0.4, .05, 0.2, 0.075])
-    submission_button = Button(submission_button_ax, 'Submit')
+    submission_button = Button(submission_button_ax, 'Submit',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
     submission_button.on_clicked(click_submission_button)
 
     plt.show()
 
 
-# todo: updates too fast
 def plot_breakout_screen(time_sec: float, title="Have a break. Please wait."):
     """ Plot countdown during break. Figure clouses after time_sec. """
     ### PLOT
     try:
         # initialise:
-        matplotlib.use('TkAgg')  # select backend (suitable for animation)
         fig, ax = plt.subplots(figsize=(6, 3))
         manager = plt.get_current_fig_manager()  # change TkAgg window title
         manager.set_window_title("Breakout Screen")
@@ -568,7 +591,8 @@ def plot_breakout_screen(time_sec: float, title="Have a break. Please wait."):
             return countdown_text,
 
         # run and show animation:
-        ani = FuncAnimation(fig, update, frames=1, blit=False,
+        global breakout_ani
+        breakout_ani = FuncAnimation(fig, update, frames=1, blit=False,
                             interval=int(1000/display_refresh_rate_hz), repeat=True)
         plt.show()
 
@@ -580,6 +604,7 @@ def plot_breakout_screen(time_sec: float, title="Have a break. Please wait."):
 
 def plot_pretrial_familiarity_check(result_json_dir: str | Path,  # dir to save results to
                                     shared_questionnaire_str,  # shared memory for master process
+                                    question_text: str = 'How well do you know this song? (0 = never heard it, 7 = can sing/hum along)',
                                     ):
     ### PLOT
     fig, ax = plt.subplots(figsize=(12, 2))
@@ -593,7 +618,9 @@ def plot_pretrial_familiarity_check(result_json_dir: str | Path,  # dir to save 
 
     # define familiarity slider (callback_function, ax, object, on_submit(func)):
     slider_ax = fig.add_axes((.55, .5, .39, .1))
-    slider = Slider(slider_ax, 'How well do you know this song? (0 = never heard it, 7 = can sing/hum along)', 0, 7, valinit=0, valstep=1, valfmt='%i')
+    slider = Slider(slider_ax, question_text + " ", 0, 7, valinit=0, valstep=1, valfmt='%i',
+                          color=slider_bar_color, track_color=slider_background_color,
+                          initcolor='None', handle_style={'facecolor': 'white', 'edgecolor': 'white', 'size': 10})
     def update_slider(val):
         input_dict["Familiarity"] = int(val)
         fig.canvas.draw_idle()  # update view
@@ -614,7 +641,7 @@ def plot_pretrial_familiarity_check(result_json_dir: str | Path,  # dir to save 
                 fig.canvas.draw_idle()  # update view
                 input_missing = True
             else:
-                key_object_dict[key].set_color('black')
+                key_object_dict[key].set_color(font_color)
                 fig.canvas.draw_idle()  # update view
 
         if not input_missing:
@@ -632,15 +659,20 @@ def plot_pretrial_familiarity_check(result_json_dir: str | Path,  # dir to save 
             plt.close()
 
     submission_button_ax = plt.axes([0.4, .05, 0.2, 0.15])
-    submission_button = Button(submission_button_ax, 'Submit')
+    submission_button = Button(submission_button_ax, 'Submit',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
     submission_button.on_clicked(click_submission_button)
     plt.show()
 
 
 # todo: ponder, whether to enter one lyric adds value
+# todo: add alternative category selection
 def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
                           shared_questionnaire_str,  # shared memory for master process
                           category_string: str | None = None,  # for question
+                          liking_question_str: str = 'How did you like the song? (0: terrible, 7: extremely well)',
+                          emotion_question_str: str = "Please rate your overall emotional state right now. (0: extremely unhappy/distressed, 7 = extremely happy/peaceful",
                                     ):
     """ Includes music questions only if category string is provided. """
     ### PLOT
@@ -657,7 +689,9 @@ def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
     if category_string is not None:
         # define liking slider (callback_function, ax, object, on_submit(func)):
         liking_slider_ax = fig.add_axes((.55, .7, .39, .1))
-        liking_slider = Slider(liking_slider_ax, 'How did you like the song? (0: terrible, 7: extremely well)', 0, 7, valinit=0, valstep=1, valfmt='%i')
+        liking_slider = Slider(liking_slider_ax, liking_question_str + " ", 0, 7, valinit=0, valstep=1, valfmt='%i',
+                          color=slider_bar_color, track_color=slider_background_color,
+                          initcolor='None', handle_style={'facecolor': 'white', 'edgecolor': 'white', 'size': 10})
         def update_liking_slider(val):
             input_dict["Liking"] = int(val)
             fig.canvas.draw_idle()  # update view
@@ -665,8 +699,10 @@ def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
 
         # define category validation slider (callback_function, ax, object, on_submit(func)):
         category_slider_ax = fig.add_axes((.55, .5, .39, .1))
-        category_slider = Slider(category_slider_ax, f"Do you think the song matches the category '{category_string.capitalize()}'? (0: not at all, 7: perfect match)", 0, 7,
-                        valinit=0, valstep=1, valfmt='%i')
+        category_slider = Slider(category_slider_ax, f"Do you think the song matches the category '{category_string.capitalize()}'? (0: not at all, 7: perfect match) ", 0, 7,
+                        valinit=0, valstep=1, valfmt='%i',
+                          color=slider_bar_color, track_color=slider_background_color,
+                          initcolor='None', handle_style={'facecolor': 'white', 'edgecolor': 'white', 'size': 10})
         def update_category_slider(val):
             input_dict["Fitting Category"] = int(val)
             fig.canvas.draw_idle()  # update view
@@ -675,9 +711,11 @@ def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
     # define mood slider (callback_function, ax, object, on_submit(func)):
     emotion_slider_ax = fig.add_axes((.55, .3 if category_string is not None else .5, .39, .1))
     emotion_slider = Slider(emotion_slider_ax,
-                             f"Please rate your overall emotional state right now. (0: extremely unhappy/distressed, 7 = extremely happy/peaceful",
+                             emotion_question_str + " ",
                              0, 7,
-                             valinit=0, valstep=1, valfmt='%i')
+                             valinit=0, valstep=1, valfmt='%i',
+                          color=slider_bar_color, track_color=slider_background_color,
+                          initcolor='None', handle_style={'facecolor': 'white', 'edgecolor': 'white', 'size': 10})
     def update_emotion_slider(val):
         input_dict["Emotional State"] = int(val)
         fig.canvas.draw_idle()  # update view
@@ -703,7 +741,7 @@ def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
                 fig.canvas.draw_idle()  # update view
                 input_missing = True
             else:
-                key_object_dict[key].set_color('black')
+                key_object_dict[key].set_color(font_color)
                 fig.canvas.draw_idle()  # update view
 
         if not input_missing:
@@ -720,26 +758,26 @@ def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
             # close fig:
             plt.close()
     submission_button_ax = plt.axes([0.4, .05, 0.2, 0.15])
-    submission_button = Button(submission_button_ax, 'Submit')
+    submission_button = Button(submission_button_ax, 'Submit',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
     submission_button.on_clicked(click_submission_button)
 
     plt.show()
 
 
-# todo: include pause screen (target=0 + no accuracy + text)
-# todo: add accuracy metric (how to store?)
 def plot_input_view(shared_dict: dict[str, float],  # shared memory from sampling process
                     shared_dict_lock,
                     measurement_dict_label: str,
-                    shared_questionnaire_result_str,
                     include_gauge: bool = True,
                     display_window_len_s: int = 3,
                     display_refresh_rate_hz: int = 15,
                     y_limits: tuple[float, float] = (0, 3.3),
                     target_value: float | tuple[float, float, float] | None = None,  # either fixed line or sine-wave (tuple[min, max, freq])
                     target_corridor: float | None = None,  # draw corridor around target
-                    accuracy_save_dir: Path | str | None = None,
-                    pre_accuracy_phase_dur_sec: float = 5.0,
+                    shared_value_target_dict: dict[str, float] | None = None,
+                    shared_current_accuracy_str=None,
+                    save_accuracy_and_close_event=None,
                     dynamically_update_y_limits: bool = True,
                     plot_size: tuple[float, float] = (15, 10),
                     input_unit_label: str = 'Input [V]',
@@ -786,8 +824,6 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
     """
     try:
         ### PREPARE PLOT
-        matplotlib.use('TkAgg')  # select backend (suitable for animation)
-
         global dynamic_y_limit  # variables that are dynamically adjusted during update() need to be defined globally
         dynamic_y_limit = y_limits
         global update_counter; update_counter = 0  # define display refreshment counter and sanity check
@@ -875,7 +911,7 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
             angles = np.linspace(0,  gauge_circumference, 100)  # gauge background semicircle
             radii = np.full_like(angles, gauge_radius)
             gauge_ax.plot(angles, radii, color='lightgray', linewidth=20, solid_capstyle='round')
-            gauge_ax.bar([0, gauge_circumference], [gauge_radius]*2, width=0.03, color='black')  # mark ends
+            gauge_ax.bar([0, gauge_circumference], [gauge_radius]*2, width=0.03, color=font_color)  # mark ends
 
             # initialise current value line:
             needle_line, = gauge_ax.plot([], [], lw=3, color='red', label='Current Value')
@@ -902,26 +938,17 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
             else: button.label.set_text("Continue")
 
         ax_button = plt.axes([0.8, .9, 0.1, 0.04])
-        button = Button(ax_button, 'Pause')
+        button = Button(ax_button, 'Pause',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
         button.on_clicked(pause_button_click)
 
         ## gamification
         global record_accuracy_bool
         record_accuracy_bool = False  # will be set to True after trial phase, remains False if accuracy_save_dir not defined
-        if accuracy_save_dir is not None:
-            # accuracy measurement:
-            global accuracy_list; accuracy_list = []  # will hold measurements
-            global store_accuracy  # called to store measurements
-            def store_accuracy(current: float, target: float) -> None:
-                """ Squared distance. """
-                accuracy_list.append((target - current) ** 2)
 
         # trial status:
         trial_status_text = line_ax.text(.0, 1.05, "", transform=line_ax.transAxes)
-        global time_until_accuracy_measurement  # will define remaining pre-accuracy time
-        time_until_accuracy_measurement = pre_accuracy_phase_dur_sec
-        global display_start_time  # store to compute remaining pre-accuracy time
-        display_start_time = time.time()
 
         ### ANIMATION METHODS
         def init():
@@ -937,10 +964,6 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
                 if target_corridor is not None:
                     target_corridor_line_low.set_data(x, target_y)
                     target_corridor_line_high.set_data(x, target_y)
-
-            # if gamification desired (accuracy storing):
-            if accuracy_save_dir is not None:
-                trial_status_text.set_text(f"Accuracy measurement starts in: {time_until_accuracy_measurement:.2f}sec")
 
             if include_gauge:  # initialise gauge
                 gauge_ax.legend()
@@ -970,10 +993,9 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
         def update(frame):
             """ update view and fetch new observation. (frame is required although unused) """
             global target_y  # global definition at begin of function
-            global time_until_accuracy_measurement
-            global record_accuracy_bool
-            global accuracy_list
-            global display_start_time
+
+            # allow for ending of view
+            #if save_accuracy_and_close_event.is_set(): plt.close('all')
 
             # update only if is_running:
             if is_running:
@@ -1018,25 +1040,14 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
                 # update gauge plot:
                 if include_gauge: needle_line.set_data([0, convert_y_to_angle(new_obs)], [0, gauge_radius])
 
-                ## accuracy computation:
-                # store measurement
-                if record_accuracy_bool:  # remains False if accuracy_save_dir is None
-                    store_accuracy(current=new_obs, target=target_y[-1] if isinstance(target_value, tuple) else target_value)
-                # based on current target (before adapting because that is what user saw)
+                ## accuracy display:  (is sampled and computed in separate accuracy_sampler process
+                if shared_value_target_dict is not None:  # communicate to sampler
+                    with shared_dict_lock:
+                        shared_value_target_dict['value'] = new_obs
+                        shared_value_target_dict['target'] = target_y[-1]
+                if shared_current_accuracy_str is not None:  # ponder whether we can include color here
+                    trial_status_text.set_text(shared_current_accuracy_str.read())
 
-                # manage pre-measurement phase and show measurement status:
-                if accuracy_save_dir is not None:
-                    if time_until_accuracy_measurement > 0:
-                        trial_status_text.set_text(f"Accuracy measurement starts in: {time_until_accuracy_measurement:.2f}sec")
-                        time_until_accuracy_measurement = pre_accuracy_phase_dur_sec - (time.time() - display_start_time)
-                        record_accuracy_bool = False
-                    else:  # show recent accuracy and set record bool to True:
-                        current_accuracy = accuracy_list[-1] if len(accuracy_list) > 0 else None
-                        if current_accuracy is not None:
-                            new_color = 'darkgreen' if current_accuracy < 50 else ('red' if current_accuracy > 250 else 'black')
-                            trial_status_text.set_text(f"Current accuracy (sq. dist.): {current_accuracy:.2f}")
-                            trial_status_text.set_color(new_color)
-                        record_accuracy_bool = True
 
                 ## TARGET VALUES
                 if isinstance(target_value, tuple):  # for varying target
@@ -1074,24 +1085,75 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
             return output_tuple
 
         # run and show animation:
-        ani = FuncAnimation(fig, update, frames=len(x)+1,
+        global input_view_ani
+        input_view_ani = FuncAnimation(fig, update, frames=len(x)+1,
                             init_func=init, blit=False,
                             interval=int(1000/display_refresh_rate_hz), repeat=True)
         plt.show()
 
     finally:
-        if accuracy_save_dir is not None:
-            # compute RMSE and display:
-            rmse = np.sqrt(np.nanmean(accuracy_list))  # RMSE
-            result_str = f"Achieved RMSE: {rmse:.3f}"
-            print(result_str); shared_questionnaire_result_str.write(result_str)
-
-            # store as csv:
-            save_path = accuracy_save_dir / filemgmt.file_title("Trial Accuracy Results", ".csv")
-            pd.Series(data=accuracy_list).to_csv(save_path)
-            print("Saved accuracy results to: ", save_path)
-
         plt.close('all')
+
+
+def accuracy_sampler(sampling_rate: float,
+                     shared_value_target_dict,
+                     shared_dict_lock,
+                     shared_current_se_str,
+                     shared_questionnaire_result_str,
+                     accuracy_save_dir: str | Path,
+                     save_accuracy_and_close_event,
+                     save_accuracy_done_event,
+                     pre_accuracy_phase_dur_sec: float = 5.0,
+
+                     ):
+    """
+    Computes, stores and finally saves RMSE between a measurement and its target.
+
+    Receives from a shared_value_target_dict.
+
+    Communicates runtime result via a shared_current_se_str shared string.
+
+    Returns final result via shared_questionnaire_result_str.
+    """
+    # waiting time before accuracy measurement:
+    display_start_time = time.time()
+    remaining_wait_time = pre_accuracy_phase_dur_sec
+    while remaining_wait_time > 0:
+        remaining_wait_time = pre_accuracy_phase_dur_sec - (time.time() - display_start_time)
+        shared_current_se_str.write(f"Accuracy measurement will start in {remaining_wait_time:.2f} sec...")
+        time.sleep(1/sampling_rate)  # simulate sampling rate
+
+    # sample and store accuracies:
+    accuracy_list = []
+    while not save_accuracy_and_close_event.is_set():
+        try:
+            with shared_dict_lock:
+                current_val = shared_value_target_dict['value']
+                current_target = shared_value_target_dict['target']
+        except KeyError:
+            raise KeyError("shared_value_target_dict must contain 'value' and 'target' to sample accuracy!")
+
+        # compute, store and communciate current acc.:
+        current_se = (current_target - current_val) ** 2
+        accuracy_list.append(current_se)
+        shared_current_se_str.write(f"Current accuracy (sq. dist.): {current_se:.2f}")
+
+        # simulate sampling frequency:
+        time.sleep(1/sampling_rate)
+
+    # first clear event:
+    save_accuracy_and_close_event.clear()
+
+    # store final RMSE:
+    rmse = np.sqrt(np.nanmean(accuracy_list))
+    result_str = f"Achieved RMSE: {rmse:.3f}"
+    print(result_str); shared_questionnaire_result_str.write(result_str)
+
+    # store as csv:
+    save_path = accuracy_save_dir / filemgmt.file_title("Trial Accuracy Results", ".csv")
+    pd.Series(data=accuracy_list).to_csv(save_path)
+    print("Saved accuracy results to: ", save_path)
+    save_accuracy_done_event.set()
 
 
 def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from sampling process
@@ -1147,8 +1209,6 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
     - Automatically closes figure upon window close or termination.
     """
     try:
-        matplotlib.use('TkAgg')  # select backend (suitable for animation)
-
         if music_category_txt is not None:  # initialise spotify controller
             print("Initialising SpotifyController instance. Remember opening spotify!")
             music_master = SpotifyController(category_url_dict=music_category_txt, randomly_shuffle_category_lists=True)
@@ -1181,10 +1241,14 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             stop_button.label.set_text("Stop Trigger\n(Done)")
         otb_control_label = fig.text(0.1, 0.86, "OTB400 Control:", ha='left', va='center', fontsize=10)
         start_button_ax = plt.axes([0.1, .65, 0.175, 0.175])
-        start_button = Button(start_button_ax, 'Start Trigger')
+        start_button = Button(start_button_ax, 'Start Trigger',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
         start_button.on_clicked(start_button_click)
         stop_button_ax = plt.axes([0.3, .65, 0.175, 0.175])
-        stop_button = Button(stop_button_ax, 'Stop Trigger')
+        stop_button = Button(stop_button_ax, 'Stop Trigger',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
         stop_button.on_clicked(stop_button_click)
 
         # experiment phase triggers:
@@ -1195,7 +1259,9 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             onboarding_button.label.set_text("Onboarding\n(Done)")
         experiment_control_label = fig.text(0.525, 0.86, "Experiment Control:", ha='left', va='center', fontsize=10)
         onboarding_button_ax = plt.axes([0.55, .65, 0.08, 0.175])
-        onboarding_button = Button(onboarding_button_ax, 'Onboarding')
+        onboarding_button = Button(onboarding_button_ax, 'Onboarding',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
         onboarding_button.on_clicked(click_onboarding_button)
 
         def click_mvc_button(event):
@@ -1204,7 +1270,9 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             recent_event_str = 'MVC Calibration Phase'
             mvc_button.label.set_text("MVC\n(Done)")
         mvc_button_ax = plt.axes([0.64, .65, 0.08, 0.175])
-        mvc_button = Button(mvc_button_ax, 'MVC')
+        mvc_button = Button(mvc_button_ax, 'MVC',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
         mvc_button.on_clicked(click_mvc_button)
 
         def click_sampling_button(event):
@@ -1213,7 +1281,9 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             recent_event_str = 'Sampling Phase'
             sampling_button.label.set_text("Sampling\n(Done)")
         sampling_button_ax = plt.axes([0.73, .65, 0.08, 0.175])
-        sampling_button = Button(sampling_button_ax, 'Sampling')
+        sampling_button = Button(sampling_button_ax, 'Sampling',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
         sampling_button.on_clicked(click_sampling_button)
 
         def click_test_task_button(event):
@@ -1222,7 +1292,9 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             recent_event_str = 'Test Task Phase'
             test_task_button.label.set_text("Test Task\n(Done)")
         test_task_button_ax = plt.axes([0.82, .65, 0.08, 0.175])
-        test_task_button = Button(test_task_button_ax, 'Test Task')
+        test_task_button = Button(test_task_button_ax, 'Test Task',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
         test_task_button.on_clicked(click_test_task_button)
 
         # define music control instruments:
@@ -1241,7 +1313,9 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
 
             # silence trial:
             silence_trial_button_ax = plt.axes([0.1, .35, 0.1, 0.175])
-            silence_trial_button = Button(silence_trial_button_ax, f'Silence Trial ({final_button_indices[0]})')
+            silence_trial_button = Button(silence_trial_button_ax, f'Silence Trial ({final_button_indices[0]})',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
             def silence_trial_button_clicked(event):
                 music_master.pause()
                 start_silent_motor_task_event.set()  # start silent motor task
@@ -1249,7 +1323,9 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
 
             # pause / resume:
             pause_resume_button_ax = plt.axes([0.8, .35, 0.1, 0.175])
-            pause_resume_button = Button(pause_resume_button_ax, 'Pause/Resume')
+            pause_resume_button = Button(pause_resume_button_ax, 'Pause/Resume',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
             def pause_resume_button_clicked(event):
                 if song_info_text.get_text() == "No track playing currently.":
                     music_master.resume()
@@ -1274,7 +1350,9 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
                                                                           final_button_indices[1:]  # exclude silence
                                                                           ):
                 temp_button_ax = plt.axes((button_x_pos, button_y_pos, width_button, .07))
-                globals()[f'{category}_button'] = Button(temp_button_ax, f'{category} ({button_index})')
+                globals()[f'{category}_button'] = Button(temp_button_ax, f'{category} ({button_index})',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
                 # define function (category needs to be saved as default value due to late binding)
                 globals()[f'{category}_button_clicked'] = lambda event, cat=category: (
                     music_master.play_next_from(cat), start_music_motor_task_event.set()  # play music and start music motor task
@@ -1384,7 +1462,8 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             return (measurement_info_text, song_info_text) if include_music else measurement_info_text
 
         # run and show animation:
-        ani = FuncAnimation(fig, update, frames=1,
+        global master_ani
+        master_ani = FuncAnimation(fig, update, frames=1,
                             init_func=init, blit=False,
                             interval=int(1000/display_refresh_rate_hz), repeat=True)
         plt.show()
@@ -1394,6 +1473,10 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
         force_log_saving_event.clear()
         log_saving_done_event.set()
         plt.close('all')
+
+
+def plot_performance_view():
+    pass
 
 
 ############### MULTIPROCESSING METHODS ###############
@@ -1570,11 +1653,11 @@ class SharedString:
         return self.max_size
 
 
-def save_terminate_process(process: multiprocessing.Process) -> None:
+def save_terminate_process(process: multiprocessing.Process, timeout: float = 2.0) -> None:
     """ First request termination, then force-kill process."""
     if process.is_alive():  # terminate process (request)
         process.terminate()
-        process.join(timeout=1.0)
+        process.join(timeout=timeout)
 
         if process.is_alive():  # if still alive kill (force)
             process.kill()
@@ -1584,129 +1667,8 @@ def save_terminate_process(process: multiprocessing.Process) -> None:
         process.join()
 
 
-### OLD MULTIPROCESSING IMPLEMENTATION:
 
-def start_measurement_processes(measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str, float]],measurement_saving_path: str | Path = None,
-                                measurement_sampling_rate_hz: int = 1000,
-                                record_measurements: bool = True,
-                                # measurement_label, processing_callable, serial_input_marker
-                                music_category_txt: str | Path | None = None,
-                                control_log_dir: str | Path | None = None,
-                                ) -> None:
-    # sanity check:
-    if not record_measurements: print("[WARNING] Measurement recording is deactivated! No measurements and control logs will be saved.")
-
-    # initialise shared:
-    shared_dict = multiprocessing.Manager().dict()
-    measurement_labels = []  # for dynamic object definition below
-    for measurement_label, _, _, _ in measurement_definitions:
-        shared_dict[measurement_label] = .0
-        measurement_labels.append(measurement_label)
-
-    # saving event:
-    force_serial_save_event = RobustEventManager()
-    serial_saving_done_event = RobustEventManager()
-    start_trigger_event = RobustEventManager()
-    stop_trigger_event = RobustEventManager()
-    start_onboarding_event = RobustEventManager()
-    start_mvc_calibration_event = RobustEventManager()
-    start_sampling_event = RobustEventManager()
-    start_music_motor_task_event = RobustEventManager()  # called upon starting a song
-
-    # define processes:
-    sampler = multiprocessing.Process(
-        target=dummy_sampling_process if not record_measurements else sampling_process,  # if not recording use dummy,
-        args=(shared_dict, force_serial_save_event, serial_saving_done_event, start_trigger_event, stop_trigger_event,),
-        kwargs={'measurement_definitions': measurement_definitions,
-                'sampling_rate_hz': measurement_sampling_rate_hz,
-                'save_recordings_path': measurement_saving_path,
-                'record_bool': record_measurements,
-                'baud_rate': 115200,},
-        name="SamplingProcess")
-
-    if 'fsr' in measurement_labels:
-        fsr_displayer = multiprocessing.Process(
-            target=plot_input_view,
-            args=(shared_dict,),
-            kwargs={'measurement_dict_label': 'fsr',
-                    'target_value': (15, 30, 1),  # target value as sine wave with .1 Hz
-                    'target_corridor': 10,
-                    'include_gauge': True,
-                    'title': 'FSR Input',
-                    'input_unit_label': 'Force [% MVC]',
-                    'y_limits': (0, 100),
-                    },
-            name="FSRDisplayProcess")
-
-    if 'ecg' in measurement_labels:
-        ecg_displayer = multiprocessing.Process(
-            target=plot_input_view,
-            args=(shared_dict,),
-            kwargs={'measurement_dict_label': 'ecg',
-                    'target_value': None,
-                    'include_gauge': False,
-                    'title': 'ECG Input'
-                    },
-            name="ECGDisplayProcess")
-
-    if 'gsr' in measurement_labels:
-        gsr_displayer = multiprocessing.Process(
-            target=plot_input_view,
-            args=(shared_dict,),
-            kwargs={'measurement_dict_label': 'gsr',
-                    'target_value': 1.2,
-                    'include_gauge': False,
-                    'title': 'GSR Input'
-                    },
-            name="ECGDisplayProcess")
-
-    master_displayer = multiprocessing.Process(
-        target=qtc_control_master_view,
-        args=(shared_dict, start_trigger_event, stop_trigger_event,
-              start_onboarding_event, start_mvc_calibration_event, start_sampling_event, start_music_motor_task_event),
-        kwargs={'music_category_txt': music_category_txt,
-                'control_log_dir': control_log_dir if record_measurements else None,
-                },
-        name="MasterDisplayProcess")
-
-    # start processes:
-    try:
-        sampler.start()
-        if 'fsr' in measurement_labels: fsr_displayer.start()
-        if 'ecg' in measurement_labels: ecg_displayer.start()
-        if 'gsr' in measurement_labels: gsr_displayer.start()
-        master_displayer.start()
-
-        # Wait for processes with timeout
-        sampler.join()  #timeout=300  # 5 minute timeout (unused currently, main script ends anyway)
-        if 'fsr' in measurement_labels: fsr_displayer.join()  #timeout=300
-        if 'ecg' in measurement_labels: ecg_displayer.join()
-        if 'gsr' in measurement_labels: gsr_displayer.join()
-        master_displayer.join()
-
-    except KeyboardInterrupt:
-        print("Terminating processes...")
-        force_serial_save_event.set()  # trigger sampler saving
-        print('Waiting for saving...')
-        serial_saving_done_event.wait(timeout=5)  # wait until done
-        print('Saving done!')
-
-        # stop all processes:
-        sampler.terminate()
-        if 'fsr' in measurement_labels: fsr_displayer.terminate()
-        if 'ecg' in measurement_labels: ecg_displayer.terminate()
-        if 'gsr' in measurement_labels: gsr_displayer.terminate()
-        master_displayer.terminate()
-
-        sampler.join()
-        if 'fsr' in measurement_labels: fsr_displayer.join()
-        if 'ecg' in measurement_labels: ecg_displayer.join()
-        if 'gsr' in measurement_labels: gsr_displayer.join()
-        master_displayer.join()
-
-    finally:
-        print("Cleanup completed")
-
+########## TESTING ##########
 if __name__ == '__main__':
     # define saving folder:
     ROOT = Path().resolve().parent.parent
@@ -1718,21 +1680,4 @@ if __name__ == '__main__':
     # important:
     SUBJECT_DIR = ROOT / "data" / "experiment_results" / "subject_00"
     SONG_ONE_DIR = SUBJECT_DIR / "song_00"
-
-
-
-    start_measurement_processes(measurement_definitions=(("fsr",  # measurement label
-                                                          (dynamometer_force_mapping, 100),  # 60 = MVC [kg]
-                                                          "FSR:",  # serial connection measurement identifier
-                                                          .1),  # smoothing alpha
-                                                         #("ecg", None, "ECG:", .4),
-                                                         #("gsr", None, "GSR:", .4),
-                                                         ),
-                                measurement_saving_path=SERIAL_MEASUREMENTS,
-                                record_measurements=True,  # False: start dummy_sampling, True: start real sampling
-                                music_category_txt=MUSIC_CONFIG,
-                                control_log_dir=EXPERIMENT_LOG,
-                                )
-
-
 
