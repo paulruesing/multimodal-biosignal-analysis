@@ -531,6 +531,17 @@ def start_experiment_processes(
                             # terminate process:
                             save_terminate_process(accuracy_sampling_process)
 
+                        # save trial summary:
+                        accuracy_array = pd.read_csv(filemgmt.most_recent_file(current_song_data_dir,
+                                                                               ".csv",
+                                                                               ["Accuracy Results"], ))
+                        rmse = np.sqrt(np.mean(accuracy_array.iloc[:, 1]))
+                        summary_dict = {'RMSE': rmse, 'Target Frequency': target_freq, 'Target Min': target_sine_min, 'Target Max': target_sine_max,}
+                        save_path = current_song_data_dir / filemgmt.file_title(f"Trial Summary", ".json")
+                        with open(save_path, "w") as json_file:
+                            json.dump(summary_dict, json_file, indent=4)  # Pretty print with indent=4
+                        print("Saved trial summary to ", save_path)
+
                         # todo: update performance view event
 
                         # define and start post trial rating: (includes music questions only if category string is provided)
