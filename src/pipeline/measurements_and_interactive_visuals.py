@@ -1,5 +1,7 @@
 """
 This script contains process definitions and relevant auxiliary functions to be called in an experiment workflow.
+These processes conduct sampling and interactive visualizations.
+
 That external workflow needs to manage shared memory allocation and multiprocessing.
 ®Paul Rüsing, INI ETH / UZH
 """
@@ -7,6 +9,8 @@ That external workflow needs to manage shared memory allocation and multiprocess
 
 import serial
 import time
+import math
+import warnings
 import json
 import os
 import random
@@ -23,6 +27,8 @@ import multiprocessing
 from ctypes import c_char
 
 import src.utils.file_management as filemgmt
+import src.utils.str_conversion as strconv
+import src.utils.multiprocessing_tools as mptools
 from src.pipeline.music_control import SpotifyController
 
 from pathlib import Path
@@ -41,6 +47,15 @@ slider_bar_color = 'darkcyan' if theme == 'dark' else 'darkturquoise'
 font_color = "white" if theme == 'dark' else "black"
 radio_button_selected_color = 'aqua' if theme == 'dark' else 'darkturquoise'
 
+target_color = 'green'
+dark_target_color = 'darkgreen'
+measurement_color = 'red'
+
+# Suppress the harmless Matplotlib animation timer race condition (doesn't work because it's no warning)
+'''warnings.filterwarnings(
+    'ignore',
+    message=".*'NoneType' object has no attribute 'interval'.*"
+)'''
 
 ############### READOUT METHODS ###############
 def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[[float], float] | tuple[Callable, float], str, float]],
@@ -399,9 +414,502 @@ def dummy_sampling_process(shared_dict,
 
 
 ############### PLOTTING METHODS ###############
-# todo: ask for motor impediments?
+class AnimationManager:
+    def __init__(self, shutdown_event=None):
+        self.anim = None
+        self.fig = None
+        self.shutdown_event = shutdown_event
+
+    def start(self, fig, update_func, interval, init_func=None):
+        self.fig = fig
+        self.anim = FuncAnimation(fig, update_func, interval=interval,
+                                  blit=False, repeat=True, init_func=init_func,
+                                  cache_frame_data=False)  # CRITICAL: disable frame caching)
+
+    def stop(self):
+        if self.anim is not None:  # first stop timer
+            es = getattr(self.anim, "event_source", None)
+            if es is not None:
+                es.stop()
+
+        if self.fig is not None:  # then close figure
+            plt.close(self.fig)
+
+    def check_shutdown(self) -> bool:
+        if self.shutdown_event is not None:
+            if self.shutdown_event.is_set():
+                self.stop()
+                self.shutdown_event.clear()  # reset event
+                return True
+        return False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.stop()
+
+
+# auxiliary functions:
+def create_textbox(fig: plt.Figure,
+                   input_dict: dict,
+                   key: str,
+                   label: str,
+                   position: tuple[float, float, float, float],
+                   button_background_color: str,
+                   button_hover_color: str,
+                   label_valign: str = 'center') -> TextBox:
+    """
+    Create and configure a TextBox widget with automatic input dictionary storage.
+
+    Parameters
+    ----------
+    fig : plt.Figure
+        Matplotlib figure object
+    ax : plt.Axes
+        Matplotlib axes object (for coordinate reference)
+    input_dict : dict
+        Input dictionary to store textbox value under key
+    key : str
+        Dictionary key for storing the textbox value
+    label : str
+        Label text displayed next to textbox
+    position : tuple
+        TextBox position as (x, y, width, height) in figure coordinates
+    button_background_color : str
+        Background color for textbox
+    button_hover_color : str
+        Hover color for textbox
+
+    Returns
+    -------
+    TextBox
+        Configured TextBox widget
+    """
+
+    # Define submission callback that stores value in input_dict
+    def submit_callback(text: str) -> None:
+        input_dict[key] = text
+
+    # Create axes for textbox at specified position
+    textbox_ax = fig.add_axes(position)
+
+    # Create textbox with label and colors
+    textbox = TextBox(
+        textbox_ax,
+        label + "  ",  # looks better
+        color=button_background_color,
+        hovercolor=button_hover_color
+    )
+
+    # adjust vertical alignment
+    if hasattr(textbox, 'label'):
+        textbox.label.set_verticalalignment(label_valign)
+
+    # Register submission callback
+    textbox.on_submit(submit_callback)
+
+    return textbox
+
+
+def create_radio_buttons(fig: plt.Figure,
+                         ax: plt.Axes,
+                         input_dict: dict,
+                         key: str,
+                         label: str,
+                         options: list[str] | tuple[str, ...],
+                         position: tuple[float, float, float, float],
+                         label_position: tuple[float, float],
+                         active_index: int,
+                         radio_button_selected_color: str = 'gold',
+                         background_color: str  = 'black',
+                         skip_value: str | None = None,
+                         horizontal: bool = False) -> tuple[RadioButtons, plt.Text]:
+    """
+    Create and configure a RadioButtons widget with automatic input dictionary storage.
+
+    Parameters
+    ----------
+    fig : plt.Figure
+        Matplotlib figure object
+    ax : plt.Axes
+        Matplotlib axes object for text label placement
+    input_dict : dict
+        Input dictionary to store selected value under key
+    key : str
+        Dictionary key for storing the selected option
+    label : str
+        Label text displayed to the left of radio buttons
+    options : list or tuple
+        Available options for radio button selection
+    position : tuple
+        RadioButtons position as (x, y, width, height) in figure coordinates
+    label_position : tuple
+        Label position as (x, y) in axes coordinates
+    active_index : int
+        Index of initially selected option (0-based)
+    radio_button_selected_color : str
+        Color for selected radio button
+    background_color : str, optional
+        Background color for radio button axes (default: 'gold')
+    skip_value : str, optional
+        Value to skip storing in input_dict (e.g. "Not selected")
+        If provided, selection only stores if label != skip_value
+    horizontal : bool, optional
+        If True, arrange buttons horizontally left-to-right (default: False for vertical)
+
+    Returns
+    -------
+    tuple
+        (RadioButtons widget, label Text object)
+    """
+
+    # Create label text at specified position
+    label_text = ax.text(
+        label_position[0],
+        label_position[1],
+        label,
+        transform=ax.transAxes,
+        va='center',
+        ha='right'
+    )
+
+    # Create axes for radio buttons
+    radio_ax = fig.add_axes(position)
+    radio_ax.axis('off')
+    radio_ax.set_facecolor(background_color)
+
+    # Create radio buttons with manual layout adjustment for horizontal
+    options = list(options)
+    if skip_value not in options: options.append(skip_value)
+
+    radio_buttons = RadioButtons(
+        radio_ax,
+        options,
+        active=active_index,
+        activecolor=radio_button_selected_color,
+        radio_props={'edgecolor': radio_button_selected_color}
+    )
+
+    # If horizontal layout, manually reposition radio button elements
+    if horizontal:
+        num_options = len(options)
+
+        # Access internal Line2D objects for radio circles and labels
+        for i, (radio_line, label_obj) in enumerate(zip(radio_buttons.lines, radio_buttons.labels)):
+            # Distribute buttons evenly across horizontal space (0.1 to 0.9)
+            x_pos = 0.1 + (i / max(1, num_options - 1)) * 0.8 if num_options > 1 else 0.5
+
+            # Update line (radio circle) position
+            radio_line.set_xdata([x_pos, x_pos])
+
+            # Update label position
+            label_obj.set_x(x_pos + 0.03)
+            label_obj.set_y(0.5)
+            label_obj.set_va('center')
+
+    # Define selection callback
+    def on_click_callback(label_clicked: str) -> None:
+        """
+        Store selected option in input_dict if not skipped value.
+        """
+        if skip_value is None or label_clicked != skip_value:
+            input_dict[key] = label_clicked
+
+    # Register callback
+    radio_buttons.on_clicked(on_click_callback)
+
+    return radio_buttons, label_text
+
+
+
+def create_slider(fig: plt.Figure,
+                  input_dict: dict,
+                  key: str,
+                  label: str,
+                  position: tuple[float, float, float, float],
+                  vmin: float,
+                  vmax: float,
+                  valinit: float,
+                  valstep: float | int,
+                  slider_bar_color: str,
+                  slider_background_color: str,
+                  valfmt: str = '%i') -> Slider:
+    """
+    Create and configure a Slider widget with automatic input dictionary storage.
+
+    Parameters
+    ----------
+    fig : plt.Figure
+        Matplotlib figure object
+    input_dict : dict
+        Input dictionary to store slider value under key
+    key : str
+        Dictionary key for storing the slider value
+    label : str
+        Label text displayed next to slider
+    position : tuple
+        Slider position as (x, y, width, height) in figure coordinates
+    vmin : float
+        Minimum slider value
+    vmax : float
+        Maximum slider value
+    valinit : float
+        Initial slider value
+    valstep : float or int
+        Step size for slider increments
+    slider_bar_color : str
+        Color for slider bar
+    slider_background_color : str
+        Color for slider background track
+    valfmt : str, optional
+        Format string for value display (default: '%i' for integers)
+
+    Returns
+    -------
+    Slider
+        Configured Slider widget
+    """
+
+    # Create axes for slider at specified position
+    slider_ax = fig.add_axes(position)
+
+    # Create slider with styling
+    slider = Slider(
+        slider_ax,
+        label + "  ",  # looks better
+        vmin,
+        vmax,
+        valinit=valinit,
+        valstep=valstep,
+        valfmt=valfmt,
+        color=slider_bar_color,
+        track_color=slider_background_color,
+        initcolor='None',
+        handle_style={'facecolor': 'white', 'edgecolor': 'white', 'size': 10}
+    )
+
+    # Define value change callback that stores in input_dict and redraws
+    def on_changed_callback(val: float) -> None:
+        """
+        Store slider value in input_dict and trigger figure redraw.
+        """
+        input_dict[key] = int(val)
+        fig.canvas.draw_idle()
+
+    # Register callback
+    slider.on_changed(on_changed_callback)
+
+    return slider
+
 def plot_onboarding_form(result_json_dir: str | Path,
-                         shared_questionnaire_str):
+                         shared_questionnaire_str,
+                         instrument_question_str: str = "Do you play an instrument? If yes, which:",
+                         listening_habit_question: str = "How often do you listen to music?",
+                         listening_habit_options: list[str] | tuple[str, ...] = ('Most of the day', 'A small part of the day', 'Every 2 or 3 days', 'Seldom'),
+                         athletic_ability_question_str: str = "Please rate your current athleticism. (0 = unfit, 7 = professional)",
+                         health_questions_intro_str: str = "To ensure this study is safe for you and to help us account for individual differences in nervous system function, we need to understand your motor health history. Please answer truthfully and know that your data is being treated confidentially.",
+                         known_diseases_question_str: str = "Have you ever been diagnosed by a healthcare professional with any neural condition? If yes, which:",
+                         motor_symptoms_question_str: str = "In the past 6 months, have you experienced any difficulties with fine motor tasks?  If yes, which:",
+                         medication_question_str: str = "Are you currently taking any medications or substances that could affect your nervous system or muscle function? If yes, which:",
+                         ):
+    ### DISABLE MPL KEYBOARD SHORTCUTS
+    # default keyboard shortcuts:
+    keymaps = ['back', 'forward', 'fullscreen', 'grid', 'help', 'home', 'pan', 'save', 'xscale', 'yscale']
+
+    for keymap in keymaps:  # try disabling:
+        try:
+            plt.rcParams[f'keymap.{keymap}'] = []
+        except KeyError:
+            print("Couldn't disable shortcut for ", keymap)
+            pass
+
+    ### PLOT
+    # initialise:
+    fig, ax = plt.subplots(figsize=(9, 8))
+    fig.subplots_adjust(bottom=0.25)  # space for widgets
+    manager = plt.get_current_fig_manager()  # change TkAgg window title
+    manager.set_window_title("Participant Registration Form")
+    ax.axis('off')  # hide axes (borders and ticklabels)
+    fig.suptitle('Welcome to the study :)')
+    ax.set_title("Please enter your personal details below. Thank you!")
+
+    # attributes:
+    text_box_height = slider_height = .04
+
+
+    ### INPUT TEXTBOXES
+    input_dict = {}  # input dict
+
+    # define text boxes (callback_function, ax, object, on_submit(func)):
+    # full name:
+    name_textbox = create_textbox(fig, input_dict, key="Name", label="Full Name (FIRST LAST):",
+                                  position=(0.55, .83, 0.39, text_box_height),
+                                  button_background_color=button_background_color,
+                                  button_hover_color=button_hover_color,)
+    # birthdate: text
+    birthdate_textbox = create_textbox(fig, input_dict, key="Birthdate", label="Birthdate (DD/MM/YYYY):",
+                                       position=(0.55, .77, 0.39, text_box_height),
+                                       button_background_color=button_background_color,
+                                       button_hover_color=button_hover_color,)
+
+    # gender: (radiobutton) female / male / other
+    gender_dropdown, gender_dropdown_label = create_radio_buttons(
+        fig, ax, input_dict, key="Gender", label="Gender:",
+        options=["Male", "Female", "Non-binary"], skip_value="Not selected", active_index=3,
+        label_position=(.53, .74), position=(0.51, .675, .4, .08),
+        radio_button_selected_color=button_hover_color, horizontal=False
+    )
+    # dominant hand: left / right
+    dominant_hand_dropdown, dominand_hand_dropdown_label = create_radio_buttons(
+        fig, ax, input_dict, key="Dominant hand", label="Dominant Hand:",
+        options=["Left", "Right"], skip_value="Not selected", active_index=2,
+        label_position=(.53, .635), position=(0.51, .615, .39, .065),
+        radio_button_selected_color=button_hover_color, horizontal=False
+    )
+
+    # "Do you play an instrument? If yes, which:"
+    instrument_textbox = create_textbox(fig, input_dict, key="Instrument", label=instrument_question_str,
+                                        position=(0.55, 0.56, 0.39, text_box_height),
+                                        button_background_color=button_background_color,
+                                        button_hover_color=button_hover_color,)
+
+    # "If yes, how well:" 1-7
+    musical_skill_slider = create_slider(fig, input_dict, key="Musical skill", label='If yes, how well:',
+                                 position=(0.55, 0.5, 0.39, slider_height),
+                                 vmin=0, vmax=7, valinit=0, valstep=1, valfmt="%.0f",
+                                 slider_bar_color=slider_bar_color, slider_background_color=slider_background_color,)
+
+    # "How often do you listen to music?" Most of the day / a small part of the day / every 2 or 3 days / seldom
+    listening_habit_dropdown, listening_habit_dropdown_label = create_radio_buttons(
+        fig, ax, input_dict, key="Listening habit", label=listening_habit_question,
+        options=list(listening_habit_options), skip_value="Not selected", active_index=len(listening_habit_options),
+        label_position=(.53, .32), position=(0.51, .4, .39, .1),
+        radio_button_selected_color=button_hover_color)
+
+    # how athletic are you:
+    athleticism_slider = create_slider(fig, input_dict, key="Athleticism",
+                                       label=strconv.enter_line_breaks(athletic_ability_question_str, 70, 10),
+                                 position=(0.55, 0.35, 0.39, slider_height),
+                                 vmin=0, vmax=7, valinit=0, valstep=1, valfmt="%.0f",
+                                 slider_bar_color=slider_bar_color, slider_background_color=slider_background_color, )
+
+    # health related questions:
+    health_intro = ax.text(
+        -.125, .09,
+        strconv.enter_line_breaks(health_questions_intro_str, 125, 10),
+        transform=ax.transAxes, va='center', ha='left'
+    )
+
+    condition_textbox = create_textbox(fig, input_dict, key="Condition",
+                                       label=strconv.enter_line_breaks(known_diseases_question_str, 50, 10),
+                                       position=(0.55, 0.22, 0.39, text_box_height),
+                                       button_background_color=button_background_color,
+                                       button_hover_color=button_hover_color,)
+
+    symptom_textbox = create_textbox(fig, input_dict, key="Motor Symptoms",
+                                       label=strconv.enter_line_breaks(motor_symptoms_question_str, 50, 10),
+                                       position=(0.55, 0.15
+                                                     , 0.39, text_box_height),
+                                       button_background_color=button_background_color,
+                                       button_hover_color=button_hover_color, )
+
+    medication_textbox = create_textbox(fig, input_dict, key="Condition",
+                                     label=strconv.enter_line_breaks(medication_question_str, 50, 10),
+                                     position=(0.55, 0.08
+                                                   , 0.39, text_box_height),
+                                     button_background_color=button_background_color,
+                                     button_hover_color=button_hover_color, )
+
+
+
+
+    ### SUBMISSION and SAVING
+    # define submission_button (callback_function, ax, object, on_submit(func))
+    #   on submit: check whether data is missing, otherwise save to result_json_dir and quit func
+    def click_submission_button(event):
+        # check for missing inputs:
+        input_missing = False
+
+        # check whether there is correct input for mandatory input fields:
+        key_object_dict = {'Name': name_textbox.label, 'Birthdate': birthdate_textbox.label,
+                           'Gender': gender_dropdown_label, 'Dominant hand': dominand_hand_dropdown_label,
+                           'Listening habit': listening_habit_dropdown_label,
+                           'Athleticism': athleticism_slider.label,}
+        for key, object in key_object_dict.items():
+            if key not in input_dict:  # check only mandatory fields
+                key_object_dict[key].set_color('red')
+                fig.canvas.draw_idle()  # update view
+                input_missing = True
+            else:
+                incorrect_format = False  # distinct format checks below
+                if key == 'Name':
+                    if len(input_dict[key].split(" ")) <= 1: incorrect_format = True
+                if key == 'Birthdate':  # 10 digits with two "/"
+                    if len(input_dict[key].split("/")) != 3 or len(input_dict[key]) != 10: incorrect_format = True
+                # if one failed -> mark cell:
+                if incorrect_format:
+                    key_object_dict[key].set_color('red')
+                    fig.canvas.draw_idle()  # update view
+                    input_missing = True
+                else:  # if now correct, reset color to black
+                    key_object_dict[key].set_color(font_color)
+                    fig.canvas.draw_idle()  # update view
+
+        if not input_missing:
+            print("Input dict: ", input_dict)
+            save_path = result_json_dir / filemgmt.file_title(f"Subject {input_dict['Name']} Data", ".json")
+            with open(save_path, "w") as json_file:
+                json.dump(input_dict, json_file, indent=4)  # Pretty print with indent=4
+            print('Saved config to ', save_path)
+
+            # write to shared memory:
+            result = f"{input_dict['Name']} registered successfully!"
+            shared_questionnaire_str.write(result)
+
+            # close fig:
+            plt.close()
+
+    submission_button_ax = plt.axes([0.4, 0.02, 0.2, text_box_height])
+    submission_button = Button(submission_button_ax, 'Submit',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
+    submission_button.on_clicked(click_submission_button)
+
+    plt.show()
+
+
+def legacy_plot_onboarding_form(result_json_dir: str | Path,
+                         shared_questionnaire_str,
+                         athletic_ability_question_str: str = "How would you rate your current athletic performance (training state)? (0 = very unfit, 7 = professional athlete)",
+                         health_questions_intro_str: str = "To ensure this study is safe for you and to help us account for individual differences in nervous system function, we need to understand your motor health history. Please answer truthfully and know that your data is being treated confidentially.",
+                         known_diseases_question_str: str = "Have you ever been diagnosed by a healthcare professional with any of the following conditions? (select all that apply)",
+                         known_disease_options: list[str] | tuple[str, ...] = (
+                                 "Stroke or transient ischemic attack (TIA/mini-stroke)",
+                                 "Parkinson's disease or other movement disorder",
+                                 "Multiple sclerosis or other demyelinating disease", "Cerebral palsy",
+                                 "Brain or spinal cord injury",
+                                 "Amyotrophic lateral sclerosis (ALS) or motor neuron disease", "Essential tremor",
+                                 "Epilepsy or seizure disorder"),
+                         motor_symptoms_question_str: str = "In the past 6 months, have you experienced any of the following? (select all that apply)",
+                         motor_symptoms_options: list[str] | tuple[str, ...] = (
+                                 "Weakness / numbness / tingling in your arms or hands",
+                                 "Tremor / shaking / involuntary movements in your arms or hands",
+                                 "Difficulty with fine motor tasks",
+                                 "Stiffness or reduced range of motion in your arms or shoulders",
+                                 "Loss of coordination or balance problems",
+                                 "Difficulty controlling force or grip strength",
+                                 "Pain that limits arm/hand movement"),
+                         medication_question_str: str = "Are you currently taking any medications or substances that could affect your nervous system or muscle function? (select all that apply)",
+                         medication_options: list[str] | tuple[str] = (
+                                 "Medications for neurological conditions (Parkinson's / epilepsy / spasticity medications)",
+                                 "Muscle relaxants",
+                                 "Antipsychotic medications",
+                                 "Benzodiazepines or sedatives",
+                                 "Stimulant medications (prescription or otherwise)",
+                                 "Alcohol on 5+ days per week or heavy use on any day",
+                                 "Cannabis on 5+ days per week or heavy use on any day")
+                         ):
     ### DISABLE MPL KEYBOARD SHORTCUTS
     # default keyboard shortcuts:
     keymaps = ['back', 'forward', 'fullscreen', 'grid', 'help', 'home', 'pan', 'save', 'xscale', 'yscale']
@@ -415,7 +923,14 @@ def plot_onboarding_form(result_json_dir: str | Path,
 
     ### PLOT
     fig, ax = plt.subplots(figsize=(6, 6))
-    fig.subplots_adjust(bottom=0.25)  # space for widgets
+    # define y positions:
+    n_categories = 12  # 4 personal, 3 musical, 1 athletical, 4 health-related
+    y_positions = np.linspace(.8, .15, n_categories)
+    text_box_height = .03
+    slider_height = .03
+    dropdown_height_per_element = .015
+
+    #  fig.subplots_adjust(bottom=0.25)  # space for widgets
     manager = plt.get_current_fig_manager()  # change TkAgg window title
     manager.set_window_title("Participant Registration Form")
     ax.axis('off')  # hide axes (borders and ticklabels)
@@ -429,19 +944,21 @@ def plot_onboarding_form(result_json_dir: str | Path,
     # full name:
     def submit_name_textbox(text):
         input_dict["Name"] = text
+
     name_textbox_ax = fig.add_axes((0.55, 0.8, 0.39, 0.05))  # x, y, w, h
     name_textbox = TextBox(name_textbox_ax, 'Full Name (FIRST LAST):',
-                               color=button_background_color,
-                               hovercolor=button_hover_color)
+                           color=button_background_color,
+                           hovercolor=button_hover_color)
     name_textbox.on_submit(submit_name_textbox)
 
     # birthdate: text
     def submit_birthdate_textbox(text):
         input_dict["Birthdate"] = text
+
     birthdate_textbox_ax = fig.add_axes((0.55, 0.7, 0.39, 0.05))  # x, y, w, h
     birthdate_textbox = TextBox(birthdate_textbox_ax, 'Birthdate (DD/MM/YYYY):',
-                               color=button_background_color,
-                               hovercolor=button_hover_color)
+                                color=button_background_color,
+                                hovercolor=button_hover_color)
     birthdate_textbox.on_submit(submit_birthdate_textbox)
 
     # gender: (radiobutton) female / male / other
@@ -450,10 +967,13 @@ def plot_onboarding_form(result_json_dir: str | Path,
     gender_dropdown_ax.axis('off')
     gender_dropdown_ax.set_facecolor('gold')
     gender_options = ['Female', 'Male', 'Non-binary', 'Not selected']  # options for selector
-    gender_dropdown = RadioButtons(gender_dropdown_ax, gender_options, active=3, activecolor=radio_button_selected_color,
-                                   radio_props={'edgecolor': radio_button_selected_color,})
+    gender_dropdown = RadioButtons(gender_dropdown_ax, gender_options, active=3,
+                                   activecolor=radio_button_selected_color,
+                                   radio_props={'edgecolor': radio_button_selected_color, })
+
     def submit_gender_dropdown(label):
         if label != "Not selected": input_dict["Gender"] = label
+
     gender_dropdown.on_clicked(submit_gender_dropdown)
 
     # dominant hand: left / right
@@ -462,19 +982,23 @@ def plot_onboarding_form(result_json_dir: str | Path,
     dominand_hand_dropdown_ax.axis('off')
     dominand_hand_dropdown_ax.set_facecolor('gold')
     dominant_hand_options = ['Left', 'Right', 'Not selected']  # options for selector
-    dominand_hand_dropdown = RadioButtons(dominand_hand_dropdown_ax, dominant_hand_options, active=2, activecolor=radio_button_selected_color,
-                                   radio_props={'edgecolor': radio_button_selected_color,})
+    dominand_hand_dropdown = RadioButtons(dominand_hand_dropdown_ax, dominant_hand_options, active=2,
+                                          activecolor=radio_button_selected_color,
+                                          radio_props={'edgecolor': radio_button_selected_color, })
+
     def submit_dominand_hand_dropdown(label):
         if label != "Not selected": input_dict["Dominant hand"] = label
+
     dominand_hand_dropdown.on_clicked(submit_dominand_hand_dropdown)
 
     # "Do you play an instrument? If yes, which:"
     def submit_instrument_textbox(text):
         input_dict["Instrument"] = text
+
     instrument_textbox_ax = fig.add_axes((0.55, 0.4, 0.39, 0.05))  # x, y, w, h
     instrument_textbox = TextBox(instrument_textbox_ax, 'Do you play an instrument? If yes, which:',
-                               color=button_background_color,
-                               hovercolor=button_hover_color)
+                                 color=button_background_color,
+                                 hovercolor=button_hover_color)
     instrument_textbox.on_submit(submit_instrument_textbox)
 
     # "If yes, how well:" 1-7
@@ -482,23 +1006,29 @@ def plot_onboarding_form(result_json_dir: str | Path,
     skill_slider = Slider(skill_slider_ax, 'If yes, how well: ', 0, 7, valinit=0, valstep=1, valfmt='%i',
                           color=slider_bar_color, track_color=slider_background_color,
                           initcolor='None', handle_style={'facecolor': 'white', 'edgecolor': 'white', 'size': 10})
+
     def update_skill_slider(val):
         input_dict["Musical skill"] = int(val)
         fig.canvas.draw_idle()  # update view
+
     skill_slider.on_changed(update_skill_slider)
 
     # "How often do you listen to music?" Most of the day / a small part of the day / every 2 or 3 days / seldom
-    listening_habit_dropdown_label = ax.text(.03, -.02, "How often do you listen to music?", transform=ax.transAxes, va='center', ha='left')
+    listening_habit_dropdown_label = ax.text(.03, -.02, "How often do you listen to music?", transform=ax.transAxes,
+                                             va='center', ha='left')
     listening_habit_dropdown_ax = fig.add_axes((0.51, 0.16, 0.4, 0.14))  # x, y, w, h
     listening_habit_dropdown_ax.axis('off')
     listening_habit_dropdown_ax.set_facecolor('white')
-    listening_habit_options = ['Most of the day', 'A small part of the day', 'Every 2 or 3 days', 'Seldom', 'Not selected']  # options for selector
-    listening_habit_dropdown = RadioButtons(listening_habit_dropdown_ax, listening_habit_options, active=4, activecolor=radio_button_selected_color,
-                                   radio_props={'edgecolor': radio_button_selected_color,})
+    listening_habit_options = ['Most of the day', 'A small part of the day', 'Every 2 or 3 days', 'Seldom',
+                               'Not selected']  # options for selector
+    listening_habit_dropdown = RadioButtons(listening_habit_dropdown_ax, listening_habit_options, active=4,
+                                            activecolor=radio_button_selected_color,
+                                            radio_props={'edgecolor': radio_button_selected_color, })
+
     def submit_listening_habit_dropdown(label):
         if label != "Not selected": input_dict["Listening habit"] = label
-    listening_habit_dropdown.on_clicked(submit_listening_habit_dropdown)
 
+    listening_habit_dropdown.on_clicked(submit_listening_habit_dropdown)
 
     ### SUBMISSION and SAVING
     # define submission_button (callback_function, ax, object, on_submit(func))
@@ -510,7 +1040,7 @@ def plot_onboarding_form(result_json_dir: str | Path,
         # check whether there is correct input for mandatory input fields:
         key_object_dict = {'Name': name_textbox.label, 'Birthdate': birthdate_textbox.label,
                            'Gender': gender_dropdown_label, 'Dominant hand': dominand_hand_dropdown_label,
-                           'Listening habit': listening_habit_dropdown_label,}
+                           'Listening habit': listening_habit_dropdown_label, }
         for key, object in key_object_dict.items():
             if key not in input_dict:  # check only mandatory fields
                 key_object_dict[key].set_color('red')
@@ -554,10 +1084,11 @@ def plot_onboarding_form(result_json_dir: str | Path,
     plt.show()
 
 
-def plot_breakout_screen(time_sec: float, title="Have a break. Please wait."):
+def plot_breakout_screen(time_sec: float, title="Have a break. Please wait.",
+                         anim_shutdown_event=None):
     """ Plot countdown during break. Figure clouses after time_sec. """
     ### PLOT
-    try:
+    with AnimationManager(anim_shutdown_event) as anim_mgr:
         # initialise:
         fig, ax = plt.subplots(figsize=(6, 3))
         manager = plt.get_current_fig_manager()  # change TkAgg window title
@@ -566,23 +1097,25 @@ def plot_breakout_screen(time_sec: float, title="Have a break. Please wait."):
         ax.set_title(title)
 
         # countdown:
-        global remaining_time
+        #global remaining_time
         remaining_time = time_sec
         countdown_text = fig.text(0.3, 0.4, f"Remaining waiting time: {remaining_time:.2f}s", ha='left', va='center', fontsize=10)
 
         # animation:
         display_refresh_rate_hz = 10
-        global display_start_time
+        #global display_start_time
         display_start_time = time.time()  # store to compute remaining time
         def update(frame):
             """ update view and fetch new observation. (frame is required although unused) """
+            if anim_mgr.check_shutdown(): return 1,  # allow for forced shutdown
+
             # reduce countdown:
-            global remaining_time
-            global display_start_time
+            #global remaining_time
+            #global display_start_time
             remaining_time = time_sec - (time.time() - display_start_time)  # total time - passed time
 
             # close figure upon countdown end:
-            if remaining_time <= 0.0: plt.close()
+            if remaining_time <= 0.0: anim_mgr.stop()
 
             # else update text:
             countdown_text.set_text(f"Remaining waiting time: {remaining_time:.2f}s")
@@ -592,15 +1125,8 @@ def plot_breakout_screen(time_sec: float, title="Have a break. Please wait."):
             return countdown_text,
 
         # run and show animation:
-        global breakout_ani
-        breakout_ani = FuncAnimation(fig, update, frames=1, blit=False,
-                            interval=int(1000/display_refresh_rate_hz), repeat=True)
+        anim_mgr.start(fig, update, int(1000 / display_refresh_rate_hz))
         plt.show()
-
-    finally:
-        plt.close('all')
-
-
 
 
 def plot_pretrial_familiarity_check(result_json_dir: str | Path,  # dir to save results to
@@ -668,7 +1194,6 @@ def plot_pretrial_familiarity_check(result_json_dir: str | Path,  # dir to save 
 
 
 # todo: ponder, whether to enter one lyric adds value
-# todo: add alternative category selection
 def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
                           shared_questionnaire_str,  # shared memory for master process
                           category_string: str | None = None,  # for question
@@ -677,7 +1202,7 @@ def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
                                     ):
     """ Includes music questions only if category string is provided. """
     ### PLOT
-    fig, ax = plt.subplots(figsize=(15, 2))
+    fig, ax = plt.subplots(figsize=(16, 3))
     manager = plt.get_current_fig_manager()  # change TkAgg window title
     manager.set_window_title("Post-Trial Rating")
     ax.axis('off')  # hide axes (borders and ticklabels)
@@ -689,28 +1214,29 @@ def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
 
     if category_string is not None:
         # define liking slider (callback_function, ax, object, on_submit(func)):
-        liking_slider_ax = fig.add_axes((.55, .7, .39, .1))
-        liking_slider = Slider(liking_slider_ax, liking_question_str + " ", 0, 7, valinit=0, valstep=1, valfmt='%i',
-                          color=slider_bar_color, track_color=slider_background_color,
-                          initcolor='None', handle_style={'facecolor': 'white', 'edgecolor': 'white', 'size': 10})
-        def update_liking_slider(val):
-            input_dict["Liking"] = int(val)
-            fig.canvas.draw_idle()  # update view
-        liking_slider.on_changed(update_liking_slider)
+        liking_slider = create_slider(fig, input_dict, "Liking", liking_question_str,
+                                      position=(.55, .7, .39, .1),
+                                      vmin=0, vmax=7, valinit=0, valstep=1, valfmt='%i',
+                                      slider_bar_color=slider_bar_color, slider_background_color=slider_background_color,)
+
 
         # define category validation slider (callback_function, ax, object, on_submit(func)):
-        category_slider_ax = fig.add_axes((.55, .5, .39, .1))
-        category_slider = Slider(category_slider_ax, f"Do you think the song matches the category '{category_string.capitalize()}'? (0: not at all, 7: perfect match) ", 0, 7,
-                        valinit=0, valstep=1, valfmt='%i',
-                          color=slider_bar_color, track_color=slider_background_color,
-                          initcolor='None', handle_style={'facecolor': 'white', 'edgecolor': 'white', 'size': 10})
-        def update_category_slider(val):
-            input_dict["Fitting Category"] = int(val)
-            fig.canvas.draw_idle()  # update view
-        category_slider.on_changed(update_category_slider)
+        category_slider = create_slider(fig, input_dict, "Fitting Category", f"Do you think the song matches the category '{category_string.capitalize()}'? (0: not at all, 7: perfect match)",
+                                      position=(.55, .6, .39, .1),
+                                      vmin=0, vmax=7, valinit=0, valstep=1, valfmt='%i',
+                                      slider_bar_color=slider_bar_color,
+                                      slider_background_color=slider_background_color, )
+
+        # suggest other category:
+        other_category_options = [cat for cat in ['Groovy', 'Classic', 'Happy', 'Sad'] if cat != category_string.capitalize()] + ['None of them']
+        other_category_dropdown, other_category_dropdown_label = create_radio_buttons(fig, ax, input_dict, "Other category", "If not (<=3), which other category would you assign to it?",
+                                              options=other_category_options, skip_value="Not specified",
+                                              position=(.5, .3, .39, .3), label_position=(.53, .445),
+                                              active_index=len(other_category_options), radio_button_selected_color=slider_bar_color,)
+
 
     # define mood slider (callback_function, ax, object, on_submit(func)):
-    emotion_slider_ax = fig.add_axes((.55, .3 if category_string is not None else .5, .39, .1))
+    emotion_slider_ax = fig.add_axes((.55, .2 if category_string is not None else .5, .39, .1))
     emotion_slider = Slider(emotion_slider_ax,
                              emotion_question_str + " ",
                              0, 7,
@@ -742,8 +1268,21 @@ def plot_posttrial_rating(result_json_dir: str | Path,  # dir to save results to
                 fig.canvas.draw_idle()  # update view
                 input_missing = True
             else:
+                if key == "Fitting Category":  # if fitting category key
+                    if input_dict[key] <= 3:  # if unfitting
+                        if "Other category" not in input_dict:  # other needs to be specified
+                            other_category_dropdown_label.set_color("red")
+                            input_missing = True
+                            fig.canvas.draw_idle()  # update view
+                        else:
+                            other_category_dropdown_label.set_color(font_color)
+                            fig.canvas.draw_idle()  # update view
+                    else:  # if fitting category
+                        other_category_dropdown_label.set_color(font_color)
+
                 key_object_dict[key].set_color(font_color)
-                fig.canvas.draw_idle()  # update view
+
+
 
         if not input_missing:
             print("Input dict: ", input_dict)
@@ -778,7 +1317,7 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
                     target_corridor: float | None = None,  # draw corridor around target
                     shared_value_target_dict: dict[str, float] | None = None,
                     shared_current_accuracy_str=None,
-                    save_accuracy_and_close_event=None,
+                    anim_shutdown_event=None,
                     dynamically_update_y_limits: bool = True,
                     plot_size: tuple[float, float] = (15, 10),
                     input_unit_label: str = 'Input [V]',
@@ -823,7 +1362,7 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
     - Gauge is a semicircular polar plot showing current input relative to y-limits.
     - Handles dynamic rescaling of plots if incoming values exceed current y-limits.
     """
-    try:
+    with AnimationManager(anim_shutdown_event) as anim_mgr:
         ### PREPARE PLOT
         global dynamic_y_limit  # variables that are dynamically adjusted during update() need to be defined globally
         dynamic_y_limit = y_limits
@@ -866,24 +1405,24 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
         # include target:
         if target_value is not None:
             if isinstance(target_value, float):  # if fixed
-                target_line = line_ax.axhline(y=target_value, color='green', lw=1, label='Target Value')
+                target_line = line_ax.axhline(y=target_value, color=target_color, lw=1, label='Target Value')
                 assert y_limits[0] < target_value < y_limits[1]; "target_value must lie within defined y_limits!"
 
                 if target_corridor is not None:  # mark target corridor
-                    target_corridor_line_low = line_ax.axhline(y=target_value - target_corridor/2, color='darkgreen',
+                    target_corridor_line_low = line_ax.axhline(y=target_value - target_corridor/2, color=dark_target_color,
                                                                alpha=.5, lw=1, label='Target Corridor')
-                    target_corridor_line_low = line_ax.axhline(y=target_value + target_corridor / 2, color='darkgreen',
+                    target_corridor_line_low = line_ax.axhline(y=target_value + target_corridor / 2, color=dark_target_color,
                                                                alpha=.5, lw=1)
 
             elif isinstance(target_value, tuple):  # if sine-wave
-                target_line, = line_ax.plot([], [], lw=1, color='green', label='Target Value')
+                target_line, = line_ax.plot([], [], lw=1, color=target_color, label='Target Value')
                 target_end_point, = line_ax.plot([], [], 'go')
 
                 if target_corridor is not None:
-                    target_corridor_line_low, = line_ax.plot([], [], lw=1, alpha=.5, color='darkgreen', label='Target Corridor')
-                    target_corridor_line_high, = line_ax.plot([], [], lw=1, alpha=.5, color='darkgreen')
+                    target_corridor_line_low, = line_ax.plot([], [], lw=1, alpha=.5, color=dark_target_color, label='Target Corridor')
+                    target_corridor_line_high, = line_ax.plot([], [], lw=1, alpha=.5, color=dark_target_color)
 
-        line, = line_ax.plot([], [], lw=2, color='red', label='Measurement Value')
+        line, = line_ax.plot([], [], lw=2, color=measurement_color, label='Measurement Value')
         end_point, = line_ax.plot([], [], 'ro', ms=9)
 
         ## GAUGE PLOT
@@ -915,14 +1454,14 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
             gauge_ax.bar([0, gauge_circumference], [gauge_radius]*2, width=0.03, color=font_color)  # mark ends
 
             # initialise current value line:
-            needle_line, = gauge_ax.plot([], [], lw=3, color='red', label='Current Value')
+            needle_line, = gauge_ax.plot([], [], lw=3, color=measurement_color, label='Current Value')
 
             # include target:
             if target_value is not None:  # is set during update anyway so need to differentiate constant and sine here
-                target_needle_line, = gauge_ax.plot([], [], lw=2, color='green', label='Target Value')
+                target_needle_line, = gauge_ax.plot([], [], lw=2, color=target_color, label='Target Value')
                 if target_corridor is not None:
-                    target_corridor_low_needle_line, = gauge_ax.plot([], [], lw=1, alpha=.5, color='darkgreen', label='Target Corridor')
-                    target_corridor_high_needle_line, = gauge_ax.plot([], [], lw=1, alpha=.5, color='darkgreen')
+                    target_corridor_low_needle_line, = gauge_ax.plot([], [], lw=1, alpha=.5, color=dark_target_color, label='Target Corridor')
+                    target_corridor_high_needle_line, = gauge_ax.plot([], [], lw=1, alpha=.5, color=dark_target_color)
 
             # function later required to update values:
             def convert_y_to_angle(y_value: float) -> float:
@@ -993,6 +1532,9 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
 
         def update(frame):
             """ update view and fetch new observation. (frame is required although unused) """
+            # check for requested shutdown:
+            if anim_mgr.check_shutdown(): return 1,
+
             global target_y  # global definition at begin of function
 
             # allow for ending of view
@@ -1086,14 +1628,10 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
             return output_tuple
 
         # run and show animation:
-        global input_view_ani
-        input_view_ani = FuncAnimation(fig, update, frames=len(x)+1,
-                            init_func=init, blit=False,
-                            interval=int(1000/display_refresh_rate_hz), repeat=True)
+        anim_mgr.start(fig, update, interval=int(1000/display_refresh_rate_hz),
+                       init_func=init)
         plt.show()
 
-    finally:
-        plt.close('all')
 
 
 def accuracy_sampler(sampling_rate: float,
@@ -1245,7 +1783,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
                                color=button_background_color,
                                hovercolor=button_hover_color)
         start_button.on_clicked(start_button_click)
-        stop_button_ax = plt.axes([0.3, .65, 0.175, 0.175])
+        stop_button_ax = plt.axes([0.29, .65, 0.175, 0.175])
         stop_button = Button(stop_button_ax, 'Stop Trigger',
                                color=button_background_color,
                                hovercolor=button_hover_color)
@@ -1257,7 +1795,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             global recent_event_str
             recent_event_str = 'Onboarding Phase'
             onboarding_button.label.set_text("Onboarding\n(Done)")
-        experiment_control_label = fig.text(0.525, 0.86, "Experiment Control:", ha='left', va='center', fontsize=10)
+        experiment_control_label = fig.text(0.55, 0.86, "Experiment Control:", ha='left', va='center', fontsize=10)
         onboarding_button_ax = plt.axes([0.55, .65, 0.08, 0.175])
         onboarding_button = Button(onboarding_button_ax, 'Onboarding',
                                color=button_background_color,
@@ -1475,237 +2013,102 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
         plt.close('all')
 
 
-def _get_rmse_recursively(dir: str | Path,
-                          file_identifier: str = "Trial Summary",
-                          rmse_key: str = "RMSE") -> list[float]:
-    """Recursively find all RMSE values from JSON files matching file_identifier in all subdirectories."""
-    if not isinstance(dir, Path):
-        dir = Path(dir)
-
-    rmse_values = []  # Collect all matches
-
-    for item in dir.iterdir():
-        if item.is_dir():
-            # Recurse into subdirectory and ADD results (don't return early)
-            rmse_values.extend(_get_rmse_recursively(item, file_identifier, rmse_key))
-        elif item.is_file():
-            # Check if it's a matching JSON file
-            name_without_ext = item.stem  # "Trial Summary" from "Trial Summary.json"
-            if file_identifier in name_without_ext and item.suffix == '.json':
-                try:
-                    with open(item, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    rmse = data[rmse_key]
-                    rmse_values.append(rmse)  # Collect this value
-                except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
-                    print(f"Warning: Could not read RMSE from {item}: {e}")
-
-    return rmse_values
-
-
 def plot_performance_view(this_subject_dir: str | Path,
-                          other_subject_dirs: list[str | Path] | None = None,):
-    # todo: define recursive read_performance function iterating through dirs (defining dirs)
+                          other_subject_dirs: list[str | Path] | None = None,
+                          register_new_performance_event = None,
+                          refresh_rate_hz: float = 10,
+                          plot_size=(5, 6),
+                          plot_title: str = "Motor Task Performance Overview",
+                          window_title: str = "Performance Monitor",
+                          anim_shutdown_event=None):
+    if other_subject_dirs is not None:  # read all other historic performances:
+        if not isinstance(other_subject_dirs, list): other_subject_dirs = [other_subject_dirs]
+        global other_performances
+        other_performances = []
+        for dir in other_subject_dirs:
+            other_performances.extend(
+                filemgmt.fetch_json_recursively(dir, file_identifier="Trial Summary", value_key="RMSE"))
 
-    # todo: upon launch read historic performances of all other participants via above func (if not None!)
+        # filter NaNs:
+        other_performances = [x for x in other_performances if not math.isnan(x)]
 
-    # todo: display boxplot of historic performance
+        # define positoin for user boxplot:
+        pos_user_bp = .5
+    else: pos_user_bp = 0
 
-    # todo: ponder how to visualize own performance
+    # initialise plot:
+    fig, ax = plt.subplots(1, 1, figsize=plot_size)
+    # format:
+    fig.suptitle(plot_title)
+    ax.set_title('(lower = better)')
+    ax.set_axis_off()  # temporarily
+    manager = plt.get_current_fig_manager()  # change TkAgg window title
+    manager.set_window_title(window_title)
 
-    # todo: upon register_new_performance_event: insert recent performance into own performance array
+    # define function to create new user boxplot:
+    def plot_new_bps():
+        # clear previous and reshow:
+        ax.clear()  # Remove old plots
+        ax.set_title('(lower = better)')  # Restore title after clear
+        ax.set_axis_on()  # reshow ax
 
-    # todo:
-    pass
+        # fetch own performances with timestamps:
+        own_performances = filemgmt.fetch_json_recursively(this_subject_dir,
+                                                           file_identifier="Trial Summary", value_key="RMSE",
+                                                           with_time_from_file_title=True)
+        # sort by ascending time:
+        sorted_performance_dict = dict(sorted(own_performances.items(), key=lambda x: x[0]))
+        sorted_performances = list(sorted_performance_dict.values())
 
+        # filter nans:
+        sorted_performances = [x for x in sorted_performances if not math.isnan(x)]
 
-############### MULTIPROCESSING METHODS ###############
-class RobustEventManager:
-    """ Triggers events and safely waits for triggers while preventing deadlocks through timeouts. """
-    def __init__(self):
-        self.event = multiprocessing.Event()
-        self.lock = multiprocessing.Lock()
-        self.trigger_count = multiprocessing.Value('i', 0)
+        # plotting:
+        bp_dict = ax.boxplot([other_performances, sorted_performances] if pos_user_bp != 0 else [sorted_performances],
+                              positions=[0, pos_user_bp] if pos_user_bp != 0 else [pos_user_bp], showfliers=True, patch_artist=True)
 
-    def set(self):
-        with self.lock:
-            self.trigger_count.value += 1
-            self.event.set()
+        # now color patches:
+        colors = [measurement_color, slider_bar_color] if pos_user_bp != 0 else [button_hover_color]
+        for box, color in zip(bp_dict['boxes'], colors):
+            box.set_facecolor(color)
+            box.set_edgecolor(color)
 
-    def is_set(self):
-        return self.event.is_set()
+        # mark most recent performance:
+        last_value = sorted_performances[-1]
+        ax.annotate('Your Last',
+                         xy=(pos_user_bp + .05, last_value), xytext=(pos_user_bp + .3, last_value),
+                         arrowprops=dict(arrowstyle='->', color=slider_bar_color, lw=2),
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor=slider_bar_color, alpha=0.7),
+                         fontsize=10, ha='center')
 
-    def wait(self, timeout=None):
-        initial_count = self.trigger_count.value
+        # formatting:
+        if pos_user_bp != 0: ax.set_xticks([0, pos_user_bp]); ax.set_xticklabels(["Previous", "You"])
+        else: ax.set_xticks([0]); ax.set_xticklabels(["You"])
+        ax.set_ylabel('Motor Task RMSE')
 
-        if timeout is None:
-            # Wait indefinitely
-            while True:
-                if self.event.wait(timeout=1):  # Short timeout for checks
-                    with self.lock:
-                        if self.trigger_count.value > initial_count:
-                            return True
-        else:
-            # Wait with timeout
-            while timeout > 0:
-                if self.event.wait(timeout=min(1, timeout)):  # Short timeout for checks
-                    with self.lock:
-                        if self.trigger_count.value > initial_count:
-                            return True
-                timeout -= 1
-                if timeout <= 0:
-                    return False
-            return False
-
-    def clear(self):
-        with self.lock:
-            self.event.clear()
-            self.trigger_count.value = 0
-
-
-class SharedString:
-    """
-    Thread-safe wrapper for shared string storage using multiprocessing.Array.
-
-    Creates an instance object that can be passed between processes and provides
-    instance methods for safe read/write operations with automatic lock management.
-
-    Attributes:
-        buffer (multiprocessing.Array): Shared character buffer
-        lock (multiprocessing.Lock): Synchronization lock
-        max_size (int): Maximum buffer capacity
-    """
-
-    def __init__(self, size: int, initial_value: str = ""):
-        """
-        Initialize shared string instance with specified size.
-
-        Parameters:
-            size (int): Maximum buffer size in bytes (includes null terminator)
-            initial_value (str): Optional initial string value
-
-        Raises:
-            ValueError: If initial_value exceeds size limit
-            TypeError: If size is not positive integer
-        """
-        # Validate inputs
-        if not isinstance(size, int) or size <= 0:
-            raise TypeError(f"size must be positive integer, got {size}")
-
-        if not isinstance(initial_value, str):
-            raise TypeError(f"initial_value must be str, got {type(initial_value)}")
-
-        # Check overflow
-        encoded_init = initial_value.encode('utf-8')
-        if len(encoded_init) >= size:
-            raise ValueError(
-                f"initial_value too long: {len(encoded_init)} bytes "
-                f"exceeds buffer size {size}"
-            )
-
-        # Create shared buffer and lock
-        self.buffer = multiprocessing.Array('c', size)
-        self.lock = multiprocessing.Lock()
-        self.max_size = size
-
-        # Write initial value
-        if initial_value:
-            self.write(initial_value)
-
-    def write(self, value: str) -> None:
-        """
-        Safely write string to shared buffer with null termination.
-
-        Parameters:
-            value (str): String to write
-
-        Raises:
-            ValueError: If value exceeds buffer capacity
-            TypeError: If value is not string
-        """
-        if not isinstance(value, str):
-            raise TypeError(f"value must be str, got {type(value)}")
-
-        # Encode and validate size
-        encoded = value.encode('utf-8')
-        if len(encoded) >= self.max_size:
-            raise ValueError(
-                f"value too long: {len(encoded)} bytes "
-                f"exceeds buffer capacity {self.max_size}"
-            )
-
-        # Write to buffer with lock
-        with self.lock:
-            # Clear previous data
-            self.buffer[:] = [0] * self.max_size
-
-            # Write encoded string as list of byte integers
-            self.buffer[:len(encoded)] = list(encoded)
-
-            # Add null terminator at end of string
-            self.buffer[len(encoded)] = 0
-
-    def read(self) -> str:
-        """
-        Safely read string from shared buffer with null-termination handling.
-
-        Returns:
-            str: Decoded string with null bytes stripped
-
-        Raises:
-            UnicodeDecodeError: If buffer contains invalid UTF-8
-        """
-        # Read from buffer with lock
-        with self.lock:
-            # Convert buffer slice to bytes
-            raw_bytes = bytes(self.buffer[:])
-
-            # Strip null bytes and decode
-            try:
-                decoded = raw_bytes.rstrip(b'\x00').decode('utf-8')
-            except UnicodeDecodeError as e:
-                raise UnicodeDecodeError(
-                    e.encoding,
-                    e.object,
-                    e.start,
-                    e.end,
-                    f"Invalid UTF-8 in shared buffer: {e.reason}"
-                ) from e
-
-        return decoded
-
-    def get_lock(self) -> multiprocessing.Lock:
-        """
-        Retrieve the synchronization lock for manual context management.
-
-        Returns:
-            multiprocessing.Lock: Lock object
-        """
-        return self.lock
-
-    def get_size(self) -> int:
-        """
-        Get maximum buffer capacity.
-
-        Returns:
-            int: Max size in bytes
-        """
-        return self.max_size
+        return bp_dict
 
 
-def save_terminate_process(process: multiprocessing.Process, timeout: float = 2.0) -> None:
-    """ First request termination, then force-kill process."""
-    if process.is_alive():  # terminate process (request)
-        process.terminate()
-        process.join(timeout=timeout)
+    # if refresh event is provided, update plot upon such:
+    if register_new_performance_event is not None:
+        with AnimationManager(anim_shutdown_event) as anim_mgr:  # try + finally to clean-up after terminating process
+            def update(frame):  # animation method
+                if anim_mgr.check_shutdown(): return 1,
 
-        if process.is_alive():  # if still alive kill (force)
-            process.kill()
-            process.join()
+                if register_new_performance_event.is_set():
+                    register_new_performance_event.clear()  # clear again
+                    #ax.set_title("UPDATE")
+                    boxplots = plot_new_bps()
+                    fig.canvas.draw_idle()
 
-    if process.pid is not None:  # then process was started at some point
-        process.join()
+                return 1,
 
+            anim_mgr.start(fig, update, interval=int(1000/refresh_rate_hz))
+            plt.show()
+
+    else:  # otherwise plot only once:
+        plot_new_bps()
+        plt.show()
 
 
 ########## TESTING ##########
@@ -1722,4 +2125,6 @@ if __name__ == '__main__':
     SUBJECT_DIR = RESULT_DIR / "subject_00"
     SONG_ONE_DIR = SUBJECT_DIR / "song_00"
 
-    print(_get_rmse_recursively(SUBJECT_DIR))
+    plot_posttrial_rating(SONG_ONE_DIR, mptools.SharedString(256), "Groovy")
+
+    #print(filemgmt.fetch_json_recursively(SUBJECT_DIR, "Trial Summary", "RMSE", True))
