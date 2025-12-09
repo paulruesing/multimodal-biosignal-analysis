@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+import json
 import numpy as np
 from pathlib import Path
 from typing import Union, Literal
@@ -98,8 +99,10 @@ def assert_dir(dir_path: str | Path):
 
 class TxtConfig:
     def __init__(self,
-                 txt_file_path: Union[Path, str],):
+                 txt_file_path: Union[Path, str],
+                 read_only_mode: bool = True,):
         self.txt_file_path = txt_file_path
+        self.read_only_mode = read_only_mode
 
     @property
     def settings_dict(self) -> dict:
@@ -115,18 +118,20 @@ class TxtConfig:
                 # read entry and sanity check:
                 entry = line.split(' --- ')
                 if len(entry) != 2:
-                    raise ValueError("Provided file may only contain lines structured as 'PROPERTY_NAME --- ENTRY'!")
+                    raise ValueError(f"Provided file may only contain lines structured as 'PROPERTY_NAME --- ENTRY'!\nFound line: >> {line} <<")
 
                 # save entry:
                 temp_dict[entry[0].strip()] = entry[1].strip()
         return temp_dict
 
     def change_entry(self, entry, new_entry):
+        if self.read_only_mode: raise ValueError("TxtConfig is in read-only mode, hence cannot modify entry!")
         temp_dict = self.settings_dict
         temp_dict[entry] = new_entry
         self._set_dict_to_file(temp_dict)
 
     def _set_dict_to_file(self, new_dict):
+        if self.read_only_mode: raise ValueError("TxtConfig is in read-only mode, hence cannot modify entry!")
         # overwrite txt file with current dictionary content
         with open(self.txt_file_path, "w") as file:
             file.write("# This file was changed during runtime.\n# The structure is 'PROPERTY_NAME --- ENTRY'. Lines starting with '#' are ignored.\n")
@@ -137,6 +142,7 @@ class TxtConfig:
 
     def get_as_type(self, key, value_type: Literal["int", "float", "float_list", "str_list", "list", "bool", "str"]):
         value = self.settings_dict[key]  # retrieve value
+
         # format and return value:
         if value_type == "int": return int(value)
         elif value_type == "float": return float(value)
@@ -152,3 +158,46 @@ class TxtConfig:
             return entries
         else:
             raise ValueError(f"Provided value type '{value_type}' is not recognized!")
+
+
+def fetch_json_recursively(dir: str | Path,
+                           file_identifier: str,
+                           value_key: str,
+                           with_time_from_file_title: bool = False) -> list | dict:
+    """Recursively retrieve all values under a key (value_key) from JSON files matching file_identifier in all subdirectories of dir."""
+    if not isinstance(dir, Path): dir = Path(dir)
+
+    values = {} if with_time_from_file_title else []  # Collect all matches
+
+    for item in dir.iterdir():
+        if item.is_dir():
+            # recurse into subdirectory and ADD results:
+            if with_time_from_file_title:
+                values.update(fetch_json_recursively(item, file_identifier, value_key, with_time_from_file_title))
+            else:
+                values.extend(fetch_json_recursively(item, file_identifier, value_key, with_time_from_file_title))
+
+        elif item.is_file():
+            # check if it's a matching JSON file:
+            name_without_ext = item.stem  # e.g. "Trial Summary" from "Trial Summary.json"
+            if file_identifier in name_without_ext and item.suffix == '.json':
+                try:
+                    with open(item, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    value = data[value_key]
+
+                    # either process with or without timestamp
+                    if with_time_from_file_title:
+                        day = name_without_ext.split(" ")[0]
+                        time = name_without_ext.split(" ")[1]
+                        time_str = f"{day} {time}"
+
+                        values[time_str] = value  # add to dict
+
+                    else:
+                        values.append(value)  # add to list
+
+                except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                    print(f"Warning: Could not read value from {item}: {e}")
+
+    return values
