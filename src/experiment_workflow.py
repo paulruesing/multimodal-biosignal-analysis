@@ -1,5 +1,5 @@
 """
-This script contains the experiment workflow leveraging processes defined in measurement_processes.py.
+This script contains the experiment workflow leveraging processes defined in measurements_and_interactive_visuals.py.
 It manages shared memory allocation, multiprocessing and runs through the whole experiment workflow.
 ®Paul Rüsing, INI ETH / UZH
 """
@@ -17,10 +17,11 @@ from torchgen.gen import file_manager_from_dispatch_key
 
 import src.utils.file_management as filemgmt
 
-from src.pipeline.measurement_processes import RobustEventManager, dummy_sampling_process, sampling_process, \
+import src.utils.multiprocessing_tools as mptools
+from src.pipeline.measurements_and_interactive_visuals import dummy_sampling_process, sampling_process, \
     plot_input_view, qtc_control_master_view, dynamometer_force_mapping, plot_onboarding_form, \
-    plot_pretrial_familiarity_check, SharedString, plot_posttrial_rating, save_terminate_process, plot_breakout_screen, \
-    accuracy_sampler
+    plot_pretrial_familiarity_check, plot_posttrial_rating, plot_breakout_screen, \
+    accuracy_sampler, plot_performance_view
 
 
 ### MULTIPROCESSING IMPLEMENTATION:
@@ -28,6 +29,7 @@ def start_experiment_processes(
         personal_data_dir: str | Path,
         measurement_saving_path: str | Path,
         mvc_saving_dir: str | Path,
+        overall_result_dir: str | Path,
         control_log_dir: str | Path,
         music_category_txt: str | Path | None = None,
         experiment_config_txt: str | Path | None = None,
@@ -82,6 +84,8 @@ def start_experiment_processes(
     display_ecg = experiment_config_file.get_as_type("Display ECG", "bool") if experiment_config_txt is not None else True
     display_gsr = experiment_config_file.get_as_type("Display GSR", "bool") if experiment_config_txt is not None else True
 
+    display_relative_performance = experiment_config_file.get_as_type("Display Relative Performance", "bool") if experiment_config_txt is not None else True
+
     target_sine_min = experiment_config_file.get_as_type("Target Sine Minimum", "float") if experiment_config_txt is not None else 5
     target_sine_max = experiment_config_file.get_as_type("Target Sine Maximum", "float") if experiment_config_txt is not None else 20
     use_relative_target_freq = experiment_config_file.get_as_type("Use Relative Target Frequency", "bool") if experiment_config_txt is not None else False
@@ -93,9 +97,20 @@ def start_experiment_processes(
     pre_accuracy_phase_sec = experiment_config_file.get_as_type("Pre Accuracy Measurement Time", "float") if experiment_config_txt is not None else 5
     motor_trial_duration = experiment_config_file.get_as_type("Motor Trial Duration", "float") if experiment_config_txt is not None else 60
 
+    instrument_question_str = experiment_config_file.get_as_type("Instrument Question", "str") if experiment_config_txt is not None else "Do you play an instrument? If yes, which:"
+    listening_habit_question = experiment_config_file.get_as_type("Listening Habit Question", "str") if experiment_config_txt is not None else "How often do you listen to music?"
+    listening_habit_options = experiment_config_file.get_as_type("Listening Habit Options", "str_list") if experiment_config_txt is not None else ('Most of the day', 'A small part of the day', 'Every 2 or 3 days', 'Seldom')
+    athletic_ability_question_str = experiment_config_file.get_as_type("Athletic Ability Question", "str") if experiment_config_txt is not None else "Please rate your current athleticism. (0 = unfit, 7 = professional)"
+
+    health_questions_intro_str = experiment_config_file.get_as_type("Health Question Intro", "str") if experiment_config_txt is not None else "To ensure this study is safe for you and to help us account for individual differences in nervous system function, we need to understand your motor health history. Please answer truthfully and know that your data is being treated confidentially."
+    known_diseases_question_str = experiment_config_file.get_as_type("Known Disease Question", "str") if experiment_config_txt is not None else "Have you ever been diagnosed by a healthcare professional with any neural condition? If yes, which:"
+    motor_symptoms_question_str = experiment_config_file.get_as_type("Motor Symptoms Question", "str") if experiment_config_txt is not None else "In the past 6 months, have you experienced any difficulties with fine motor tasks?  If yes, which:"
+    medication_question_str = experiment_config_file.get_as_type("Medication Question", "str") if experiment_config_txt is not None else "Are you currently taking any medications or substances that could affect your nervous system or muscle function? If yes, which:"
+
     pretrial_familiarity_question_str = experiment_config_file.get_as_type("Familiarity Question", "str") if experiment_config_txt is not None else "How well do you know this song? (0 = never heard it, 7 = can sing/hum along)"
     liking_question_str = experiment_config_file.get_as_type("Liking Question", "str") if experiment_config_txt is not None else "How did you like the song? (0: terrible, 7: extremely well)"
     emotion_question_str = experiment_config_file.get_as_type("Emotional Question", "str") if experiment_config_txt is not None else "Please rate your overall emotional state right now. (0: extremely unhappy/distressed, 7 = extremely happy/peaceful)"
+
 
     # serial connection intact?
     serial_connection_intact = False
@@ -123,26 +138,27 @@ def start_experiment_processes(
     # accuracy measurement dict:
     shared_force_value_target_dict = mp_manager.dict()
     # current accuracy display str:
-    shared_current_accuracy_str = SharedString(256, initial_value="Accuracy measurement will be displayed here...")
+    shared_current_accuracy_str = mptools.SharedString(256, initial_value="Accuracy measurement will be displayed here...")
 
     # rating result str:
-    shared_questionnaire_str = SharedString(256, initial_value="Questionnaire results will be displayed here...")
+    shared_questionnaire_str = mptools.SharedString(256, initial_value="Questionnaire results will be displayed here...")
 
     # multiprocessing events:
-    force_serial_save_event = RobustEventManager()  # force serial save
-    serial_saving_done_event = RobustEventManager()
-    force_log_saving_event = RobustEventManager()  # force master log save
-    log_saving_done_event = RobustEventManager()
-    start_trigger_event = RobustEventManager()  # send trigger via serial
-    stop_trigger_event = RobustEventManager()
-    start_onboarding_event = RobustEventManager()  # sent from master view, call new processes
-    start_mvc_calibration_event = RobustEventManager()
-    start_sampling_event = RobustEventManager()
-    start_music_motor_task_event = RobustEventManager()  # called upon starting a song
-    start_silent_motor_task_event = RobustEventManager()  # called upon silent trial
-    start_test_motor_task_event = RobustEventManager()  # called upon test trial
-    save_accuracy_and_close_event = RobustEventManager()  # called to force accuracy saving
-    save_accuracy_done_event = RobustEventManager()   # called if force save is done
+    force_serial_save_event = mptools.RobustEventManager()  # force serial save
+    serial_saving_done_event = mptools.RobustEventManager()
+    force_log_saving_event = mptools.RobustEventManager()  # force master log save
+    log_saving_done_event = mptools.RobustEventManager()
+    start_trigger_event = mptools.RobustEventManager()  # send trigger via serial
+    stop_trigger_event = mptools.RobustEventManager()
+    start_onboarding_event = mptools.RobustEventManager()  # sent from master view, call new processes
+    start_mvc_calibration_event = mptools.RobustEventManager()
+    start_sampling_event = mptools.RobustEventManager()
+    start_music_motor_task_event = mptools.RobustEventManager()  # called upon starting a song
+    start_silent_motor_task_event = mptools.RobustEventManager()  # called upon silent trial
+    start_test_motor_task_event = mptools.RobustEventManager()  # called upon test trial
+    save_accuracy_and_close_event = mptools.RobustEventManager()  # called to force accuracy saving
+    save_accuracy_done_event = mptools.RobustEventManager()   # called if force save is done
+    register_new_performance_event = mptools.RobustEventManager()  # called to update performance view
 
     ### PROCESS DEFINITIONS
     filemgmt.assert_dir(control_log_dir)
@@ -163,7 +179,14 @@ def start_experiment_processes(
     onboarding_process = multiprocessing.Process(
         target=plot_onboarding_form,
         args=(personal_data_dir, shared_questionnaire_str,),
-        kwargs={},
+        kwargs={'instrument_question_str': instrument_question_str,
+                'listening_habit_question': listening_habit_question, 'listening_habit_options': listening_habit_options,
+                'athletic_ability_question_str': athletic_ability_question_str,
+                'health_questions_intro_str': health_questions_intro_str,
+                'known_diseases_question_str': known_diseases_question_str,
+                'motor_symptoms_question_str': motor_symptoms_question_str,
+                'medication_question_str': medication_question_str,
+                },
         name="OnboardingFormProcess")
 
     global mvc; mvc = initial_mvc
@@ -185,6 +208,7 @@ def start_experiment_processes(
         mvc_sampler.start()
 
         # 2) open live_input_view:
+        mvc_displayer_shutdown_event = mptools.RobustEventManager()
         mvc_displayer = multiprocessing.Process(
             target=plot_input_view,
             args=(shared_measurement_dict, shared_dict_lock, ),
@@ -194,6 +218,7 @@ def start_experiment_processes(
                     'window_title': 'Dynamometer Serial Input View' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES",
                     'input_unit_label': 'Force [kg]',
                     'y_limits': (0, 90),
+                    'anim_shutdown_event': mvc_displayer_shutdown_event,
                     },
             name="MVCDisplayProcess")
         mvc_displayer.start()
@@ -203,7 +228,7 @@ def start_experiment_processes(
         while mvc_displayer.is_alive() and (time.time() - start) < mvc_max_time:
            time.sleep(.1)  # dont check every second
         else:
-            save_terminate_process(mvc_displayer)  # terminate display
+            mptools.save_terminate_process(mvc_displayer, mvc_displayer_shutdown_event)  # terminate display
 
             # force saving:
             force_serial_save_event.set()
@@ -213,7 +238,7 @@ def start_experiment_processes(
             time.sleep(2)  # wait briefly for file to be written
 
             # terminate sampler:
-            save_terminate_process(mvc_sampler)
+            mptools.save_terminate_process(mvc_sampler)
 
         # 4) load saved measurements and save max as MVC:
         try:
@@ -226,28 +251,38 @@ def start_experiment_processes(
             status_msg = "Force measurement for MVC calibration failed. Please try again."
             print(status_msg); shared_questionnaire_str.write(status_msg)  # print and display in master process
 
+    ecg_displayer_shutdown_event = mptools.RobustEventManager()
     ecg_displayer = multiprocessing.Process(
         target=plot_input_view,
         args=(shared_measurement_dict, shared_dict_lock,),
         kwargs={'measurement_dict_label': 'ecg',
                 'target_value': None,
                 'include_gauge': False,
-                'title': 'ECG Input', 'window_title': 'ECG Serial Input View' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES"
+                'title': 'ECG Input', 'window_title': 'ECG Serial Input View' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES",
+                'anim_shutdown_event': ecg_displayer_shutdown_event,
                 },
         name="ECGDisplayProcess")
 
+    gsr_displayer_shutdown_event = mptools.RobustEventManager()
     gsr_displayer = multiprocessing.Process(
             target=plot_input_view,
             args=(shared_measurement_dict, shared_dict_lock,),
             kwargs={'measurement_dict_label': 'gsr',
                     'include_gauge': False,
-                    'title': 'GSR Input', 'window_title': 'GSR Serial Input View' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES"
+                    'title': 'GSR Input', 'window_title': 'GSR Serial Input View' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES",
+                    'anim_shutdown_event': gsr_displayer_shutdown_event,
                     },
             name="ECGDisplayProcess")
 
-
-    # todo: define performance_displayer process
-
+    # define performance_displayer process:
+    other_subject_dir_list = [overall_result_dir]
+    performance_displayer_shutdown_event = mptools.RobustEventManager()
+    # since the current participant doesn't have registered performances yet, we can just search the overall result dir
+    performance_displayer = multiprocessing.Process(
+        target=plot_performance_view,
+        args=(personal_data_dir, other_subject_dir_list, register_new_performance_event),
+        kwargs={'anim_shutdown_event': performance_displayer_shutdown_event,},
+        name="PerformanceDisplayProcess")
 
     ### PROCESS MANAGEMENT
     # todo: ponder whether more definitions should be included in separate functions for clarity
@@ -294,7 +329,7 @@ def start_experiment_processes(
                 try:  # prevent double definition
                     _ = sampler  # if already defined:
                     print("Starting new sampling process.")
-                    save_terminate_process(sampler)  # first terminate old
+                    mptools.save_terminate_process(sampler)  # first terminate old
                 except NameError:  # if not already defined, everything is fine
                     pass
 
@@ -311,6 +346,7 @@ def start_experiment_processes(
                 if not sampler.is_alive():
                     print("Starting sampling process!")
                     sampler.start()
+
                 # start display of other modalities:
                 if 'gsr' in measurement_labels and display_gsr:
                     if not gsr_displayer.is_alive():  # dont start twice
@@ -321,6 +357,11 @@ def start_experiment_processes(
                         print("Starting ECG display process!")
                         ecg_displayer.start()
 
+                # start display of relative performance:
+                if not performance_displayer.is_alive() and display_relative_performance:
+                    print("Starting performance display process!")
+                    performance_displayer.start()
+
                 start_sampling_event.clear()
 
 
@@ -330,6 +371,7 @@ def start_experiment_processes(
 
                     ###### continue if sampler's running #####
                     target_freq = .1
+                    test_motor_task_shutdown_event = mptools.RobustEventManager()
                     test_motor_task = multiprocessing.Process(
                         target=plot_input_view,
                         args=(shared_measurement_dict, shared_dict_lock,),
@@ -340,7 +382,8 @@ def start_experiment_processes(
                                 'title': 'Your grip force controls the red line. Try to keep it close to the moving green target line within the green target corridor!',
                                 'input_unit_label': 'Force [% MVC]',
                                 'y_limits': (0, 100),
-                                'window_title': 'Test Dynamic Motor Task' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES"
+                                'window_title': 'Test Dynamic Motor Task' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES",
+                                'anim_shutdown_event': test_motor_task_shutdown_event,
                                 },
                         name=f"TestMotorTask")
 
@@ -355,7 +398,7 @@ def start_experiment_processes(
                     while time.time() - start < 60 and test_motor_task.is_alive():
                         time.sleep(0.1)
                     else:  # if done, terminate process
-                        save_terminate_process(test_motor_task)
+                        mptools.save_terminate_process(test_motor_task, test_motor_task_shutdown_event)
 
                     # clean-up:
                     status_msg = f"Test motor task done!"
@@ -369,7 +412,7 @@ def start_experiment_processes(
             ## Motor Task
             if start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set():
                 try:  # not if, because we would need to catch a NameError if not defined yet
-                    assert sampler.is_alive()
+                    if not sampler.is_alive(): raise RuntimeError('Sampling process needs to be started before!')
 
                     ###### continue if sampler's running #####
                     # check whether it's silent or music trial:
@@ -410,10 +453,11 @@ def start_experiment_processes(
                         else: target_freq = target_sine_freq_abs
 
                         # pretrial_familiarity_check:
+                        pretrial_shutdown_event = mptools.RobustEventManager()  # define anyways to prevent termination errors
                         pretrial_process = multiprocessing.Process(
                             target=plot_pretrial_familiarity_check,
                             args=(current_song_data_dir, shared_questionnaire_str,),
-                            kwargs={"question_text": pretrial_familiarity_question_str},
+                            kwargs={"question_text": pretrial_familiarity_question_str,},
                             name=f"Pretrial Process {trial_label}")
                         pretrial_process.start()
 
@@ -421,11 +465,13 @@ def start_experiment_processes(
                         target_freq = target_sine_freq_abs  # silence trial cannot use relative target
 
                         # breakout_screen:
+                        pretrial_shutdown_event = mptools.RobustEventManager()
                         pretrial_process = multiprocessing.Process(
                             target=plot_breakout_screen,
                             args=(pre_trial_time,  # waiting time
                                   ),
-                            kwargs={'title': 'Have a break. Your trial will start soon.'},
+                            kwargs={'title': 'Have a break. Your trial will start soon.',
+                                    'anim_shutdown_event': pretrial_shutdown_event,},
                             name=f"Pretrial Process {trial_label}")
                         pretrial_process.start()
 
@@ -441,16 +487,19 @@ def start_experiment_processes(
                         time.sleep(0.1)  # check every
 
                     # stop pre_trial process:
-                    save_terminate_process(pretrial_process)
+                    mptools.save_terminate_process(pretrial_process, pretrial_shutdown_event)
+                    time.sleep(.5)
 
                     # breakout screen if time remains and no restart triggered
                     if time.time() - start < pre_trial_time and not (start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set()):
                         # if process is closed, show waiting screen:
+                        pretrial_break_shutdown_event = mptools.RobustEventManager()
                         pretrial_break_process = multiprocessing.Process(
                             target=plot_breakout_screen,
                             args=(pre_trial_time - (time.time() - start),  # remaining waiting time
                                   ),
-                            kwargs={'title': 'Have a break. Your trial will start soon.'},
+                            kwargs={'title': 'Have a break. Your trial will start soon.',
+                                    'anim_shutdown_event': pretrial_break_shutdown_event,},
                             name=f"Pretrial Break Process {trial_label}")
                         # only show if not already breakup screen (during silence trial) was shown
                         if is_music_trial: pretrial_break_process.start()
@@ -458,7 +507,7 @@ def start_experiment_processes(
                             start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set()):
                             time.sleep(.1)  # check every 100ms
                         else:
-                            save_terminate_process(pretrial_break_process)  # end pretrial process
+                            mptools.save_terminate_process(pretrial_break_process, pretrial_break_shutdown_event)  # end pretrial process
 
                     # pretrial time over:
                     if start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set():  # if restart
@@ -466,6 +515,7 @@ def start_experiment_processes(
                     else:  # if we can continue with trial
                         # define motor task process:
                         display_refresh_rate_hz = 15  # equals accuracy sampling rate
+                        dynamic_motor_task_shutdown_event = mptools.RobustEventManager()
                         dynamic_motor_task = multiprocessing.Process(
                             target=plot_input_view,
                             args=(shared_measurement_dict, shared_dict_lock,),
@@ -480,7 +530,7 @@ def start_experiment_processes(
 
                                     'shared_value_target_dict': shared_force_value_target_dict,
                                     'shared_current_accuracy_str': shared_current_accuracy_str,
-                                    'save_accuracy_and_close_event': save_accuracy_and_close_event,
+                                    'anim_shutdown_event': dynamic_motor_task_shutdown_event,
 
                                     'title': 'Your grip force controls the red line. Try to keep it close to the moving green target line within the green target corridor!',
                                     'input_unit_label': 'Force [% MVC]',
@@ -517,7 +567,7 @@ def start_experiment_processes(
                         while time.time() - start < motor_trial_duration and dynamic_motor_task.is_alive(): time.sleep(0.1)
                         else:  # if done:
                             # close motor task:
-                            save_terminate_process(dynamic_motor_task)
+                            mptools.save_terminate_process(dynamic_motor_task, dynamic_motor_task_shutdown_event)
 
                             # store accuracy measurements:
                             print("Waiting for accuracy saving...")
@@ -529,7 +579,7 @@ def start_experiment_processes(
                             print("Accuracy saved!")
 
                             # terminate process:
-                            save_terminate_process(accuracy_sampling_process)
+                            mptools.save_terminate_process(accuracy_sampling_process)
 
                         # save trial summary:
                         accuracy_array = pd.read_csv(filemgmt.most_recent_file(current_song_data_dir,
@@ -542,7 +592,8 @@ def start_experiment_processes(
                             json.dump(summary_dict, json_file, indent=4)  # Pretty print with indent=4
                         print("Saved trial summary to ", save_path)
 
-                        # todo: update performance view event
+                        # update performance view event:
+                        register_new_performance_event.set()
 
                         # define and start post trial rating: (includes music questions only if category string is provided)
                         posttrial_process = multiprocessing.Process(
@@ -563,9 +614,9 @@ def start_experiment_processes(
                             time.sleep(0.1)  # check every 100 ms
                         else:
                             # stop post_trial process:
-                            save_terminate_process(posttrial_process)
+                            mptools.save_terminate_process(posttrial_process)
 
-                except (AssertionError, NameError):  # if sampler wasn't defined yet
+                except (RuntimeError, NameError):  # if sampler wasn't defined yet
                     shared_questionnaire_str.write("First start sampling process please!")
                     start_music_motor_task_event.clear()
                     start_silent_motor_task_event.clear()
@@ -588,14 +639,15 @@ def start_experiment_processes(
 
         # kill remaining processes:
         try:
-            save_terminate_process(sampler)
+            mptools.save_terminate_process(sampler)
         except NameError:
             pass
 
-        save_terminate_process(onboarding_process)
-        save_terminate_process(gsr_displayer)
-        save_terminate_process(ecg_displayer)
-        save_terminate_process(master_displayer)
+        mptools.save_terminate_process(onboarding_process)
+        mptools.save_terminate_process(gsr_displayer, gsr_displayer_shutdown_event)
+        mptools.save_terminate_process(ecg_displayer, ecg_displayer_shutdown_event)
+        mptools.save_terminate_process(performance_displayer, performance_displayer_shutdown_event)
+        mptools.save_terminate_process(master_displayer)
 
     finally:
         print("Cleanup completed")
@@ -607,17 +659,22 @@ if __name__ == '__main__':
     CONFIG_DIR = ROOT / "config"
     MUSIC_CONFIG = CONFIG_DIR / "music_selection.txt"
     EXPERIMENT_CONFIG = CONFIG_DIR / "experiment_config.txt"
-    # todo: add experiment config file (questionnaire strings, dynamic task Hz ratio)
 
     # important:
-    SUBJECT_DIR = ROOT / "data" / "experiment_results" / "subject_00"
+    EXPERIMENT_RESULTS = ROOT / "data" / "experiment_results"
+
+    SUBJECT_DIR = EXPERIMENT_RESULTS / "subject_00"
+
     SERIAL_MEASUREMENTS = SUBJECT_DIR / "serial_measurements"
     MVC_MEASUREMENTS = SUBJECT_DIR / "mvc_measurements"
     EXPERIMENT_LOG = SUBJECT_DIR / "experiment_logs"
 
     # start process:
+    #   "spawn" is conceived safer than "fork" for macos
+    multiprocessing.set_start_method('spawn', force=True)
     start_experiment_processes(
         mvc_saving_dir=MVC_MEASUREMENTS,
+        overall_result_dir=EXPERIMENT_RESULTS,  # will be searched for prev performances
         personal_data_dir=SUBJECT_DIR,
         measurement_saving_path=SERIAL_MEASUREMENTS,
         music_category_txt=MUSIC_CONFIG,
