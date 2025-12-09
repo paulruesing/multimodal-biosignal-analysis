@@ -20,8 +20,8 @@ class SpotifyController:
         Tracks the current category and index of the next track to play.
     """
     def __init__(self,
-                 category_url_dict: dict[str, tuple[tuple[str, int] | str]] | str | None = None,
-                 # {category_name: [(song_url, start_at_second), (song_url2, start_at_second)]}
+                 category_url_dict: dict[str, list[tuple[str, str, int] | tuple[str, str]]] | str | None = None,
+             #                       {category_name: [(genre, song_url, start_at_second), (genre, song_url), ...]}
                  randomly_shuffle_category_lists: bool = True,
                  ):
         """
@@ -45,6 +45,7 @@ class SpotifyController:
 
         # initialise counter (for play_next_from)
         self.current_category_and_counter: tuple[str, int] | None = None
+        self.current_genre = None  # will be updated if new song is started
 
     def read_category_url_config_txt(self, txt_file: str | Path) -> dict:
         """
@@ -52,7 +53,7 @@ class SpotifyController:
 
         The text file format expects:
         - Category titles enclosed in single quotes at the start of a line.
-        - Track URLs optionally followed by a start time in seconds.
+        - Track URLs preceded by a Genre label and optionally followed by a start time in seconds. (e.g. R&B --- https://aslöfas --- 10
         - Lines starting with '#' are treated as comments and ignored.
         - Empty lines are ignored.
 
@@ -71,6 +72,15 @@ class SpotifyController:
         ValueError
             If a track entry appears before any category title is defined.
         """
+        def detect_song_data(line: str) -> tuple[str, str] | tuple[str, str, float]:
+            """ Detect genre, song_url and start_after_seconds from read line. """
+            elements = line.split(" --- ")
+            if len(elements) == 2:  # no start_after_provided
+                return elements[0].strip(), elements[1].strip()
+            elif len(elements) == 3:
+                return elements[0].strip(), elements[1].strip(), float(elements[2].strip())
+            else: raise ValueError("Invalid line detected: {}".format(line))
+
         with open(txt_file, "r") as f:
             result_dict = {}
             for line in f.readlines():
@@ -85,25 +95,15 @@ class SpotifyController:
                     continue  # empty line
 
                 try:  # try detect comments
-                    line = line.split(" #")[0]
+                    line = line.split(" #")[0]  # and separate them
                 except IndexError:
                     pass
 
-                line = line.strip()
-                try:  # try detect start-after
-                    link, start_after = line.split(" ")
-                    try:
-                        result_dict[current_category_title].append((link, float(start_after)))
-                    except KeyError:
-                        raise ValueError(
-                            "Category URL config file needs to start with 'category_name' before first other entry (besides comments or empty lines)!")
-                except ValueError:
-                    link = line
-                    try:
-                        result_dict[current_category_title].append(link)
-                    except KeyError:
-                        raise ValueError(
-                            "Category URL config file needs to start with 'category_name' before first other entry (besides comments or empty lines)!")
+                try:
+                    result_dict[current_category_title].append(detect_song_data(line))
+                except KeyError:
+                    raise ValueError("Category URL config file needs to start with 'category_name' before first other entry (besides comments or empty lines)!")
+
         return result_dict
 
     def play_next_from(self, category: str):
@@ -136,22 +136,25 @@ class SpotifyController:
 
         # derive next track and when to start it:
         try:
-            potential_tuple = self.category_url_dict[self.current_category_and_counter[0]][self.current_category_and_counter[1]]
+            song_tuple = self.category_url_dict[self.current_category_and_counter[0]][self.current_category_and_counter[1]]
         except IndexError:
             print("No new songs left in category! Starting over.")
             self.current_category_and_counter = (category, 0)
-            potential_tuple = self.category_url_dict[self.current_category_and_counter[0]][
+            song_tuple = self.category_url_dict[self.current_category_and_counter[0]][
                 self.current_category_and_counter[1]]
-        if isinstance(potential_tuple, (list, tuple)): next_track_url, start_at = potential_tuple
-        else: next_track_url, start_at = potential_tuple, None
+
+        # try detect start_after:
+        if len(song_tuple) == 3: start_at = song_tuple[2]
+        else: start_at = None
+        self.current_genre = song_tuple[0]
+        next_track_url = song_tuple[1]
 
         # play:
         self.play_track(next_track_url); print(f"Playing {next_track_url} (number {self.current_category_and_counter[1]} in category {category})");
         if start_at is not None and start_at != 0: print(f"from second {start_at}"); self.skip(start_at)
 
     # below functions are based on  https://johnculviner.com/automatically-skip-songs-in-spotify-mac-app/, thank you!
-    @staticmethod
-    def get_current_track(output_type: Literal['str', 'dict'] = 'dict') -> str | dict:
+    def get_current_track(self, output_type: Literal['str', 'dict'] = 'dict') -> str | dict:
         """
         Retrieve information about the currently playing Spotify track.
 
@@ -167,7 +170,7 @@ class SpotifyController:
         -------
         str | dict
             Current track information as a formatted string or a dictionary with keys:
-            'Title', 'Artist', 'Album', 'Duration [ms]', 'Position [s]'.
+            'Title', 'Artist', 'Album', 'Duration [ms]', 'Position [s]', 'Genre'
 
         Raises
         ------
@@ -201,14 +204,14 @@ class SpotifyController:
         output, error = process.communicate()  # waits for finished execution and reads all output from stdout and stderr
         if process.returncode == 0:  # indicates successful execution
             if output_type == 'str':
-                return output.decode().strip()
+                return output.decode().strip() + " | " + self.current_genre
             else:
                 #print(output.decode())
                 title, artist, album, duration_ms, position_s = output.decode().strip().split(' | ')
                 position_s = str_to_float(position_s, is_ger_format=("." not in position_s))
                 duration_ms = str_to_float(duration_ms,  is_ger_format=("." not in duration_ms))
                 return {'Title': title, 'Artist': artist, 'Album': album, 'Duration [ms]': duration_ms,
-                        'Position [s]': position_s}
+                        'Position [s]': position_s, 'Genre': self.current_genre}
         else:
             raise RuntimeError(f'Error while getting current track: {error}')
 
