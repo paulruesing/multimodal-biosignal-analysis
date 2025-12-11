@@ -31,7 +31,8 @@ Display Relative Performance --- True
 # target:
 Target Sine Minimum --- 5
 Target Sine Maximum --- 20
-Use Relative Target Frequency --- False
+Use Relative Target Frequency --- True
+# design this:
 Ratio Target Sine Frequency Music BPM --- 0.1
 Absolute Target Sine Frequency --- 0.1
 Target Display Corridor --- 10
@@ -49,9 +50,9 @@ Listening Habit Question --- How often do you listen to music?
 Listening Habit Options --- Most of the day, A small part of the day, Every 2 or 3 days, Seldom
 Athletic Ability Question --- Please rate your current athleticism. (0 = unfit, 7 = professional)
 Health Question Intro --- To ensure this study is safe for you and to help us account for individual differences in nervous system function, we need to understand your motor health history. Please answer truthfully and know that your data is being treated confidentially.
-Known Disease Question --- Have you ever been diagnosed by a healthcare professional with any neural condition? If yes, which:
-Motor Symptoms Question --- In the past 6 months, have you experienced any difficulties with fine motor tasks?  If yes, which:
-Medication Question --- Are you currently taking any medications or substances that could affect your nervous system or muscle function? If yes, which:
+Known Disease Question --- Have you ever been diagnosed by a healthcare professional with any neural condition (e.g., epilepsy or seizure disorder, stroke or transient ischemic attack (TIA), multiple sclerosis (MS), Parkinson's disease, peripheral neuropathy)? If yes, which:
+Motor Symptoms Question --- In the past 6 months, have you experienced any difficulties with fine motor tasks (e.g., buttoning shirts, handwriting, picking up small objects)? If yes, which:
+Medication Question --- Are you currently taking any medications or substances that could affect your nervous system or muscle function (e.g., muscle relaxants, anticonvulsants, antidepressants/sedatives, stimulants, antipsychotics)? If yes, which:
 
 # pre-trial:
 Familiarity Question --- How well do you know this song? (0 = never heard it, 7 = can sing/hum along)
