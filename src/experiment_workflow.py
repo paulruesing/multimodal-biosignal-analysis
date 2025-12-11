@@ -22,6 +22,7 @@ from src.pipeline.measurements_and_interactive_visuals import dummy_sampling_pro
     plot_input_view, qtc_control_master_view, dynamometer_force_mapping, plot_onboarding_form, \
     plot_pretrial_familiarity_check, plot_posttrial_rating, plot_breakout_screen, \
     accuracy_sampler, plot_performance_view
+from src.utils.multiprocessing_tools import save_terminate_process
 
 
 ### MULTIPROCESSING IMPLEMENTATION:
@@ -175,20 +176,6 @@ def start_experiment_processes(
                 },
         name="MasterDisplayProcess")
 
-    filemgmt.assert_dir(personal_data_dir)
-    onboarding_process = multiprocessing.Process(
-        target=plot_onboarding_form,
-        args=(personal_data_dir, shared_questionnaire_str,),
-        kwargs={'instrument_question_str': instrument_question_str,
-                'listening_habit_question': listening_habit_question, 'listening_habit_options': listening_habit_options,
-                'athletic_ability_question_str': athletic_ability_question_str,
-                'health_questions_intro_str': health_questions_intro_str,
-                'known_diseases_question_str': known_diseases_question_str,
-                'motor_symptoms_question_str': motor_symptoms_question_str,
-                'medication_question_str': medication_question_str,
-                },
-        name="OnboardingFormProcess")
-
     global mvc; mvc = initial_mvc
     def calibrate_mvc():
         # 0) ensure saving dir exists:
@@ -297,14 +284,31 @@ def start_experiment_processes(
         while master_displayer.is_alive():
             ## Registration Phase
             if start_onboarding_event.is_set():
+                # define process:
+                filemgmt.assert_dir(personal_data_dir)
+                onboarding_process = multiprocessing.Process(
+                    target=plot_onboarding_form,
+                    args=(personal_data_dir, shared_questionnaire_str,),
+                    kwargs={'instrument_question_str': instrument_question_str,
+                            'listening_habit_question': listening_habit_question,
+                            'listening_habit_options': listening_habit_options,
+                            'athletic_ability_question_str': athletic_ability_question_str,
+                            'health_questions_intro_str': health_questions_intro_str,
+                            'known_diseases_question_str': known_diseases_question_str,
+                            'motor_symptoms_question_str': motor_symptoms_question_str,
+                            'medication_question_str': medication_question_str,
+                            },
+                    name="OnboardingFormProcess")
+                # start process:
                 if not onboarding_process.is_alive():
                     print("Starting onboarding process!")
                     onboarding_process.start()
                     # wait for process to die before taking new commands:
                     while onboarding_process.is_alive():
-                        pass
-                    else:
-                        start_onboarding_event.clear()
+                        time.sleep(.1)  # don't check too often
+
+                    start_onboarding_event.clear()
+                    mptools.save_terminate_process(onboarding_process)
 
 
             ## Calibration Phase
@@ -363,6 +367,9 @@ def start_experiment_processes(
                     performance_displayer.start()
 
                 start_sampling_event.clear()
+
+                status_msg = "Start spotify now! (for music stimuli)"
+                print(status_msg); shared_questionnaire_str.write(status_msg)
 
 
             if start_test_motor_task_event.is_set():
@@ -436,10 +443,18 @@ def start_experiment_processes(
                             #     "Duration [ms]": 263826.0,
                             #     "Category": "Familiar Groovy",
                             #     "Category Index": 0
+                            #     "BPM", "Genre", "File Title" are also keys, if such are defined in the music config
                             # }
 
-                        # todo: include other information, calculate bpm
+                        try:  # infer BPM
+                            current_bpm = temp_dict['BPM']
+                        except KeyError:
+                            status_msg = "[WARNING] Couldn't derive BPM, using standard BPM of 120 now."
+                            print(status_msg); shared_questionnaire_str.write(status_msg)
+                            current_bpm = 120
+                            time.sleep(1)  # for controller to notice
 
+                        # storing song information:
                         print(f"Starting song_{song_counter:03}. Song info: ", temp_dict)
                         save_path = current_song_data_dir / filemgmt.file_title(f"song_{song_counter:03} information", ".json")
                         with open(save_path, "w") as json_file:  # save as json file
@@ -447,9 +462,12 @@ def start_experiment_processes(
                         print('Saved song information to ', save_path)
 
                         # allow for relative target:
+                        song_freq_Hz = current_bpm / 60
                         if use_relative_target_freq:
-                            # todo: calculate relative target frequency (use_relative_target_freq, ratio_target_sine_freq_bpm)
-                            raise NotImplementedError("Relative target frequency not implemented yet.")
+                            target_freq = ratio_target_sine_freq_bpm * song_freq_Hz
+                            status_msg = f"Song BPM is {current_bpm:.2f} (= {song_freq_Hz:.2f}Hz) -> Task Frequency: {target_freq:.2f}Hz (factor {ratio_target_sine_freq_bpm:.2f})"
+                            print(status_msg); shared_questionnaire_str.write(status_msg)
+
                         else: target_freq = target_sine_freq_abs
 
                         # pretrial_familiarity_check:
@@ -522,7 +540,6 @@ def start_experiment_processes(
                             kwargs={'measurement_dict_label': 'fsr',
 
                                     'target_value': (target_sine_min, target_sine_max, target_freq),  # target value as sine wave with .1 Hz
-                                    # todo: change target frequency based on music characteristics (if not silent)
                                     'target_corridor': target_display_corridor,
 
                                     'include_gauge': True,
@@ -555,7 +572,7 @@ def start_experiment_processes(
 
                         # start motor task:
                         if not dynamic_motor_task.is_alive():  # dont start twice
-                            status_msg = f"Starting motor task process with target frequency {target_freq}Hz!"
+                            status_msg = f"Starting motor task process with target frequency {target_freq:.2f}Hz!"
                             print(status_msg); shared_questionnaire_str.write(status_msg)
                             dynamic_motor_task.start()
                         # start accuracy sampling:
@@ -643,7 +660,6 @@ def start_experiment_processes(
         except NameError:
             pass
 
-        mptools.save_terminate_process(onboarding_process)
         mptools.save_terminate_process(gsr_displayer, gsr_displayer_shutdown_event)
         mptools.save_terminate_process(ecg_displayer, ecg_displayer_shutdown_event)
         mptools.save_terminate_process(performance_displayer, performance_displayer_shutdown_event)
