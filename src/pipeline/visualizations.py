@@ -11,6 +11,7 @@ from matplotlib.animation import FuncAnimation
 from typing import Callable, Literal, Tuple
 import multiprocessing
 import os
+from scipy.stats import gaussian_kde
 import math
 
 import src.utils.file_management as filemgmt
@@ -550,3 +551,183 @@ def plot_spectrogram(
 
     plt.show(block=not continue_code)
     return fig, ax
+
+
+def plot_scatter(x, y, x_label: str | None = None, y_label: str | None = None,
+                 category_list: list | None = None, category_label: str | None = None,
+                 cmap: str | list[str] = 'Set1', plot_size=(8, 8),
+                 marker_size: float = 25,
+                 include_kdes: bool = True, kde_alpha: float = 0.5,
+                 categorical_kdes: bool = True,
+                 add_kde_legend: bool = False,
+                 save_dir: str | Path | None = None):
+    """Scatter plot with categorical coloring and optional marginal KDE distributions.
+
+    Parameters
+    ----------
+    x : array-like
+        X-axis values.
+    y : array-like
+        Y-axis values.
+    x_label : str, optional
+        Label for x-axis.
+    y_label : str, optional
+        Label for y-axis.
+    category_list : list, optional
+        Categorical values (str or numeric) for coloring. If None, uses single color.
+    category_label : str, optional
+        Legend title for categories.
+    cmap : str or list[str], default 'Set1'
+        Colormap name (e.g., 'viridis') or list of color strings.
+    plot_size : tuple, default (8, 8)
+        Figure size as (width, height).
+    include_kdes : bool, default True
+        Whether to include marginal KDE distributions.
+    kde_alpha : float, default 0.5
+        Alpha transparency for KDE fill (0-1).
+    categorical_kdes : bool, default True
+        If True and category_list is provided, plot separate KDE for each category.
+    add_kde_legend : bool, default False
+        If True, add legend to KDE marginal axes.
+    save_dir : str | Path, optional
+        Directory to save figure. If None, doesn't save.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        Figure object.
+    ax : matplotlib.axes.Axes
+        Main scatter axes object.
+    """
+    from scipy.stats import gaussian_kde
+
+    # =========================================================================
+    # CREATE FIGURE AND AXES LAYOUT
+    # =========================================================================
+
+    fig = plt.figure(figsize=plot_size)
+
+    if include_kdes:
+        # Create 2x2 gridspec with marginal KDE axes
+        gs = fig.add_gridspec(2, 2, height_ratios=[1, 4], width_ratios=[4, 1],
+                              hspace=0.05, wspace=0.05)
+        ax_main = fig.add_subplot(gs[1, 0])
+        ax_top = fig.add_subplot(gs[0, 0], sharex=ax_main)
+        ax_right = fig.add_subplot(gs[1, 1], sharey=ax_main)
+    else:
+        # Simple single axes layout
+        ax_main = fig.add_subplot(1, 1, 1)
+
+    # =========================================================================
+    # PLOT SCATTER POINTS WITH OPTIONAL CATEGORIES
+    # =========================================================================
+
+    if category_list is None:
+        # No categories: single color scatter
+        ax_main.scatter(x, y, s=marker_size, color='steelblue', alpha=0.7)
+        colors = None
+        unique_cats = None
+    else:
+        # Get unique categories and map to color indices
+        unique_cats = sorted(set(category_list))
+        cat_to_idx = {cat: i for i, cat in enumerate(unique_cats)}
+        indices = [cat_to_idx[cat] for cat in category_list]
+
+        # Get colors from colormap
+        if isinstance(cmap, str):
+            colors = plt.cm.get_cmap(cmap, len(unique_cats))(
+                np.linspace(0, 1, len(unique_cats))
+            )
+        else:
+            colors = cmap[:len(unique_cats)]
+
+        # Plot scatter with category colors
+        point_colors = [colors[idx] for idx in indices]
+        ax_main.scatter(x, y, c=point_colors, s=marker_size)
+
+        # Create legend for scatter plot
+        from matplotlib.lines import Line2D
+        handles = [Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[i],
+                          markersize=8, label=str(cat))
+                   for i, cat in enumerate(unique_cats)]
+        ax_main.legend(handles=handles, title=category_label, loc='best')
+
+    # =========================================================================
+    # PLOT MARGINAL KDE DISTRIBUTIONS
+    # =========================================================================
+
+    if include_kdes:
+        if categorical_kdes and category_list is not None:
+            # Plot separate KDE for each category
+            x_range = np.linspace(np.asarray(x).min(), np.asarray(x).max(), 200)
+            y_range = np.linspace(np.asarray(y).min(), np.asarray(y).max(), 200)
+
+            for i, cat in enumerate(unique_cats):
+                mask = np.array(category_list) == cat
+                x_cat = np.asarray(x)[mask]
+                y_cat = np.asarray(y)[mask]
+
+                # Plot X-axis marginal KDE (top)
+                if len(x_cat) > 1:  # Need at least 2 points for KDE
+                    kde_x = gaussian_kde(x_cat)
+                    ax_top.fill_between(x_range, kde_x(x_range), alpha=kde_alpha,
+                                        color=colors[i],
+                                        label=str(cat) if add_kde_legend else None)
+
+                # Plot Y-axis marginal KDE (right)
+                if len(y_cat) > 1:
+                    kde_y = gaussian_kde(y_cat)
+                    ax_right.fill_betweenx(y_range, kde_y(y_range), alpha=kde_alpha,
+                                           color=colors[i],
+                                           label=str(cat) if add_kde_legend else None)
+
+            # Add legends only if labels were assigned
+            if add_kde_legend:
+                ax_top.legend(loc='upper right', fontsize=8)
+                ax_right.legend(loc='upper right', fontsize=8)
+        else:
+            # Plot overall KDE (no categories or categorical_kdes=False)
+            x_range = np.linspace(np.asarray(x).min(), np.asarray(x).max(), 200)
+            kde_x = gaussian_kde(x)
+            ax_top.fill_between(x_range, kde_x(x_range), alpha=kde_alpha,
+                                color='steelblue')
+
+            y_range = np.linspace(np.asarray(y).min(), np.asarray(y).max(), 200)
+            kde_y = gaussian_kde(y)
+            ax_right.fill_betweenx(y_range, kde_y(y_range), alpha=kde_alpha,
+                                   color='steelblue')
+
+        # Configure KDE axes
+        ax_top.set_ylabel('Density')
+        ax_top.tick_params(labelbottom=False)
+        ax_right.set_xlabel('Density')
+        ax_right.tick_params(labelleft=False)
+
+    # =========================================================================
+    # CONFIGURE MAIN AXES AND LAYOUT
+    # =========================================================================
+
+    ax_main.set_xlabel(x_label)
+    ax_main.set_ylabel(y_label)
+
+    # Use subplots_adjust for gridspec layouts to avoid tight_layout warnings
+    if include_kdes:
+        plt.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.1,
+                            hspace=0.05, wspace=0.05)
+    else:
+        plt.tight_layout()
+
+    # =========================================================================
+    # SAVE FIGURE IF DIRECTORY PROVIDED
+    # =========================================================================
+
+    if save_dir is not None:
+        smart_save_fig(save_dir,
+                       title=f"Scatter_KDEs_x_{x_label}_y_{y_label}")
+
+    plt.show()
+
+    return fig, ax_main
+
+
+
