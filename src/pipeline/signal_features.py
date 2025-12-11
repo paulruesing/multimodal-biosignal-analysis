@@ -3,8 +3,11 @@ from scipy.interpolate import interp1d
 from typing import Literal
 from scipy import signal
 from tqdm import tqdm
+from pathlib import Path
+import matplotlib.pyplot as plt
 
 import src.pipeline.visualizations as visualizations
+from src.pipeline.visualizations import smart_save_fig
 
 FREQUENCY_BANDS = {
     'delta': (0.5, 4),
@@ -333,3 +336,251 @@ if __name__ == '__main__':
         value_label="Power [V^2/Hz]" if not do_log_transform else "Power [V^2/Hz] [log10]",
         plot_title="EEG PSD (Beta-Band)"
     )
+
+
+def compute_feature_mi_importance(feature_array, target_array, feature_labels,
+                                  target_label: str = 'Target', target_type: str = 'auto',
+                                  feature_type: str = 'auto', random_state: int = 42,
+                                  figsize: tuple = (10, 6), sort_by_importance: bool = True,
+                                  include_barplot: bool = True, plot_save_dir: str | Path | None = None):
+    """Compute and plot mutual information feature importance.
+
+    Parameters
+    ----------
+    feature_array : array-like or DataFrame
+        Feature matrix (n_samples, n_features). Can be continuous or discrete/categorical.
+    target_array : array-like
+        Target values (n_samples,). Can be continuous or discrete.
+    feature_labels : list[str]
+        Names of features.
+    target_label : str, default 'Target'
+        Label for target variable in plot title.
+    target_type : str, default 'auto'
+        'discrete', 'continuous', or 'auto' (infers from data).
+    feature_type : str, default 'auto'
+        'discrete', 'continuous', or 'auto' (infers per-feature).
+    random_state : int, default 42
+        Random state for MI computation.
+    figsize : tuple, default (10, 6)
+        Figure size.
+    sort_by_importance : bool, default True
+        Whether to sort bars by MI score.
+    include_barplot : bool, default True
+        Whether to create and display barplot.
+    plot_save_dir : str | Path, optional
+        Directory to save plot. If None, doesn't save.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure or None
+        Figure object if include_barplot=True, else None.
+    ax : matplotlib.axes.Axes or None
+        Axes object if include_barplot=True, else None.
+    feature_importance : dict
+        Mapping of feature names to MI scores.
+
+    Notes
+    -----
+    - String/object dtype columns are automatically detected as discrete
+    - Mutual information scores are normalized [0, 1]
+    - Uses sklearn's mutual_info_classif for discrete targets,
+      mutual_info_regression for continuous targets
+    """
+    from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
+    from sklearn.preprocessing import LabelEncoder
+    import src.pipeline.visualizations as visualizations
+
+    # =========================================================================
+    # CONVERT TO NUMPY ARRAYS
+    # =========================================================================
+    if hasattr(feature_array, 'values'):
+        feature_array = feature_array.values
+
+    feature_array = np.asarray(feature_array)
+    target_array_original = np.asarray(target_array)  # Preserve original for reference
+
+    # =========================================================================
+    # HELPER FUNCTIONS FOR TYPE DETECTION
+    # =========================================================================
+
+    def is_categorical_dtype(arr):
+        """Check if array contains categorical/string data.
+
+        Parameters
+        ----------
+        arr : array-like
+            Input array to check.
+
+        Returns
+        -------
+        bool
+            True if array is object/string dtype, False otherwise.
+        """
+        arr = np.asarray(arr)
+        return arr.dtype == object or arr.dtype.kind in ('U', 'S')
+
+    def infer_discrete_vs_continuous(arr, unique_threshold_ratio=0.05):
+        """Infer if numeric array should be treated as discrete or continuous.
+
+        Parameters
+        ----------
+        arr : array-like
+            Numeric array.
+        unique_threshold_ratio : float
+            If unique_values / n_samples < threshold_ratio, treat as discrete.
+
+        Returns
+        -------
+        str
+            'discrete' or 'continuous'.
+        """
+        arr = np.asarray(arr, dtype=float)
+        n_unique = len(np.unique(arr))
+        ratio = n_unique / len(arr)
+        return 'discrete' if ratio < unique_threshold_ratio else 'continuous'
+
+    # =========================================================================
+    # ENCODE TARGET
+    # =========================================================================
+
+    if target_type == 'auto':
+        # Detect categorical first (before numeric conversion)
+        if is_categorical_dtype(target_array_original):
+            target_type = 'discrete'
+            target_array_encoded = LabelEncoder().fit_transform(target_array_original)
+        else:
+            # Numeric data: infer based on unique value ratio
+            try:
+                target_array_numeric = target_array_original.astype(float)
+                target_type = infer_discrete_vs_continuous(target_array_numeric)
+                target_array_encoded = target_array_numeric
+            except (ValueError, TypeError):
+                # Fallback: treat as discrete if conversion fails
+                target_type = 'discrete'
+                target_array_encoded = LabelEncoder().fit_transform(target_array_original)
+    else:
+        # Manual type specification provided
+        if target_type == 'discrete':
+            if is_categorical_dtype(target_array_original):
+                target_array_encoded = LabelEncoder().fit_transform(target_array_original)
+            else:
+                target_array_encoded = target_array_original.astype(int)
+        else:  # continuous
+            target_array_encoded = target_array_original.astype(float)
+
+    # =========================================================================
+    # ENCODE FEATURES
+    # =========================================================================
+
+    encoded_features = np.zeros((feature_array.shape[0], feature_array.shape[1]), dtype=float)
+    feature_is_categorical = np.zeros(feature_array.shape[1], dtype=bool)
+
+    # Encode each feature column
+    for col_idx in range(feature_array.shape[1]):
+        col_data = feature_array[:, col_idx]
+
+        # Check if categorical
+        if is_categorical_dtype(col_data):
+            feature_is_categorical[col_idx] = True
+            le = LabelEncoder()
+            encoded_features[:, col_idx] = le.fit_transform(col_data)
+        else:
+            # Try to convert to numeric
+            try:
+                encoded_features[:, col_idx] = col_data.astype(float)
+                feature_is_categorical[col_idx] = False
+            except (ValueError, TypeError):
+                # If numeric conversion fails, treat as categorical
+                feature_is_categorical[col_idx] = True
+                le = LabelEncoder()
+                encoded_features[:, col_idx] = le.fit_transform(col_data)
+
+    # =========================================================================
+    # INFER FEATURE TYPE (if auto)
+    # =========================================================================
+
+    if feature_type == 'auto':
+        # Determine feature type based on per-feature analysis
+        # A feature is discrete if: (a) categorical dtype OR (b) numeric with low cardinality
+        feature_types = []
+        for col_idx in range(encoded_features.shape[1]):
+            if feature_is_categorical[col_idx]:
+                feature_types.append('discrete')
+            else:
+                # Numeric feature: check cardinality
+                feature_types.append(infer_discrete_vs_continuous(encoded_features[:, col_idx]))
+
+        # Overall feature type: 'discrete' if majority are discrete, else 'continuous'
+        n_discrete = sum(1 for ft in feature_types if ft == 'discrete')
+        feature_type = 'discrete' if n_discrete > len(feature_types) / 2 else 'continuous'
+
+    # =========================================================================
+    # COMPUTE MUTUAL INFORMATION
+    # =========================================================================
+
+    # Select MI function based on feature and target types
+    if feature_type == 'discrete' and target_type == 'discrete':
+        mi_scores = mutual_info_classif(encoded_features, target_array_encoded.astype(int),
+                                        random_state=random_state)
+    elif feature_type == 'discrete' and target_type == 'continuous':
+        mi_scores = mutual_info_regression(encoded_features, target_array_encoded.astype(float),
+                                           random_state=random_state)
+    elif feature_type == 'continuous' and target_type == 'discrete':
+        mi_scores = mutual_info_classif(encoded_features, target_array_encoded.astype(int),
+                                        random_state=random_state)
+    else:  # continuous features, continuous target
+        mi_scores = mutual_info_regression(encoded_features, target_array_encoded.astype(float),
+                                           random_state=random_state)
+
+    # Create importance dictionary
+    feature_importance = dict(zip(feature_labels, mi_scores))
+
+    # Print scores for inspection
+    print(f"Feature MI scores ({feature_type} features <-> {target_type} target):")
+    print({k: f"{v:.4f}" for k, v in feature_importance.items()})
+
+    # =========================================================================
+    # SORT IF REQUESTED
+    # =========================================================================
+
+    if sort_by_importance:
+        feature_importance = dict(sorted(feature_importance.items(),
+                                         key=lambda x: x[1], reverse=True))
+
+    # =========================================================================
+    # CREATE BARPLOT (if requested)
+    # =========================================================================
+
+    if include_barplot:
+        fig, ax = plt.subplots(figsize=figsize)
+        features = list(feature_importance.keys())
+        scores = list(feature_importance.values())
+
+        # Create bars
+        bars = ax.bar(range(len(features)), scores, color='steelblue', alpha=0.7, edgecolor='navy')
+
+        # Configure axes
+        ax.set_xlabel('Features', fontsize=11, fontweight='bold')
+        ax.set_ylabel('Mutual Information Score', fontsize=11, fontweight='bold')
+        ax.set_title(f'Feature Importance (MI: Feature ↔ {target_label})',
+                     fontsize=12, fontweight='bold')
+        ax.set_xticks(range(len(features)))
+        ax.set_xticklabels(features, rotation=45, ha='right')
+
+        # Add value labels on bars
+        for bar, score in zip(bars, scores):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width() / 2, height + max(scores) * 0.01,
+                    f'{score:.3f}', ha='center', va='bottom', fontsize=9)
+
+        plt.tight_layout()
+
+        # Save if directory provided
+        if plot_save_dir is not None:
+            visualizations.smart_save_fig(plot_save_dir, "Mutual_Information_Barplot")
+
+        plt.show()
+
+        return fig, ax, feature_importance
+
+    return feature_importance
