@@ -19,7 +19,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, TextBox, RadioButtons, Slider
-from matplotlib.animation import FuncAnimation
+import matplotlib.animation as animation
 from pynput import keyboard
 from scipy.optimize import curve_fit
 from typing import Callable, Literal, Optional
@@ -35,6 +35,18 @@ from pathlib import Path
 import pandas as pd
 
 ############### MATPLOTLIB PREP ###############
+# prevent AttributeErrors if cancelling animation:
+_original_step = animation.Animation._step
+def patched_step(self):
+    """Override _step to handle None event_source gracefully."""
+    if self.event_source is None:
+        return False  # Stop animation cleanly
+    try:
+        return _original_step(self)
+    except AttributeError:  # sometimes TkAgg backend causes AttributeErrors upon animation closing
+        return False  # Catch interval error, stop safely
+animation.Animation._step = patched_step
+
 matplotlib.use('Qt5Agg')  # TkAgg
 theme: Literal['dark', 'light'] = 'dark'
 
@@ -422,12 +434,15 @@ class AnimationManager:
 
     def start(self, fig, update_func, interval, init_func=None):
         self.fig = fig
-        self.anim = FuncAnimation(fig, update_func, interval=interval,
+        self.anim = animation.FuncAnimation(fig, update_func, interval=interval,
                                   blit=False, repeat=True, init_func=init_func,
                                   cache_frame_data=False)  # CRITICAL: disable frame caching)
 
     def stop(self):
         if self.anim is not None:  # first stop timer
+            self.anim.pause()  # Pause timer first
+            self.anim.event_source.remove()  # Remove event source
+
             es = getattr(self.anim, "event_source", None)
             if es is not None:
                 es.stop()
@@ -726,8 +741,8 @@ def plot_onboarding_form(result_json_dir: str | Path,
 
     ### PLOT
     # initialise:
-    fig, ax = plt.subplots(figsize=(9, 8))
-    fig.subplots_adjust(bottom=0.25)  # space for widgets
+    fig, ax = plt.subplots(figsize=(24, 12))
+    fig.subplots_adjust(top=.93, bottom=0.25)  # space for widgets
     manager = plt.get_current_fig_manager()  # change TkAgg window title
     manager.set_window_title("Participant Registration Form")
     ax.axis('off')  # hide axes (borders and ticklabels)
@@ -744,12 +759,12 @@ def plot_onboarding_form(result_json_dir: str | Path,
     # define text boxes (callback_function, ax, object, on_submit(func)):
     # full name:
     name_textbox = create_textbox(fig, input_dict, key="Name", label="Full Name (FIRST LAST):",
-                                  position=(0.55, .83, 0.39, text_box_height),
+                                  position=(0.55, .88, 0.39, text_box_height),
                                   button_background_color=button_background_color,
                                   button_hover_color=button_hover_color,)
     # birthdate: text
     birthdate_textbox = create_textbox(fig, input_dict, key="Birthdate", label="Birthdate (DD/MM/YYYY):",
-                                       position=(0.55, .77, 0.39, text_box_height),
+                                       position=(0.55, .82, 0.39, text_box_height),
                                        button_background_color=button_background_color,
                                        button_hover_color=button_hover_color,)
 
@@ -757,26 +772,26 @@ def plot_onboarding_form(result_json_dir: str | Path,
     gender_dropdown, gender_dropdown_label = create_radio_buttons(
         fig, ax, input_dict, key="Gender", label="Gender:",
         options=["Male", "Female", "Non-binary"], skip_value="Not selected", active_index=3,
-        label_position=(.53, .74), position=(0.51, .675, .4, .08),
+        label_position=(.53, .76), position=(0.51, .725, .4, .08),
         radio_button_selected_color=button_hover_color, horizontal=False
     )
     # dominant hand: left / right
     dominant_hand_dropdown, dominand_hand_dropdown_label = create_radio_buttons(
         fig, ax, input_dict, key="Dominant hand", label="Dominant Hand:",
         options=["Left", "Right"], skip_value="Not selected", active_index=2,
-        label_position=(.53, .635), position=(0.51, .615, .39, .065),
+        label_position=(.53, .66), position=(0.51, .665, .39, .065),
         radio_button_selected_color=button_hover_color, horizontal=False
     )
 
     # "Do you play an instrument? If yes, which:"
     instrument_textbox = create_textbox(fig, input_dict, key="Instrument", label=instrument_question_str,
-                                        position=(0.55, 0.56, 0.39, text_box_height),
+                                        position=(0.55, 0.61, 0.39, text_box_height),
                                         button_background_color=button_background_color,
                                         button_hover_color=button_hover_color,)
 
     # "If yes, how well:" 1-7
     musical_skill_slider = create_slider(fig, input_dict, key="Musical skill", label='If yes, how well:',
-                                 position=(0.55, 0.5, 0.39, slider_height),
+                                 position=(0.55, 0.55, 0.39, slider_height),
                                  vmin=0, vmax=7, valinit=0, valstep=1, valfmt="%.0f",
                                  slider_bar_color=slider_bar_color, slider_background_color=slider_background_color,)
 
@@ -784,38 +799,39 @@ def plot_onboarding_form(result_json_dir: str | Path,
     listening_habit_dropdown, listening_habit_dropdown_label = create_radio_buttons(
         fig, ax, input_dict, key="Listening habit", label=listening_habit_question,
         options=list(listening_habit_options), skip_value="Not selected", active_index=len(listening_habit_options),
-        label_position=(.53, .32), position=(0.51, .4, .39, .1),
+        label_position=(.53, .37), position=(0.51, .45, .39, .1),
         radio_button_selected_color=button_hover_color)
 
     # how athletic are you:
     athleticism_slider = create_slider(fig, input_dict, key="Athleticism",
                                        label=strconv.enter_line_breaks(athletic_ability_question_str, 70, 10),
-                                 position=(0.55, 0.35, 0.39, slider_height),
+                                 position=(0.55, 0.4, 0.39, slider_height),
                                  vmin=0, vmax=7, valinit=0, valstep=1, valfmt="%.0f",
                                  slider_bar_color=slider_bar_color, slider_background_color=slider_background_color, )
 
     # health related questions:
     health_intro = ax.text(
         -.125, .09,
-        strconv.enter_line_breaks(health_questions_intro_str, 125, 10),
+        strconv.enter_line_breaks(health_questions_intro_str, 190, 10),
         transform=ax.transAxes, va='center', ha='left'
     )
 
+    max_letters_health_labels = 90
     condition_textbox = create_textbox(fig, input_dict, key="Condition",
-                                       label=strconv.enter_line_breaks(known_diseases_question_str, 50, 10),
+                                       label=strconv.enter_line_breaks(known_diseases_question_str, max_letters_health_labels, 10),
                                        position=(0.55, 0.22, 0.39, text_box_height),
                                        button_background_color=button_background_color,
                                        button_hover_color=button_hover_color,)
 
     symptom_textbox = create_textbox(fig, input_dict, key="Motor Symptoms",
-                                       label=strconv.enter_line_breaks(motor_symptoms_question_str, 50, 10),
+                                       label=strconv.enter_line_breaks(motor_symptoms_question_str, max_letters_health_labels, 10),
                                        position=(0.55, 0.15
                                                      , 0.39, text_box_height),
                                        button_background_color=button_background_color,
                                        button_hover_color=button_hover_color, )
 
     medication_textbox = create_textbox(fig, input_dict, key="Condition",
-                                     label=strconv.enter_line_breaks(medication_question_str, 50, 10),
+                                     label=strconv.enter_line_breaks(medication_question_str, max_letters_health_labels, 10),
                                      position=(0.55, 0.08
                                                    , 0.39, text_box_height),
                                      button_background_color=button_background_color,
@@ -1088,45 +1104,49 @@ def plot_breakout_screen(time_sec: float, title="Have a break. Please wait.",
                          anim_shutdown_event=None):
     """ Plot countdown during break. Figure clouses after time_sec. """
     ### PLOT
-    with AnimationManager(anim_shutdown_event) as anim_mgr:
-        # initialise:
-        fig, ax = plt.subplots(figsize=(6, 3))
-        manager = plt.get_current_fig_manager()  # change TkAgg window title
-        manager.set_window_title("Breakout Screen")
-        ax.axis('off')  # hide axes (borders and ticklabels)
-        ax.set_title(title)
+    try:
+        with AnimationManager(anim_shutdown_event) as anim_mgr:
+            # initialise:
+            fig, ax = plt.subplots(figsize=(6, 3))
+            manager = plt.get_current_fig_manager()  # change TkAgg window title
+            manager.set_window_title("Breakout Screen")
+            ax.axis('off')  # hide axes (borders and ticklabels)
+            ax.set_title(title)
 
-        # countdown:
-        #global remaining_time
-        remaining_time = time_sec
-        countdown_text = fig.text(0.3, 0.4, f"Remaining waiting time: {remaining_time:.2f}s", ha='left', va='center', fontsize=10)
-
-        # animation:
-        display_refresh_rate_hz = 10
-        #global display_start_time
-        display_start_time = time.time()  # store to compute remaining time
-        def update(frame):
-            """ update view and fetch new observation. (frame is required although unused) """
-            if anim_mgr.check_shutdown(): return 1,  # allow for forced shutdown
-
-            # reduce countdown:
+            # countdown:
             #global remaining_time
+            remaining_time = time_sec
+            countdown_text = fig.text(0.3, 0.4, f"Remaining waiting time: {remaining_time:.2f}s", ha='left', va='center', fontsize=10)
+
+            # animation:
+            display_refresh_rate_hz = 10
             #global display_start_time
-            remaining_time = time_sec - (time.time() - display_start_time)  # total time - passed time
+            display_start_time = time.time()  # store to compute remaining time
+            def update(frame):
+                """ update view and fetch new observation. (frame is required although unused) """
+                if anim_mgr.check_shutdown(): return 1,  # allow for forced shutdown
 
-            # close figure upon countdown end:
-            if remaining_time <= 0.0: anim_mgr.stop()
+                # reduce countdown:
+                #global remaining_time
+                #global display_start_time
+                remaining_time = time_sec - (time.time() - display_start_time)  # total time - passed time
 
-            # else update text:
-            countdown_text.set_text(f"Remaining waiting time: {remaining_time:.2f}s")
+                # close figure upon countdown end:
+                if remaining_time <= 0.0: anim_mgr.stop()
 
-            # redraw and return:
-            fig.canvas.draw_idle()
-            return countdown_text,
+                # else update text:
+                countdown_text.set_text(f"Remaining waiting time: {remaining_time:.2f}s")
 
-        # run and show animation:
-        anim_mgr.start(fig, update, int(1000 / display_refresh_rate_hz))
-        plt.show()
+                # redraw and return:
+                fig.canvas.draw_idle()
+                return countdown_text,
+
+            # run and show animation:
+            anim_mgr.start(fig, update, int(1000 / display_refresh_rate_hz))
+            plt.show()
+
+    except AttributeError:  # sometimes TkAgg backend causes AttributeErrors upon animation closing
+        print("Animation ended safely.")
 
 
 def plot_pretrial_familiarity_check(result_json_dir: str | Path,  # dir to save results to
@@ -1356,281 +1376,285 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
 
     Notes
     -----
-    - Uses matplotlib's FuncAnimation for live updating views.
+    - Uses matplotlib's animation.FuncAnimation for live updating views.
     - Provides a pause/continue button to control updating.
     - Implements exponential moving average smoothing internally via the sampling process.
     - Gauge is a semicircular polar plot showing current input relative to y-limits.
     - Handles dynamic rescaling of plots if incoming values exceed current y-limits.
     """
-    with AnimationManager(anim_shutdown_event) as anim_mgr:
-        ### PREPARE PLOT
-        global dynamic_y_limit  # variables that are dynamically adjusted during update() need to be defined globally
-        dynamic_y_limit = y_limits
-        global update_counter; update_counter = 0  # define display refreshment counter and sanity check
-        if display_refresh_rate_hz > 20: print(f"Fps are {display_refresh_rate_hz}, which is > 20 and potentially leads to rendering issues.")
+    try:
+        with AnimationManager(anim_shutdown_event) as anim_mgr:
+            ### PREPARE PLOT
+            global dynamic_y_limit  # variables that are dynamically adjusted during update() need to be defined globally
+            dynamic_y_limit = y_limits
+            global update_counter; update_counter = 0  # define display refreshment counter and sanity check
+            if display_refresh_rate_hz > 20: print(f"Fps are {display_refresh_rate_hz}, which is > 20 and potentially leads to rendering issues.")
 
-        # initial data:
-        x = np.linspace(-display_window_len_s, 0, display_window_len_s*display_refresh_rate_hz)
-        global y; y = np.zeros_like(x)
+            # initial data:
+            x = np.linspace(-display_window_len_s, 0, display_window_len_s*display_refresh_rate_hz)
+            global y; y = np.zeros_like(x)
 
-        if isinstance(target_value, tuple):  # for changing (sine) target
-            sine_min, sine_max, sine_freq_hz = target_value  # tuple structure
+            if isinstance(target_value, tuple):  # for changing (sine) target
+                sine_min, sine_max, sine_freq_hz = target_value  # tuple structure
 
-            # shown y values:
-            global target_y; target_y = np.zeros_like(x)  # will be updated later, same as measurement y
+                # shown y values:
+                global target_y; target_y = np.zeros_like(x)  # will be updated later, same as measurement y
 
-            # sine values (with distinct min., max. and freq. as defined in target_value) to fetch new targets from:
-            sine_frames = int(display_refresh_rate_hz // sine_freq_hz)  # how many frames per sine wave (this captures sine_freq)
-            target_sine_x = np.linspace(0, 2 * np.pi, sine_frames)  # whole rad range split on that amount of frames
-            global target_sine_y  # these will be read out during update
-            target_sine_y = sine_min + (np.sin(target_sine_x)*.5 + .5) * (sine_max - sine_min)  # scaled to min and max
+                # sine values (with distinct min., max. and freq. as defined in target_value) to fetch new targets from:
+                sine_frames = int(display_refresh_rate_hz // sine_freq_hz)  # how many frames per sine wave (this captures sine_freq)
+                target_sine_x = np.linspace(0, 2 * np.pi, sine_frames)  # whole rad range split on that amount of frames
+                global target_sine_y  # these will be read out during update
+                target_sine_y = sine_min + (np.sin(target_sine_x)*.5 + .5) * (sine_max - sine_min)  # scaled to min and max
 
-        ## LINE PLOT
-        # initialise figure:
-        fig, dummy_ax = plt.subplots(figsize=plot_size)
-        dummy_ax.grid(False)  # Disable grid lines
-        dummy_ax.set_axis_off()  # Turn off the entire polar axis frame
-        fig.suptitle(title)
-        manager = plt.get_current_fig_manager()  # change TkAgg window title
-        manager.set_window_title(window_title)
+            ## LINE PLOT
+            # initialise figure:
+            fig, dummy_ax = plt.subplots(figsize=plot_size)
+            dummy_ax.grid(False)  # Disable grid lines
+            dummy_ax.set_axis_off()  # Turn off the entire polar axis frame
+            fig.suptitle(title)
+            manager = plt.get_current_fig_manager()  # change TkAgg window title
+            manager.set_window_title(window_title)
 
-        # format and initialise line plot:
-        line_ax = fig.add_subplot(122) if include_gauge else fig.add_subplot(111)
-        line_ax.set_xlim(x.min(), x.max())
-        line_ax.set_ylim(*y_limits)
-        line_ax.set_xlabel(x_label)
-        line_ax.set_ylabel(input_unit_label)
-        line_ax.set_title('Rolling Input View')
-
-        # include target:
-        if target_value is not None:
-            if isinstance(target_value, float):  # if fixed
-                target_line = line_ax.axhline(y=target_value, color=target_color, lw=1, label='Target Value')
-                assert y_limits[0] < target_value < y_limits[1]; "target_value must lie within defined y_limits!"
-
-                if target_corridor is not None:  # mark target corridor
-                    target_corridor_line_low = line_ax.axhline(y=target_value - target_corridor/2, color=dark_target_color,
-                                                               alpha=.5, lw=1, label='Target Corridor')
-                    target_corridor_line_low = line_ax.axhline(y=target_value + target_corridor / 2, color=dark_target_color,
-                                                               alpha=.5, lw=1)
-
-            elif isinstance(target_value, tuple):  # if sine-wave
-                target_line, = line_ax.plot([], [], lw=1, color=target_color, label='Target Value')
-                target_end_point, = line_ax.plot([], [], 'go')
-
-                if target_corridor is not None:
-                    target_corridor_line_low, = line_ax.plot([], [], lw=1, alpha=.5, color=dark_target_color, label='Target Corridor')
-                    target_corridor_line_high, = line_ax.plot([], [], lw=1, alpha=.5, color=dark_target_color)
-
-        line, = line_ax.plot([], [], lw=2, color=measurement_color, label='Measurement Value')
-        end_point, = line_ax.plot([], [], 'ro', ms=9)
-
-        ## GAUGE PLOT
-        if include_gauge:  # format and initialise gauge plot:
-            # parameters:
-            gauge_radius = 10  # arbitrary, is scaled anyway
-            n_xticks = 11  # number of ax ticklabels
-            gauge_circumference = 7/4 * np.pi  # rad
-
-            # initialise plot:
-            gauge_ax = fig.add_subplot(121, projection='polar')
-            gauge_ax.set_theta_offset(np.pi * ((gauge_circumference/np.pi-1)/2+1))  # Rotate start for gauge to be open downwards and "laying" on the ground
-            gauge_ax.set_theta_direction(-1)  # Clockwise direction
-            gauge_ax.set_ylim(0, gauge_radius)  # same y-limit as lineplot
-            gauge_ax.grid(False)  # Disable grid lines
-            gauge_ax.set_yticklabels([])  # turn off the radial ax labels
-
-            # annotate ax:
-            gauge_ax.set_xticks(np.linspace(0, gauge_circumference, n_xticks))
-            gauge_ax.set_xticklabels([f"{tick:.2f}" for tick in np.linspace(dynamic_y_limit[0], dynamic_y_limit[1], n_xticks)])
-            gauge_ax.set_xlabel(input_unit_label)
-            gauge_ax.set_title('Force Level')
-
-            # beautify gauge:
-            gauge_ax.spines['polar'].set_visible(False)  # hide polar spine (replaced below) because we don't use full circle
-            angles = np.linspace(0,  gauge_circumference, 100)  # gauge background semicircle
-            radii = np.full_like(angles, gauge_radius)
-            gauge_ax.plot(angles, radii, color='lightgray', linewidth=20, solid_capstyle='round')
-            gauge_ax.bar([0, gauge_circumference], [gauge_radius]*2, width=0.03, color=font_color)  # mark ends
-
-            # initialise current value line:
-            needle_line, = gauge_ax.plot([], [], lw=3, color=measurement_color, label='Current Value')
+            # format and initialise line plot:
+            line_ax = fig.add_subplot(122) if include_gauge else fig.add_subplot(111)
+            line_ax.set_xlim(x.min(), x.max())
+            line_ax.set_ylim(*y_limits)
+            line_ax.set_xlabel(x_label)
+            line_ax.set_ylabel(input_unit_label)
+            line_ax.set_title('Rolling Input View')
 
             # include target:
-            if target_value is not None:  # is set during update anyway so need to differentiate constant and sine here
-                target_needle_line, = gauge_ax.plot([], [], lw=2, color=target_color, label='Target Value')
-                if target_corridor is not None:
-                    target_corridor_low_needle_line, = gauge_ax.plot([], [], lw=1, alpha=.5, color=dark_target_color, label='Target Corridor')
-                    target_corridor_high_needle_line, = gauge_ax.plot([], [], lw=1, alpha=.5, color=dark_target_color)
-
-            # function later required to update values:
-            def convert_y_to_angle(y_value: float) -> float:
-                return (y_value / dynamic_y_limit[1]) * gauge_circumference
-
-        # variable, function and button for pausing:
-        global is_running
-        is_running = True
-
-        def pause_button_click(event):
-            global is_running
-            is_running = not is_running
-            if is_running: button.label.set_text("Pause")
-            else: button.label.set_text("Continue")
-
-        ax_button = plt.axes([0.8, .9, 0.1, 0.04])
-        button = Button(ax_button, 'Pause',
-                               color=button_background_color,
-                               hovercolor=button_hover_color)
-        button.on_clicked(pause_button_click)
-
-        ## gamification
-        global record_accuracy_bool
-        record_accuracy_bool = False  # will be set to True after trial phase, remains False if accuracy_save_dir not defined
-
-        # trial status:
-        trial_status_text = line_ax.text(.0, 1.05, "", transform=line_ax.transAxes)
-
-        ### ANIMATION METHODS
-        def init():
-            # initialise lineplot:
-            line_ax.legend()
-            line.set_data(x, y)  # set data of line
-            end_point.set_data([x.max()], [0])
-
-            if isinstance(target_value, tuple):
-                target_line.set_data(x, target_y)
-                target_end_point.set_data([x.max()], [0])
-
-                if target_corridor is not None:
-                    target_corridor_line_low.set_data(x, target_y)
-                    target_corridor_line_high.set_data(x, target_y)
-
-            if include_gauge:  # initialise gauge
-                gauge_ax.legend()
-                needle_line.set_data([0, 0], [0, gauge_radius])
-                if target_value is not None and isinstance(target_value, float):  # mark target if constant (= float type)
-                    target_needle_line.set_data([0, convert_y_to_angle(target_value)], [0, gauge_radius])
+            if target_value is not None:
+                if isinstance(target_value, float):  # if fixed
+                    target_line = line_ax.axhline(y=target_value, color=target_color, lw=1, label='Target Value')
+                    assert y_limits[0] < target_value < y_limits[1]; "target_value must lie within defined y_limits!"
 
                     if target_corridor is not None:  # mark target corridor
-                        target_corridor_low_needle_line.set_data(
-                            [0, convert_y_to_angle(target_value - target_corridor / 2)], [0, gauge_radius])
-                        target_corridor_high_needle_line.set_data(
-                            [0, convert_y_to_angle(target_value + target_corridor / 2)], [0, gauge_radius])
+                        target_corridor_line_low = line_ax.axhline(y=target_value - target_corridor/2, color=dark_target_color,
+                                                                   alpha=.5, lw=1, label='Target Corridor')
+                        target_corridor_line_low = line_ax.axhline(y=target_value + target_corridor / 2, color=dark_target_color,
+                                                                   alpha=.5, lw=1)
 
-            # return only what's necessary:
-            output_tuple = (line, end_point)  # measurement line and its endpoint
-            if target_value is not None: output_tuple = output_tuple + (target_line,)   # target line
-            if include_gauge:
-                output_tuple = output_tuple + (needle_line,)   # gauge measurement needle
-                if target_value is not None: output_tuple = output_tuple + (target_needle_line,)   # gauge target needle
-            return output_tuple
+                elif isinstance(target_value, tuple):  # if sine-wave
+                    target_line, = line_ax.plot([], [], lw=1, color=target_color, label='Target Value')
+                    target_end_point, = line_ax.plot([], [], 'go')
 
-        if isinstance(target_value, tuple):  # for sine varying target
-            # define global counter (within sine wave data)
-            global current_sine_ind
-            current_sine_ind = 0
+                    if target_corridor is not None:
+                        target_corridor_line_low, = line_ax.plot([], [], lw=1, alpha=.5, color=dark_target_color, label='Target Corridor')
+                        target_corridor_line_high, = line_ax.plot([], [], lw=1, alpha=.5, color=dark_target_color)
 
-        def update(frame):
-            """ update view and fetch new observation. (frame is required although unused) """
-            # check for requested shutdown:
-            if anim_mgr.check_shutdown(): return 1,
+            line, = line_ax.plot([], [], lw=2, color=measurement_color, label='Measurement Value')
+            end_point, = line_ax.plot([], [], 'ro', ms=9)
 
-            global target_y  # global definition at begin of function
+            ## GAUGE PLOT
+            if include_gauge:  # format and initialise gauge plot:
+                # parameters:
+                gauge_radius = 10  # arbitrary, is scaled anyway
+                n_xticks = 11  # number of ax ticklabels
+                gauge_circumference = 7/4 * np.pi  # rad
 
-            # allow for ending of view
-            #if save_accuracy_and_close_event.is_set(): plt.close('all')
+                # initialise plot:
+                gauge_ax = fig.add_subplot(121, projection='polar')
+                gauge_ax.set_theta_offset(np.pi * ((gauge_circumference/np.pi-1)/2+1))  # Rotate start for gauge to be open downwards and "laying" on the ground
+                gauge_ax.set_theta_direction(-1)  # Clockwise direction
+                gauge_ax.set_ylim(0, gauge_radius)  # same y-limit as lineplot
+                gauge_ax.grid(False)  # Disable grid lines
+                gauge_ax.set_yticklabels([])  # turn off the radial ax labels
 
-            # update only if is_running:
-            if is_running:
-                ## MEASUREMENTS
-                with shared_dict_lock:
-                    new_obs = shared_dict[measurement_dict_label]  # retrieve new information
-                if dynamically_update_y_limits:  # update y limit if it doesn't fit
-                    # check if update necessary and change parameters:
-                    global dynamic_y_limit  # this also affects convert_y_to_angle
-                    if new_obs > dynamic_y_limit[1]:
-                        dynamic_y_limit = (dynamic_y_limit[0], new_obs)
-                        update_y_lim = True
+                # annotate ax:
+                gauge_ax.set_xticks(np.linspace(0, gauge_circumference, n_xticks))
+                gauge_ax.set_xticklabels([f"{tick:.2f}" for tick in np.linspace(dynamic_y_limit[0], dynamic_y_limit[1], n_xticks)])
+                gauge_ax.set_xlabel(input_unit_label)
+                gauge_ax.set_title('Force Level')
 
-                    elif new_obs < dynamic_y_limit[0]:
-                        dynamic_y_limit = (new_obs, dynamic_y_limit[1])
-                        update_y_lim = True
-                    else: update_y_lim = False
+                # beautify gauge:
+                gauge_ax.spines['polar'].set_visible(False)  # hide polar spine (replaced below) because we don't use full circle
+                angles = np.linspace(0,  gauge_circumference, 100)  # gauge background semicircle
+                radii = np.full_like(angles, gauge_radius)
+                gauge_ax.plot(angles, radii, color='lightgray', linewidth=20, solid_capstyle='round')
+                gauge_ax.bar([0, gauge_circumference], [gauge_radius]*2, width=0.03, color=font_color)  # mark ends
 
-                    # refresh display:
-                    if update_y_lim:
-                        if include_gauge:  # adjust gauge ticks and target:
-                            gauge_ax.set_xticklabels([f"{tick:.2f}" for tick in np.linspace(dynamic_y_limit[0], dynamic_y_limit[1], n_xticks)])
+                # initialise current value line:
+                needle_line, = gauge_ax.plot([], [], lw=3, color=measurement_color, label='Current Value')
 
-                            if target_value is not None and isinstance(target_value, float):  # constant target
-                                target_needle_line.set_data([0, convert_y_to_angle(target_value)], [0, gauge_radius])
+                # include target:
+                if target_value is not None:  # is set during update anyway so need to differentiate constant and sine here
+                    target_needle_line, = gauge_ax.plot([], [], lw=2, color=target_color, label='Target Value')
+                    if target_corridor is not None:
+                        target_corridor_low_needle_line, = gauge_ax.plot([], [], lw=1, alpha=.5, color=dark_target_color, label='Target Corridor')
+                        target_corridor_high_needle_line, = gauge_ax.plot([], [], lw=1, alpha=.5, color=dark_target_color)
 
-                                if target_corridor is not None:  # mark target corridor
-                                    target_corridor_low_needle_line.set_data(
-                                        [0, convert_y_to_angle(target_value - target_corridor / 2)], [0, gauge_radius])
-                                    target_corridor_high_needle_line.set_data(
-                                        [0, convert_y_to_angle(target_value + target_corridor / 2)], [0, gauge_radius])
+                # function later required to update values:
+                def convert_y_to_angle(y_value: float) -> float:
+                    return (y_value / dynamic_y_limit[1]) * gauge_circumference
 
-                        line_ax.set_ylim(*dynamic_y_limit)  # adjust lineplot
-                        fig.canvas.draw_idle()  # redraw
+            # variable, function and button for pausing:
+            global is_running
+            is_running = True
 
-                # shift data and append new observation:
-                global y; y = np.roll(y, -1); y[-1] = new_obs
+            def pause_button_click(event):
+                global is_running
+                is_running = not is_running
+                if is_running: button.label.set_text("Pause")
+                else: button.label.set_text("Continue")
 
-                # update line plot:
-                line.set_ydata(y); end_point.set_ydata([y[-1]])
+            ax_button = plt.axes([0.8, .9, 0.1, 0.04])
+            button = Button(ax_button, 'Pause',
+                                   color=button_background_color,
+                                   hovercolor=button_hover_color)
+            button.on_clicked(pause_button_click)
 
-                # update gauge plot:
-                if include_gauge: needle_line.set_data([0, convert_y_to_angle(new_obs)], [0, gauge_radius])
+            ## gamification
+            global record_accuracy_bool
+            record_accuracy_bool = False  # will be set to True after trial phase, remains False if accuracy_save_dir not defined
 
-                ## accuracy display:  (is sampled and computed in separate accuracy_sampler process
-                if shared_value_target_dict is not None:  # communicate to sampler
+            # trial status:
+            trial_status_text = line_ax.text(.0, 1.05, "", transform=line_ax.transAxes)
+
+            ### ANIMATION METHODS
+            def init():
+                # initialise lineplot:
+                line_ax.legend()
+                line.set_data(x, y)  # set data of line
+                end_point.set_data([x.max()], [0])
+
+                if isinstance(target_value, tuple):
+                    target_line.set_data(x, target_y)
+                    target_end_point.set_data([x.max()], [0])
+
+                    if target_corridor is not None:
+                        target_corridor_line_low.set_data(x, target_y)
+                        target_corridor_line_high.set_data(x, target_y)
+
+                if include_gauge:  # initialise gauge
+                    gauge_ax.legend()
+                    needle_line.set_data([0, 0], [0, gauge_radius])
+                    if target_value is not None and isinstance(target_value, float):  # mark target if constant (= float type)
+                        target_needle_line.set_data([0, convert_y_to_angle(target_value)], [0, gauge_radius])
+
+                        if target_corridor is not None:  # mark target corridor
+                            target_corridor_low_needle_line.set_data(
+                                [0, convert_y_to_angle(target_value - target_corridor / 2)], [0, gauge_radius])
+                            target_corridor_high_needle_line.set_data(
+                                [0, convert_y_to_angle(target_value + target_corridor / 2)], [0, gauge_radius])
+
+                # return only what's necessary:
+                output_tuple = (line, end_point)  # measurement line and its endpoint
+                if target_value is not None: output_tuple = output_tuple + (target_line,)   # target line
+                if include_gauge:
+                    output_tuple = output_tuple + (needle_line,)   # gauge measurement needle
+                    if target_value is not None: output_tuple = output_tuple + (target_needle_line,)   # gauge target needle
+                return output_tuple
+
+            if isinstance(target_value, tuple):  # for sine varying target
+                # define global counter (within sine wave data)
+                global current_sine_ind
+                current_sine_ind = 0
+
+            def update(frame):
+                """ update view and fetch new observation. (frame is required although unused) """
+                # check for requested shutdown:
+                if anim_mgr.check_shutdown(): return 1,
+
+                global target_y  # global definition at begin of function
+
+                # allow for ending of view
+                #if save_accuracy_and_close_event.is_set(): plt.close('all')
+
+                # update only if is_running:
+                if is_running:
+                    ## MEASUREMENTS
                     with shared_dict_lock:
-                        shared_value_target_dict['value'] = new_obs
-                        shared_value_target_dict['target'] = target_y[-1]
-                if shared_current_accuracy_str is not None:  # ponder whether we can include color here
-                    trial_status_text.set_text(shared_current_accuracy_str.read())
+                        new_obs = shared_dict[measurement_dict_label]  # retrieve new information
+                    if dynamically_update_y_limits:  # update y limit if it doesn't fit
+                        # check if update necessary and change parameters:
+                        global dynamic_y_limit  # this also affects convert_y_to_angle
+                        if new_obs > dynamic_y_limit[1]:
+                            dynamic_y_limit = (dynamic_y_limit[0], new_obs)
+                            update_y_lim = True
 
+                        elif new_obs < dynamic_y_limit[0]:
+                            dynamic_y_limit = (new_obs, dynamic_y_limit[1])
+                            update_y_lim = True
+                        else: update_y_lim = False
 
-                ## TARGET VALUES
-                if isinstance(target_value, tuple):  # for varying target
-                    # shift and append new target:
-                    global current_sine_ind  # current sine counter (counts within target_sine_y)
-                    new_target = target_sine_y[current_sine_ind]  # read current sine position
-                    target_y = np.roll(target_y, -1); target_y[-1] = new_target
+                        # refresh display:
+                        if update_y_lim:
+                            if include_gauge:  # adjust gauge ticks and target:
+                                gauge_ax.set_xticklabels([f"{tick:.2f}" for tick in np.linspace(dynamic_y_limit[0], dynamic_y_limit[1], n_xticks)])
+
+                                if target_value is not None and isinstance(target_value, float):  # constant target
+                                    target_needle_line.set_data([0, convert_y_to_angle(target_value)], [0, gauge_radius])
+
+                                    if target_corridor is not None:  # mark target corridor
+                                        target_corridor_low_needle_line.set_data(
+                                            [0, convert_y_to_angle(target_value - target_corridor / 2)], [0, gauge_radius])
+                                        target_corridor_high_needle_line.set_data(
+                                            [0, convert_y_to_angle(target_value + target_corridor / 2)], [0, gauge_radius])
+
+                            line_ax.set_ylim(*dynamic_y_limit)  # adjust lineplot
+                            fig.canvas.draw_idle()  # redraw
+
+                    # shift data and append new observation:
+                    global y; y = np.roll(y, -1); y[-1] = new_obs
 
                     # update line plot:
-                    target_line.set_ydata(target_y); target_end_point.set_ydata([target_y[-1]])
-
-                    if target_corridor is not None:  # update_target_corridor
-                        target_corridor_line_low.set_ydata(target_y - target_corridor / 2)
-                        target_corridor_line_high.set_ydata(target_y + target_corridor / 2)
+                    line.set_ydata(y); end_point.set_ydata([y[-1]])
 
                     # update gauge plot:
-                    if include_gauge:
-                        target_needle_line.set_data([0, convert_y_to_angle(target_y[-1])], [0, gauge_radius])
-                        if target_corridor is not None:  # update target corridor
-                            target_corridor_low_needle_line.set_data(
-                                [0, convert_y_to_angle(target_y[-1] - target_corridor / 2)], [0, gauge_radius])
-                            target_corridor_high_needle_line.set_data(
-                                [0, convert_y_to_angle(target_y[-1] + target_corridor / 2)], [0, gauge_radius])
+                    if include_gauge: needle_line.set_data([0, convert_y_to_angle(new_obs)], [0, gauge_radius])
 
-                    # update sine counter (pause is considered by having it in is_running condition):
-                    current_sine_ind = (current_sine_ind + 1) % (len(target_sine_y)-1)
+                    ## accuracy display:  (is sampled and computed in separate accuracy_sampler process
+                    if shared_value_target_dict is not None:  # communicate to sampler
+                        with shared_dict_lock:
+                            shared_value_target_dict['value'] = new_obs
+                            shared_value_target_dict['target'] = target_y[-1]
+                    if shared_current_accuracy_str is not None:  # ponder whether we can include color here
+                        trial_status_text.set_text(shared_current_accuracy_str.read())
 
-            # return only what's necessary:
-            output_tuple = (line, end_point)  # measurement line and its endpoint
-            if target_value is not None: output_tuple = output_tuple + (target_line,)  # target line
-            if include_gauge:
-                output_tuple = output_tuple + (needle_line,)  # gauge measurement needle
-                if target_value is not None: output_tuple = output_tuple + (
-                    target_needle_line,)  # gauge target needle
-            return output_tuple
 
-        # run and show animation:
-        anim_mgr.start(fig, update, interval=int(1000/display_refresh_rate_hz),
-                       init_func=init)
-        plt.show()
+                    ## TARGET VALUES
+                    if isinstance(target_value, tuple):  # for varying target
+                        # shift and append new target:
+                        global current_sine_ind  # current sine counter (counts within target_sine_y)
+                        new_target = target_sine_y[current_sine_ind]  # read current sine position
+                        target_y = np.roll(target_y, -1); target_y[-1] = new_target
+
+                        # update line plot:
+                        target_line.set_ydata(target_y); target_end_point.set_ydata([target_y[-1]])
+
+                        if target_corridor is not None:  # update_target_corridor
+                            target_corridor_line_low.set_ydata(target_y - target_corridor / 2)
+                            target_corridor_line_high.set_ydata(target_y + target_corridor / 2)
+
+                        # update gauge plot:
+                        if include_gauge:
+                            target_needle_line.set_data([0, convert_y_to_angle(target_y[-1])], [0, gauge_radius])
+                            if target_corridor is not None:  # update target corridor
+                                target_corridor_low_needle_line.set_data(
+                                    [0, convert_y_to_angle(target_y[-1] - target_corridor / 2)], [0, gauge_radius])
+                                target_corridor_high_needle_line.set_data(
+                                    [0, convert_y_to_angle(target_y[-1] + target_corridor / 2)], [0, gauge_radius])
+
+                        # update sine counter (pause is considered by having it in is_running condition):
+                        current_sine_ind = (current_sine_ind + 1) % (len(target_sine_y)-1)
+
+                # return only what's necessary:
+                output_tuple = (line, end_point)  # measurement line and its endpoint
+                if target_value is not None: output_tuple = output_tuple + (target_line,)  # target line
+                if include_gauge:
+                    output_tuple = output_tuple + (needle_line,)  # gauge measurement needle
+                    if target_value is not None: output_tuple = output_tuple + (
+                        target_needle_line,)  # gauge target needle
+                return output_tuple
+
+            # run and show animation:
+            anim_mgr.start(fig, update, interval=int(1000/display_refresh_rate_hz),
+                           init_func=init)
+            plt.show()
+
+    except AttributeError:  # sometimes TkAgg backend causes AttributeErrors upon animation closing
+        print("Animation ended safely.")
 
 
 
@@ -1741,7 +1765,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
 
     Notes
     -----
-    - Uses matplotlib’s FuncAnimation to periodically update status text reflecting keys in shared_dict.
+    - Uses matplotlib’s animation.FuncAnimation to periodically update status text reflecting keys in shared_dict.
     - Integrates two buttons to set/clear events used by a sampling process.
     - Designed for synchronization and control of data acquisition pipelines in multiprocessing contexts.
     - Automatically closes figure upon window close or termination.
@@ -2001,7 +2025,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
 
         # run and show animation:
         global master_ani
-        master_ani = FuncAnimation(fig, update, frames=1,
+        master_ani = animation.FuncAnimation(fig, update, frames=1,
                             init_func=init, blit=False,
                             interval=int(1000/display_refresh_rate_hz), repeat=True)
         plt.show()
@@ -2091,20 +2115,25 @@ def plot_performance_view(this_subject_dir: str | Path,
 
     # if refresh event is provided, update plot upon such:
     if register_new_performance_event is not None:
-        with AnimationManager(anim_shutdown_event) as anim_mgr:  # try + finally to clean-up after terminating process
-            def update(frame):  # animation method
-                if anim_mgr.check_shutdown(): return 1,
+        try:
+            with AnimationManager(anim_shutdown_event) as anim_mgr:  # try + finally to clean-up after terminating process
+                def update(frame):  # animation method
+                    if anim_mgr.check_shutdown(): return 1,
 
-                if register_new_performance_event.is_set():
-                    register_new_performance_event.clear()  # clear again
-                    #ax.set_title("UPDATE")
-                    boxplots = plot_new_bps()
-                    fig.canvas.draw_idle()
+                    if register_new_performance_event.is_set():
+                        register_new_performance_event.clear()  # clear again
+                        #ax.set_title("UPDATE")
+                        boxplots = plot_new_bps()
+                        fig.canvas.draw_idle()
 
-                return 1,
+                    return 1,
 
-            anim_mgr.start(fig, update, interval=int(1000/refresh_rate_hz))
-            plt.show()
+
+                anim_mgr.start(fig, update, interval=int(1000/refresh_rate_hz))
+                plt.show()
+
+        except AttributeError:  # sometimes TkAgg backend causes AttributeErrors upon animation closing
+            print("Animation ended safely.")
 
     else:  # otherwise plot only once:
         plot_new_bps()
@@ -2125,6 +2154,6 @@ if __name__ == '__main__':
     SUBJECT_DIR = RESULT_DIR / "subject_00"
     SONG_ONE_DIR = SUBJECT_DIR / "song_00"
 
-    plot_posttrial_rating(SONG_ONE_DIR, mptools.SharedString(256), "Groovy")
+    plot_onboarding_form(SONG_ONE_DIR, mptools.SharedString(256), "Groovy")
 
     #print(filemgmt.fetch_json_recursively(SUBJECT_DIR, "Trial Summary", "RMSE", True))
