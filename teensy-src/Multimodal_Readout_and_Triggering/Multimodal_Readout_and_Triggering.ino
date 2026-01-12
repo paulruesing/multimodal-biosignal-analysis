@@ -3,7 +3,7 @@
 // Original code by José Torres, extended by Paul Rüsing. @INI UZH / ETH Zurich
 // ───────────────────────────────────────────────────────────────────────────────
 const int HEARTBEAT_PIN = LED_BUILTIN;
-const int TRIG_PIN      = 28;
+const int TRIG_PIN      = 32;  // 28 before
 const int FSR_AN_PIN    = A10;
 const int ECG_AN_PIN    = A2;
 const int GSR_AN_PIN    = A4;
