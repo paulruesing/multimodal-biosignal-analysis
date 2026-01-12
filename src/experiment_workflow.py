@@ -21,7 +21,7 @@ import src.utils.multiprocessing_tools as mptools
 from src.pipeline.measurements_and_interactive_visuals import dummy_sampling_process, sampling_process, \
     plot_input_view, qtc_control_master_view, dynamometer_force_mapping, plot_onboarding_form, \
     plot_pretrial_familiarity_check, plot_posttrial_rating, plot_breakout_screen, \
-    accuracy_sampler, plot_performance_view
+    accuracy_sampler, plot_performance_view, plot_offboarding_form
 from src.utils.multiprocessing_tools import save_terminate_process
 
 
@@ -84,8 +84,11 @@ def start_experiment_processes(
 
     display_ecg = experiment_config_file.get_as_type("Display ECG", "bool") if experiment_config_txt is not None else True
     display_gsr = experiment_config_file.get_as_type("Display GSR", "bool") if experiment_config_txt is not None else True
+    display_refresh_rate_hz = experiment_config_file.get_as_type("Display Refresh Rate", "int") if experiment_config_txt is not None else 30
+    start_song_counter = experiment_config_file.get_as_type("Last Song Counter", "int") if experiment_config_txt is not None else 0
 
     display_relative_performance = experiment_config_file.get_as_type("Display Relative Performance", "bool") if experiment_config_txt is not None else True
+    include_fsr_gauge = experiment_config_file.get_as_type("Include Force Gauge Plot", "bool") if experiment_config_txt is not None else False
 
     target_sine_min = experiment_config_file.get_as_type("Target Sine Minimum", "float") if experiment_config_txt is not None else 5
     target_sine_max = experiment_config_file.get_as_type("Target Sine Maximum", "float") if experiment_config_txt is not None else 20
@@ -112,6 +115,8 @@ def start_experiment_processes(
     liking_question_str = experiment_config_file.get_as_type("Liking Question", "str") if experiment_config_txt is not None else "How did you like the song? (0: terrible, 7: extremely well)"
     emotion_question_str = experiment_config_file.get_as_type("Emotional Question", "str") if experiment_config_txt is not None else "Please rate your overall emotional state right now. (0: extremely unhappy/distressed, 7 = extremely happy/peaceful)"
 
+    fatigue_question = experiment_config_file.get_as_type("Fatigue Question", "str") if experiment_config_txt is not None else "How fatiguing was the overall experiment to you? (0 = completely easy, 7 = very tiring)"
+    pleasure_question = experiment_config_file.get_as_type("Pleasure Question", "str") if experiment_config_txt is not None else "How much did you enjoy the experiment? (0 = very dull/unpleasant, 7 = very fun)"
 
     # serial connection intact?
     serial_connection_intact = False
@@ -201,6 +206,7 @@ def start_experiment_processes(
             args=(shared_measurement_dict, shared_dict_lock, ),
             kwargs={'measurement_dict_label': 'fsr',
                     'include_gauge': True,
+                    'display_refresh_rate_hz': display_refresh_rate_hz,
                     'title': f'Please apply as much force as possible! You have {mvc_max_time} seconds. If done, wait or close window.',
                     'window_title': 'Dynamometer Serial Input View' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES",
                     'input_unit_label': 'Force [kg]',
@@ -245,6 +251,7 @@ def start_experiment_processes(
         kwargs={'measurement_dict_label': 'ecg',
                 'target_value': None,
                 'include_gauge': False,
+                    'display_refresh_rate_hz': display_refresh_rate_hz,
                 'title': 'ECG Input', 'window_title': 'ECG Serial Input View' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES",
                 'anim_shutdown_event': ecg_displayer_shutdown_event,
                 },
@@ -256,6 +263,7 @@ def start_experiment_processes(
             args=(shared_measurement_dict, shared_dict_lock,),
             kwargs={'measurement_dict_label': 'gsr',
                     'include_gauge': False,
+                    'display_refresh_rate_hz': display_refresh_rate_hz,
                     'title': 'GSR Input', 'window_title': 'GSR Serial Input View' if serial_connection_intact else "SHOWING RANDOM DEVELOPMENT SAMPLES",
                     'anim_shutdown_event': gsr_displayer_shutdown_event,
                     },
@@ -272,13 +280,13 @@ def start_experiment_processes(
         name="PerformanceDisplayProcess")
 
     ### PROCESS MANAGEMENT
-    # todo: ponder whether more definitions should be included in separate functions for clarity
+    # (eventually ponder whether more definitions should be included in separate functions for clarity)
     try:
         ## Start Master
         print("Starting master process!")
         master_displayer.start()
         global song_counter
-        song_counter = 0
+        song_counter = start_song_counter
 
         # check for commands:
         while master_displayer.is_alive():
@@ -313,7 +321,23 @@ def start_experiment_processes(
 
             ## Calibration Phase
             if start_mvc_calibration_event.is_set():
-                print("Starting MVC calibration process!")
+                status_msg = "Starting MVC calibration process!"
+                print(status_msg); shared_questionnaire_str.write(status_msg)
+
+                # eventually kill current sampling process (allows for new MVC value)
+                try:  # test if sampler is already defined
+                    _ = sampler
+                    # if yes, and it's running, kill it:
+                    if sampler.is_alive(): mptools.save_terminate_process(sampler)
+
+                    # also check for the rest:
+                    if ecg_displayer.is_alive(): mptools.save_terminate_process(ecg_displayer)
+                    if gsr_displayer.is_alive(): mptools.save_terminate_process(gsr_displayer)
+                    if performance_displayer.is_alive(): mptools.save_terminate_process(performance_displayer)
+
+                except NameError: pass  # if not, everything is fine
+
+                # start MVC calibration
                 calibrate_mvc()
                 start_mvc_calibration_event.clear()
 
@@ -383,9 +407,11 @@ def start_experiment_processes(
                         target=plot_input_view,
                         args=(shared_measurement_dict, shared_dict_lock,),
                         kwargs={'measurement_dict_label': 'fsr',
-                                'target_value': (target_sine_min, target_sine_max, target_sine_freq_abs),  # target value as sine wave with .1 Hz
+                                'target_value': (target_sine_min, target_sine_max, target_sine_freq_abs),
+                                # target value as sine wave with .1 Hz
                                 'target_corridor': target_display_corridor,
-                                'include_gauge': True,
+                                'include_gauge': include_fsr_gauge,
+                                'display_refresh_rate_hz': display_refresh_rate_hz,
                                 'title': 'Your grip force controls the red line. Try to keep it close to the moving green target line within the green target corridor!',
                                 'input_unit_label': 'Force [% MVC]',
                                 'y_limits': (0, 100),
@@ -401,9 +427,8 @@ def start_experiment_processes(
                         test_motor_task.start()
 
                     # wait for ending of test motor task:
-                    start = time.time()  # run for 60 seconds or until window is closed
-                    while time.time() - start < 60 and test_motor_task.is_alive():
-                        time.sleep(0.1)
+                    while test_motor_task.is_alive():
+                        time.sleep(0.5)  # don't check too often, here latency is also not important
                     else:  # if done, terminate process
                         mptools.save_terminate_process(test_motor_task, test_motor_task_shutdown_event)
 
@@ -532,7 +557,6 @@ def start_experiment_processes(
                         pass  # go to next iteration
                     else:  # if we can continue with trial
                         # define motor task process:
-                        display_refresh_rate_hz = 15  # equals accuracy sampling rate
                         dynamic_motor_task_shutdown_event = mptools.RobustEventManager()
                         dynamic_motor_task = multiprocessing.Process(
                             target=plot_input_view,
@@ -542,7 +566,7 @@ def start_experiment_processes(
                                     'target_value': (target_sine_min, target_sine_max, target_freq),  # target value as sine wave with .1 Hz
                                     'target_corridor': target_display_corridor,
 
-                                    'include_gauge': True,
+                                    'include_gauge': include_fsr_gauge,
                                     'display_refresh_rate_hz': display_refresh_rate_hz,
 
                                     'shared_value_target_dict': shared_force_value_target_dict,
@@ -665,6 +689,9 @@ def start_experiment_processes(
         mptools.save_terminate_process(performance_displayer, performance_displayer_shutdown_event)
         mptools.save_terminate_process(master_displayer)
 
+        # final offboarding form:
+        plot_offboarding_form(personal_data_dir, fatigue_question, pleasure_question)
+
     finally:
         print("Cleanup completed")
 
@@ -676,10 +703,10 @@ if __name__ == '__main__':
     MUSIC_CONFIG = CONFIG_DIR / "music_selection.txt"
     EXPERIMENT_CONFIG = CONFIG_DIR / "experiment_config.txt"
 
-    # important:
     EXPERIMENT_RESULTS = ROOT / "data" / "experiment_results"
 
-    SUBJECT_DIR = EXPERIMENT_RESULTS / "subject_00"
+    # important: (CHANGE PER SUBJECT)
+    SUBJECT_DIR = EXPERIMENT_RESULTS / "subject_02"
 
     SERIAL_MEASUREMENTS = SUBJECT_DIR / "serial_measurements"
     MVC_MEASUREMENTS = SUBJECT_DIR / "mvc_measurements"
