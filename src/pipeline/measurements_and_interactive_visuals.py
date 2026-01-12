@@ -126,13 +126,16 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
     # we deploy globals() function here for dynamic global object naming and accessing (depending on included serial_measurements)
     try:
         output_dict = {}  # will be returned
+
+        # read new line and convert to float:
+        buf = b""
+
         with serial.Serial(serial_port, baud_rate, timeout=1) as ser:
             # check for output command:
             if command in ("A", "B"):
                 ser.write(command.encode("ascii"))
                 ser.flush()  # waits for all outgoing data to be transmitted
 
-            # read new line and convert to float:
             line = ser.readline().decode('ascii', errors="ignore").strip()
 
             # process each measurement type:
@@ -140,6 +143,10 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
                 if not line.startswith(teensy_marker):  # check whether line contains measurement result
                     # otherwise use last result:
                     output_dict[measurement_label] = globals()['_last_valid_reading_' + measurement_label]
+                    if record_bool:
+                        globals()['timestamps_' + measurement_label].append(datetime.now())
+                        globals()['measurements_' + measurement_label].append(
+                            globals()['_last_valid_reading_' + measurement_label])
                     continue  # jump to next measurement
 
                 # format measurement:
@@ -150,6 +157,9 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
                 if not allowed_input_range[0] < value < allowed_input_range[1]:
                     # otherwise use last result:
                     output_dict[measurement_label] = globals()['_last_valid_reading_' + measurement_label]
+                    if record_bool:
+                        globals()['timestamps_' + measurement_label].append(datetime.now())
+                        globals()['measurements_' + measurement_label].append(globals()['_last_valid_reading_' + measurement_label])
                     continue  # and jump to next measurement
 
                 # measurement-specific processing function:
@@ -165,7 +175,7 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
 
                 # save (if record_bool) and return:
                 if record_bool:
-                    globals()['timestamps_' + measurement_label].append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    globals()['timestamps_' + measurement_label].append(datetime.now())  # is expensive:.strftime("%Y-%m-%d %H:%M:%S.%f"))
                     globals()['measurements_' + measurement_label].append(value)
                 output_dict[measurement_label] = value
 
@@ -206,7 +216,7 @@ def dynamometer_force_mapping(v, mvc_kg: float | None = None):  # here with defa
     Returns [kg] if global var. _current_mvc_kg is None else [% MVC].
     """
     factor = 1 if mvc_kg is None else 100 / mvc_kg  # consider MVC
-    return (2.8708 * (v ** 4.1071) - 3) * factor
+    return (2.2 * (v ** 4.1071) - 6) * factor  # 2.8708 * (v ** 4.1071) - 3 before!
 
 
 def sampling_process(shared_dict,
@@ -277,8 +287,14 @@ def sampling_process(shared_dict,
 
             # prepare separate series for each measurement:
             measurement_labels = [measurement_label for measurement_label, _, _, _ in measurement_definitions]
-            df_list = [pd.DataFrame(index=globals()['timestamps_' + measurement_label],
-                                     data={measurement_label: globals()['measurements_' + measurement_label]},
+
+            # use shortest datetime for all measurements (they are written sequentially within a short interval inside read_serial_measurement)
+            #   hence we short all series in order for them to match
+            shortest_len = np.min([len(globals()['timestamps_' + measurement_label]) for measurement_label in measurement_labels])
+            dt_list = globals()['timestamps_' + measurement_labels[0]][:shortest_len]
+            datetime_strings = pd.to_datetime(dt_list).strftime('%Y-%m-%d %H:%M:%S.%f')
+            df_list = [pd.DataFrame(index=datetime_strings,
+                                     data={measurement_label: globals()['measurements_' + measurement_label][:shortest_len]},
                                      ) for measurement_label in measurement_labels]
 
             # merge series to df and save:
@@ -290,8 +306,15 @@ def sampling_process(shared_dict,
             save_df.to_csv(savepath)
 
     try:
+        from tqdm import tqdm
+        from itertools import count
         sample_counter = 1
-        while True:
+
+        # store attributes locally to increase speed:
+        read_serial = read_serial_measurements
+        mdefs = measurement_definitions
+        lock = shared_dict_lock
+        while True:  #for _ in tqdm(count(start=0, step=1)):  # to display iterations per second. replace by while in production
             # check for command events:
             if start_trigger_event.is_set():
                 command = 'A'
@@ -303,14 +326,14 @@ def sampling_process(shared_dict,
                 stop_trigger_event.clear()
             else: command = None
             # method retrieves and saves sample as well as sends command:
-            samples = read_serial_measurements(measurement_definitions=measurement_definitions,
+            samples = read_serial(measurement_definitions=mdefs,
                                                record_bool=record_bool,
                                                command=command,
                                                **read_serial_kwargs)
 
             # store in shared memory:
-            with shared_dict_lock:
-                for measurement_label, _, _, _ in measurement_definitions:
+            with lock:
+                for measurement_label, _, _, _ in mdefs:
                     shared_dict[measurement_label] = samples[measurement_label]
 
             # eventually store:
@@ -328,7 +351,7 @@ def sampling_process(shared_dict,
                 serial_saving_done_event.set()
 
             # simulate sampling frequency:
-            time.sleep(1/sampling_rate_hz)
+            # time.sleep(1/sampling_rate_hz) (with: 300 iterations per second), (without: 360it / sec)
             sample_counter += 1
     finally:  # store data if saving path provided
         save_data()
@@ -342,7 +365,8 @@ def dummy_sampling_process(shared_dict,
                            stop_trigger_event,  # send stop trigger event ('B' via serial connection)
                            measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str, float]],
                            # measurement_label, processing_callable, serial_input_marker
-                           custom_rand_maxs: tuple[float] = None,
+                           custom_rand_means: tuple[float] = (10, 1, 1),
+                           custom_rand_stds: tuple[float] = (.2, 1, 1),
                            sampling_rate_hz: int = 1000,
 
                            # the following parameters are unused but included to prevent errors when replacing the sampling rate function
@@ -369,7 +393,7 @@ def dummy_sampling_process(shared_dict,
         Event to signal completion of saving data.
     measurement_definitions : tuple of tuples
         Each tuple contains measurement_label (str), optional processing callable, serial input marker (str) and smoothing float (0 = full smoothing, 1 = no smoothing).
-    custom_rand_maxs : tuple of floats, optional
+    custom_rand_stds : tuple of floats, optional
         Custom maximum values for random data generation per measurement label (default creates ascending range).
     sampling_rate_hz : int, optional
         Frequency to simulate in Hz (default is 1000).
@@ -404,8 +428,9 @@ def dummy_sampling_process(shared_dict,
                 command = None
 
             # random dummy samples:
-            rand_maxs = list(range(1, len(measurement_definitions) + 1)) if custom_rand_maxs is None else custom_rand_maxs
-            samples = {measurement_label: np.random.rand() * rand_max for (measurement_label, _, _, _), rand_max in zip(measurement_definitions, rand_maxs)}
+            rand_means = [1 for _ in range(len(measurement_definitions))] if custom_rand_means is None else custom_rand_means
+            rand_stds = [1 for _ in range(len(measurement_definitions))] if custom_rand_stds is None else custom_rand_stds
+            samples = {measurement_label: rand_min + (-.5 + np.random.rand()) * rand_max for (measurement_label, _, _, _), rand_min, rand_max in zip(measurement_definitions, rand_means, rand_stds)}
             with shared_dict_lock:
                 for measurement_label, _, _, _ in measurement_definitions:
                     shared_dict[measurement_label] = samples[measurement_label]
@@ -441,11 +466,13 @@ class AnimationManager:
     def stop(self):
         if self.anim is not None:  # first stop timer
             self.anim.pause()  # Pause timer first
-            self.anim.event_source.remove()  # Remove event source
 
-            es = getattr(self.anim, "event_source", None)
-            if es is not None:
-                es.stop()
+            try:
+                es = getattr(self.anim, "event_source", None)
+                if es is not None:
+                    es.stop()
+            except AttributeError:  # accessing event_source sometimes causes AttributeErrors if animation is closed parallely
+                pass
 
         if self.fig is not None:  # then close figure
             plt.close(self.fig)
@@ -722,6 +749,7 @@ def plot_onboarding_form(result_json_dir: str | Path,
                          instrument_question_str: str = "Do you play an instrument? If yes, which:",
                          listening_habit_question: str = "How often do you listen to music?",
                          listening_habit_options: list[str] | tuple[str, ...] = ('Most of the day', 'A small part of the day', 'Every 2 or 3 days', 'Seldom'),
+                         dancing_question: str = "How much do you like moving to music? (0 = not at all, 7 = love dancing)",
                          athletic_ability_question_str: str = "Please rate your current athleticism. (0 = unfit, 7 = professional)",
                          health_questions_intro_str: str = "To ensure this study is safe for you and to help us account for individual differences in nervous system function, we need to understand your motor health history. Please answer truthfully and know that your data is being treated confidentially.",
                          known_diseases_question_str: str = "Have you ever been diagnosed by a healthcare professional with any neural condition? If yes, which:",
@@ -802,16 +830,23 @@ def plot_onboarding_form(result_json_dir: str | Path,
         label_position=(.53, .37), position=(0.51, .45, .39, .1),
         radio_button_selected_color=button_hover_color)
 
+    # dancing slider:
+    dancing_slider = create_slider(fig, input_dict, key="Dancing habit",
+                                       label=strconv.enter_line_breaks(dancing_question, 100, 10),
+                                 position=(.5, .4, .39, slider_height),
+                                 vmin=0, vmax=7, valinit=0, valstep=1, valfmt="%.0f",
+                                 slider_bar_color=slider_bar_color, slider_background_color=slider_background_color, )
+
     # how athletic are you:
     athleticism_slider = create_slider(fig, input_dict, key="Athleticism",
-                                       label=strconv.enter_line_breaks(athletic_ability_question_str, 70, 10),
-                                 position=(0.55, 0.4, 0.39, slider_height),
+                                       label=strconv.enter_line_breaks(athletic_ability_question_str, 100, 10),
+                                 position=(0.5, 0.35, 0.39, slider_height),
                                  vmin=0, vmax=7, valinit=0, valstep=1, valfmt="%.0f",
                                  slider_bar_color=slider_bar_color, slider_background_color=slider_background_color, )
 
     # health related questions:
     health_intro = ax.text(
-        -.125, .09,
+        -.125, .07,
         strconv.enter_line_breaks(health_questions_intro_str, 190, 10),
         transform=ax.transAxes, va='center', ha='left'
     )
@@ -850,7 +885,7 @@ def plot_onboarding_form(result_json_dir: str | Path,
         # check whether there is correct input for mandatory input fields:
         key_object_dict = {'Name': name_textbox.label, 'Birthdate': birthdate_textbox.label,
                            'Gender': gender_dropdown_label, 'Dominant hand': dominand_hand_dropdown_label,
-                           'Listening habit': listening_habit_dropdown_label,
+                           'Listening habit': listening_habit_dropdown_label, 'Dancing habit': dancing_slider.label,
                            'Athleticism': athleticism_slider.label,}
         for key, object in key_object_dict.items():
             if key not in input_dict:  # check only mandatory fields
@@ -887,6 +922,90 @@ def plot_onboarding_form(result_json_dir: str | Path,
             plt.close()
 
     submission_button_ax = plt.axes([0.4, 0.02, 0.2, text_box_height])
+    submission_button = Button(submission_button_ax, 'Submit',
+                               color=button_background_color,
+                               hovercolor=button_hover_color)
+    submission_button.on_clicked(click_submission_button)
+
+    plt.show()
+
+
+def plot_offboarding_form(result_json_dir: str | Path,
+                         fatigue_question_str: str = "How fatiguing was the overall experiment to you? (0 = completely easy, 7 = very tiring)",
+                         pleasure_question_str: str = "How much did you enjoy the experiment? (0 = very dull/unpleasant, 7 = very fun)",
+                         ):
+    ### DISABLE MPL KEYBOARD SHORTCUTS
+    # default keyboard shortcuts:
+    keymaps = ['back', 'forward', 'fullscreen', 'grid', 'help', 'home', 'pan', 'save', 'xscale', 'yscale']
+
+    for keymap in keymaps:  # try disabling:
+        try:
+            plt.rcParams[f'keymap.{keymap}'] = []
+        except KeyError:
+            print("Couldn't disable shortcut for ", keymap)
+            pass
+
+    ### PLOT
+    # initialise:
+    fig, ax = plt.subplots(figsize=(24, 4))
+    fig.subplots_adjust(top=.8, bottom=0.25)  # space for widgets
+    manager = plt.get_current_fig_manager()  # change TkAgg window title
+    manager.set_window_title("Participant Offboarding Form")
+    ax.axis('off')  # hide axes (borders and ticklabels)
+    fig.suptitle('Thank you for participating! :)')
+    ax.set_title("Please enter some final feedback below. Much appreciated!")
+
+    # attributes:
+    text_box_height = slider_height = .04
+
+
+    ### INPUT TEXTBOXES
+    input_dict = {}  # input dict
+
+    # "If yes, how well:" 1-7
+    fatigue_slider = create_slider(fig, input_dict, key="Total fatigue", label=fatigue_question_str,
+                                 position=(0.55, 0.55, 0.39, slider_height),
+                                 vmin=0, vmax=7, valinit=0, valstep=1, valfmt="%.0f",
+                                 slider_bar_color=slider_bar_color, slider_background_color=slider_background_color,)
+
+    # how athletic are you:
+    pleasure_slider = create_slider(fig, input_dict, key="Total pleasure",
+                                       label=pleasure_question_str,
+                                 position=(0.55, 0.4, 0.39, slider_height),
+                                 vmin=0, vmax=7, valinit=0, valstep=1, valfmt="%.0f",
+                                 slider_bar_color=slider_bar_color, slider_background_color=slider_background_color, )
+
+
+
+    ### SUBMISSION and SAVING
+    # define submission_button (callback_function, ax, object, on_submit(func))
+    #   on submit: check whether data is missing, otherwise save to result_json_dir and quit func
+    def click_submission_button(event):
+        # check for missing inputs:
+        input_missing = False
+
+        # check whether there is correct input for mandatory input fields:
+        key_object_dict = {'Total fatigue': fatigue_slider.label, 'Total pleasure': pleasure_slider.label,}
+        for key, object in key_object_dict.items():
+            if key not in input_dict:  # check only mandatory fields
+                key_object_dict[key].set_color('red')
+                fig.canvas.draw_idle()  # update view
+                input_missing = True  # some input missing -> don't save yet
+            else:
+                key_object_dict[key].set_color(font_color)
+                fig.canvas.draw_idle()  # update view
+
+        if not input_missing:
+            print("Input dict: ", input_dict)
+            save_path = result_json_dir / filemgmt.file_title(f"Post-Study Feedback Data", ".json")
+            with open(save_path, "w") as json_file:
+                json.dump(input_dict, json_file, indent=4)  # Pretty print with indent=4
+            print('Saved feedback data to ', save_path)
+
+            # close fig:
+            plt.close()
+
+    submission_button_ax = plt.axes([0.4, 0.1, 0.2, text_box_height])
     submission_button = Button(submission_button_ax, 'Submit',
                                color=button_background_color,
                                hovercolor=button_hover_color)
@@ -1331,7 +1450,7 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
                     measurement_dict_label: str,
                     include_gauge: bool = True,
                     display_window_len_s: int = 3,
-                    display_refresh_rate_hz: int = 15,
+                    display_refresh_rate_hz: int = 30,
                     y_limits: tuple[float, float] = (0, 3.3),
                     target_value: float | tuple[float, float, float] | None = None,  # either fixed line or sine-wave (tuple[min, max, freq])
                     target_corridor: float | None = None,  # draw corridor around target
@@ -1388,7 +1507,7 @@ def plot_input_view(shared_dict: dict[str, float],  # shared memory from samplin
             global dynamic_y_limit  # variables that are dynamically adjusted during update() need to be defined globally
             dynamic_y_limit = y_limits
             global update_counter; update_counter = 0  # define display refreshment counter and sanity check
-            if display_refresh_rate_hz > 20: print(f"Fps are {display_refresh_rate_hz}, which is > 20 and potentially leads to rendering issues.")
+            if display_refresh_rate_hz > 60: print(f"Fps are {display_refresh_rate_hz}, which is > 60 and potentially leads to rendering issues.")
 
             # initial data:
             x = np.linspace(-display_window_len_s, 0, display_window_len_s*display_refresh_rate_hz)
@@ -1841,7 +1960,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             start_sampling_event.set()
             global recent_event_str
             recent_event_str = 'Sampling Phase'
-            sampling_button.label.set_text("Sampling\n(Done)")
+            sampling_button.label.set_text("Restart\nSampling")
         sampling_button_ax = plt.axes([0.73, .65, 0.08, 0.175])
         sampling_button = Button(sampling_button_ax, 'Sampling',
                                color=button_background_color,
@@ -1962,8 +2081,8 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
                 measurement_info_text.set_text(f"Receiving Serial Measurements: {list(shared_dict.keys())}")
 
             if include_music:
-                if music_master.current_category_and_counter is not None:  # e.g. Groovy (1/8)
-                    current_cat_str = f"{music_master.current_category_and_counter[0]} ({music_master.current_category_and_counter[1]+1}/{len(music_master.category_url_dict[music_master.current_category_and_counter[0]])})"" | "
+                if music_master.current_category is not None:  # e.g. Groovy (1/8)
+                    current_cat_str = f"{music_master.current_category} ({music_master.category_counter_dict[music_master.current_category]+1}/{len(music_master.category_url_dict[music_master.current_category])})"" | "
                 else: current_cat_str = ""
                 try:
                     current_track_info = music_master.get_current_track(output_type='dict')
@@ -1975,9 +2094,9 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
                     _ = current_track_info.pop('Position [s]')  # remove position argument
                     with shared_dict_lock:
                         shared_song_info_dict.update(current_track_info)  # store rest
-                        if music_master.current_category_and_counter is not None:  # add category information
-                            shared_song_info_dict['Category'] = music_master.current_category_and_counter[0]
-                            shared_song_info_dict['Category Index'] = music_master.current_category_and_counter[1]
+                        if music_master.current_category is not None:  # add category information
+                            shared_song_info_dict['Category'] = music_master.current_category
+                            shared_song_info_dict['Category Index'] = music_master.category_counter_dict[music_master.current_category]
 
                 except ValueError:  # no music playing currently
                     song_info_text.set_text("No track playing currently.")
@@ -1994,7 +2113,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             # log updating:
             if control_log_dir is not None:
                 global log_dict
-                log_dict['Time'].append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                log_dict['Time'].append(datetime.now())  # is expensive: .strftime("%Y-%m-%d %H:%M:%S")
                 log_dict['Music'].append(song_info_text.get_text())
 
                 if recent_event_str is not None:  # save and reset in one block to prevent resetting event str without logging
@@ -2041,7 +2160,7 @@ def plot_performance_view(this_subject_dir: str | Path,
                           other_subject_dirs: list[str | Path] | None = None,
                           register_new_performance_event = None,
                           refresh_rate_hz: float = 10,
-                          plot_size=(5, 6),
+                          plot_size=(5, 4),
                           plot_title: str = "Motor Task Performance Overview",
                           window_title: str = "Performance Monitor",
                           anim_shutdown_event=None):
@@ -2109,6 +2228,7 @@ def plot_performance_view(this_subject_dir: str | Path,
         if pos_user_bp != 0: ax.set_xticks([0, pos_user_bp]); ax.set_xticklabels(["Previous", "You"])
         else: ax.set_xticks([0]); ax.set_xticklabels(["You"])
         ax.set_ylabel('Motor Task RMSE')
+        ax.set_xlabel('Participant')
 
         return bp_dict
 
@@ -2154,6 +2274,7 @@ if __name__ == '__main__':
     SUBJECT_DIR = RESULT_DIR / "subject_00"
     SONG_ONE_DIR = SUBJECT_DIR / "song_00"
 
-    plot_onboarding_form(SONG_ONE_DIR, mptools.SharedString(256), "Groovy")
+    from src.utils.multiprocessing_tools import SharedString
+    plot_onboarding_form(SONG_ONE_DIR, SharedString(256, ""))
 
     #print(filemgmt.fetch_json_recursively(SUBJECT_DIR, "Trial Summary", "RMSE", True))
