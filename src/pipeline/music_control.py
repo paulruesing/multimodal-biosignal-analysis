@@ -64,7 +64,12 @@ class SpotifyController:
             self.category_url_dict = {cat: random.sample(entries, len(entries)) for cat, entries in category_url_dict.items()}
 
         # initialise counter (for play_next_from)
-        self.current_category_and_counter: tuple[str, int] | None = None
+        self.category_counter_dict: dict[str, int] = {}
+        if category_url_dict is not None:
+            for category in category_url_dict.keys():
+                self.category_counter_dict[category] = 0  # initial category counter at 0
+        self.current_category: str | None = None
+        # self.current_category_and_counter: tuple[str, int] | None = None  (OLD LOGIC)
 
         # the following will be updated if a new song is started:
         self.current_genre = None
@@ -150,24 +155,21 @@ class SpotifyController:
             If the category URL dictionary is not defined.
         """
         if self.category_url_dict.get(category) is None: raise AttributeError(
-            "Instance attribute category_url_dict needs to be defined!")
-        # reset current_category and counter if first execution or new category:
-        if self.current_category_and_counter is None:
-            self.current_category_and_counter = (category, 0)
-        elif self.current_category_and_counter[0] != category:
-            self.current_category_and_counter = (category, 0)
-        # else increase counter:
-        else:
-            self.current_category_and_counter = (category, self.current_category_and_counter[1] + 1)
+            f"Instance attribute category_url_dict needs to be defined and contain {category}!")
+
+        # set current_category appropriately:
+        if self.current_category is None or self.current_category != category:
+            self.current_category = category
+        # and increase counter:
+        self.category_counter_dict[category] = self.category_counter_dict[category] + 1
 
         # derive next track and when to start it:
         try:
-            song_tuple = self.category_url_dict[self.current_category_and_counter[0]][self.current_category_and_counter[1]]
+            song_tuple = self.category_url_dict[category][self.category_counter_dict[category]]
         except IndexError:
             print("No new songs left in category! Starting over.")
-            self.current_category_and_counter = (category, 0)
-            song_tuple = self.category_url_dict[self.current_category_and_counter[0]][
-                self.current_category_and_counter[1]]
+            self.category_counter_dict[category] = 0
+            song_tuple = self.category_url_dict[category][self.category_counter_dict[category]]
 
         # try detect start_after:
         start_at = song_tuple[2] if song_tuple[2] != 0.0 else None
@@ -179,8 +181,9 @@ class SpotifyController:
         self.current_file_title = song_tuple[4]
 
         # play:
-        self.play_track(next_track_url); print(f"Playing {next_track_url} (number {self.current_category_and_counter[1]} in category {category})");
+        self.play_track(next_track_url); print(f"Playing {next_track_url} (number {self.category_counter_dict[category]} in category {category})");
         if start_at is not None and start_at != 0: print(f"from second {start_at}"); self.skip(start_at)
+
 
     # below functions are based on  https://johnculviner.com/automatically-skip-songs-in-spotify-mac-app/, thank you!
     def get_current_track(self, output_type: Literal['str', 'dict'] = 'dict') -> str | dict:
@@ -340,6 +343,8 @@ class SpotifyController:
         )
         output, err = process.communicate()
         print(output.decode('utf-8').strip(), err.decode('utf-8').strip())
+
+
 
 ########### MUSIC CHARACTERISTICS ###########
 def load_librosa_file(file_path) -> tuple:
@@ -751,6 +756,8 @@ def compute_all_musical_features(audio_path: str | Path, verbose: bool = False):
 
     return bpm_from_beats, spectral_flux_normalized, spectral_centroid, ioi_cv, syncopation_degree, syncopation_ratio
 
+
+# todo: include loudness (LUFS)?
 
 if __name__ == '__main__':
     # load audio:
