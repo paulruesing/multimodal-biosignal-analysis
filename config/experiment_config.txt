@@ -10,44 +10,51 @@ Serial Sampling Rate --- 1000
 
 # mvc settings:
 Use Initial MVC --- True
-Initial MVC --- 70
+Initial MVC --- 50
 MVC Maximum Time --- 30
 
 # sampling smoothing settings:
-Force Smoothing Alpha --- 0.1
+Force Smoothing Alpha --- 0.05
 ECG Smoothing Alpha --- 0.4
 GSR Smoothing Alpha --- 0.4
 
 # master display settings:
-Display ECG --- False
-Display GSR --- False
+Display ECG --- True
+Display GSR --- True
+Display Refresh Rate --- 30
+
+
+### general:
+# enter 0 if this is the first trial of this subject:
+Last Song Counter --- 0
 
 
 ### motor task:
 # user display settings:
 Display Relative Performance --- True
-# include display gauge bool?
+Include Force Gauge Plot --- False
 
 # target:
-Target Sine Minimum --- 5
-Target Sine Maximum --- 20
+Target Sine Minimum --- 7.5
+Target Sine Maximum --- 22.5
 Use Relative Target Frequency --- True
-# design this:
-Ratio Target Sine Frequency Music BPM --- 0.1
+# design this:  (157.7 bpm is the highest we currently have -> 2.63 Hz
+Ratio Target Sine Frequency Music BPM --- 0.075
 Absolute Target Sine Frequency --- 0.1
 Target Display Corridor --- 10
 
 # time (seconds):
 Pre Trial Time --- 30
 Pre Accuracy Measurement Time --- 5
-Motor Trial Duration --- 60
+Motor Trial Duration --- 45
 
 
 ### questionnaires:
 # onboarding:
-Instrument Question --- Do you play an instrument? If yes, which:
+Instrument Question --- Do you play an instrument or sing? If yes, please specify:
 Listening Habit Question --- How often do you listen to music?
 Listening Habit Options --- Most of the day, A small part of the day, Every 2 or 3 days, Seldom
+Dancing Question --- How much do you like moving to music? (0 = not at all, 7 = love dancing)
 Athletic Ability Question --- Please rate your current athleticism. (0 = unfit, 7 = professional)
 Health Question Intro --- To ensure this study is safe for you and to help us account for individual differences in nervous system function, we need to understand your motor health history. Please answer truthfully and know that your data is being treated confidentially.
 Known Disease Question --- Have you ever been diagnosed by a healthcare professional with any neural condition (e.g., epilepsy or seizure disorder, stroke or transient ischemic attack (TIA), multiple sclerosis (MS), Parkinson's disease, peripheral neuropathy)? If yes, which:
@@ -60,3 +67,7 @@ Familiarity Question --- How well do you know this song? (0 = never heard it, 7 
 # post trial:
 Liking Question --- How did you like the song? (0: terrible, 7: extremely well)
 Emotional Question --- Please rate your overall emotional state right now. (0: extremely distressed, 7 = extremely happy/peaceful)
+
+# offboarding:
+Fatigue Question --- How fatiguing was the overall experiment to you? (0 = completely easy, 7 = very tiring)
+Pleasure Question --- How much did you enjoy the experiment? (0 = very dull/unpleasant, 7 = very fun)
