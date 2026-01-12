@@ -7,7 +7,7 @@ import matplotlib.colors as mcolors
 import matplotlib.patches as patches
 from matplotlib.collections import PatchCollection
 from matplotlib.widgets import Button, Slider
-from matplotlib.animation import FuncAnimation
+import matplotlib.animation as animation
 from typing import Callable, Literal, Tuple
 import multiprocessing
 import os
@@ -16,6 +16,20 @@ import math
 
 import src.utils.file_management as filemgmt
 import src.pipeline.signal_features as features
+
+
+############### MATPLOTLIB PREP ###############
+# prevent AttributeErrors if cancelling animation:
+_original_step = animation.Animation._step
+def patched_step(self):
+    """Override _step to handle None event_source gracefully."""
+    if self.event_source is None:
+        return False  # Stop animation cleanly
+    try:
+        return _original_step(self)
+    except AttributeError:  # sometimes TkAgg backend causes AttributeErrors upon animation closing
+        return False  # Catch interval error, stop safely
+animation.Animation._step = patched_step
 
 mpl.use('Qt5Agg')
 
@@ -324,7 +338,7 @@ def animate_electrode_heatmap(values: np.ndarray | list[list[float]],
         return circle_collection, [info_text]  # if doesn't work -> switch back to return circles + [info_text]
 
     global ani  # store animation in global namespace
-    ani = FuncAnimation(fig, update, frames=total_frames, blit=False,
+    ani = animation.FuncAnimation(fig, update, frames=total_frames, blit=False,
                         interval=int(1000 / animation_fps), repeat=True)
     plt.show()
 
