@@ -52,11 +52,11 @@ EEG_CHANNELS = ['Fpz', 'Fp1', 'Fp2',
                 'O1', 'Oz', 'O2',
                 ]  # according to https://www.bitbrain.com/neurotechnology-products/water-based-eeg/versatile-eeg
 EEG_CHANNELS_BY_AREA = {
-    area_label: [ch for ch in EEG_CHANNELS if (ch[:len(area_abbr)] == area_abbr) and (len(ch) == len(area_abbr)+1)] for area_label, area_abbr in [
+    area_label: [ch for ch in EEG_CHANNELS if (ch[:len(area_abbr)] == area_abbr) and (ch[len(area_abbr):].isdigit())] for area_label, area_abbr in [
         ('Frontal Pole', 'Fp'), ('Anterior Frontal', 'AF'), ('Fronto-Central', 'FC'), ('Frontal', 'F'),
         ('Fronto-Temporal', 'FT'), ('Temporal', 'T'), ('Central', 'C'), ('Temporo-Parietal', 'TP'),
         ('Centro-Parietal', 'CP'), ('Parietal', 'P'), ('Parieto-Occipital', 'PO'), ('Occipital', 'O')]}
-EEG_CHANNEL_IND_DICT = {ch: ind+1 for ind, ch in enumerate(EEG_CHANNELS)}
+EEG_CHANNEL_IND_DICT = {ch: ind for ind, ch in enumerate(EEG_CHANNELS)}
 
 EEG_POSITIONS = {'Fpz': (0.0, 0.602),
                  'Fp1': (-0.165, 0.5599999999999999),
@@ -127,7 +127,7 @@ x_list = list(np.linspace(-.6, .6, 8))*8
 y_list = []
 for element in list(np.linspace(-.6, .6, 8))[::-1]:
     y_list += [element] * 8
-EMG_POSITIONS = {str(ind+1): (x, y) for ind, (x, y) in enumerate(zip(x_list, y_list))}
+EMG_POSITIONS = {str(ind): (x, y) for ind, (x, y) in enumerate(zip(x_list, y_list))}
 
 
 ##############  AUXILIARY FUNCTIONS ##############
@@ -156,7 +156,7 @@ def initialise_electrode_heatmap(
     # type conversion:
     if isinstance(values, list): values = np.array(values)
     if not isinstance(positions, dict):  # dummy channel labels if no dict provided
-        positions = {ind+1: entry for ind, entry in enumerate(positions)}
+        positions = {ind: entry for ind, entry in enumerate(positions)}
 
     # sanity checks:
     n_channels = values.shape[0]
@@ -396,7 +396,7 @@ def plot_freq_domain(amplitude_spectrum: np.ndarray[float, float] | np.ndarray[f
     if len(amplitude_spectrum.shape) == 1:  # extend by pseudo-axis if only 1D array provided
         amplitude_spectrum = amplitude_spectrum[:, np.newaxis]
     for ch in range(amplitude_spectrum.shape[1]):
-        plt.plot(frequencies, amplitude_spectrum[:, ch], label=f'Channel {ch+1}' if channel_labels is None else channel_labels[ch])
+        plt.plot(frequencies, amplitude_spectrum[:, ch], label=f'Channel {ch}' if channel_labels is None else channel_labels[ch])
     plt.xlabel('Frequency [Hz]')
     plt.ylabel('Amplitude')
     plt.title(plot_title)

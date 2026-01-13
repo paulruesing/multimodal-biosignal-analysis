@@ -18,7 +18,7 @@ from src.pipeline.visualizations import plot_freq_domain, EEG_CHANNELS, EEG_CHAN
 import src.utils.file_management as filemgmt
 
 # constant parameters:
-EMG_CHANNELS = [f"EMG{i:02d}" for i in range(1, 65)]
+EMG_CHANNELS = [f"EMG{i:02d}" for i in range(64)]
 
 class BiosignalPreprocessor:
     """
@@ -984,7 +984,7 @@ class BiosignalPreprocessor:
             self._mne_amplitude_compliant_data.info['bads'].extend(bad_channels)
 
         # convert to indices (starting at 1 and return), for EMG we can just cut off the first 3 letters (EMG13 -> 13)
-        bad_channel_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in bad_channels] if self.modality == 'eeg' else [int[ch[3:]] for ch in bad_channels]
+        bad_channel_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in bad_channels] if self.modality == 'eeg' else [int(ch[3:]) for ch in bad_channels]
         if len(bad_channel_inds) == self.n_channels: raise ValueError("current amplitude_rejection_threshold causes all channels to be marked as bad!")
         return bad_channel_inds
 
@@ -1168,7 +1168,7 @@ class BiosignalPreprocessor:
                                         verbose: bool = True) -> tuple[float, float]:
         """ Returns specificity (= true neg. rate) and selectivity (= true pos. rate) for surrogate bad channel recognition based on amplitude thresholding. """
         with mne.utils.use_log_level('warning'):  # context manager to keep console output clean
-            all_channels = [i + 1 for i in range(self.n_channels)]
+            all_channels = [i for i in range(self.n_channels)]
             specificity_list = []; selectivity_list = []
             # iterative procedure, to average specificity / selectivity metrics:
             for trial in range(n_runs):
