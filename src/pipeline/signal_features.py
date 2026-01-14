@@ -20,6 +20,7 @@ FREQUENCY_BANDS = {
     #'emg_gamma': (35, 60)
 }
 
+########### HELPER FUNCTIONS ###########
 def check_2d_numpy_array(input_array: np.ndarray,
                          axis: Literal[0, 1] | None = None) -> tuple[np.ndarray, Literal[0, 1]]:
     # input sanity checks:
@@ -170,6 +171,7 @@ def discrete_fourier_transform(input_array: np.ndarray,
     return amplitude_spectrum, freqs_pos
 
 
+########### BIOLOGICAL FEATURES ###########
 def multitaper_psd(input_array: np.ndarray,
                    sampling_freq: float,
                    nw: float = 3,
@@ -270,74 +272,371 @@ def multitaper_psd(input_array: np.ndarray,
     return spectrograms, timestamps, freqs
 
 
-if __name__ == '__main__':
-    from pathlib import Path
-    from matplotlib import pyplot as plt
-    import matplotlib as mpl
+def multitaper_magnitude_squared_coherence(
+        eeg_array: np.ndarray,
+        emg_array: np.ndarray,
+        sampling_freq: float,
+        nw: float = 3,
+        window_length_sec: float = 1.0,
+        overlap_frac: float = 0.5,
+        eeg_axis: Literal[0, 1] = 0,
+        emg_axis: Literal[0, 1] = 0,
+        verbose: bool = False,
+        plot_result: bool = False,
+        **plot_kwargs) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute multitaper magnitude squared coherence between EEG and EMG signals.
 
-    mpl.use('MacOSX')
+    Coherence is computed per frequency, per time window, and per EEG-EMG channel pair
+    using the multitaper method. Output preserves all pairwise relationships.
 
-    # global vars:
-    ROOT = Path().resolve().parent.parent
-    QTC_DATA = ROOT / "data" / "qtc_measurements" / "2025_06"
-    subject_data_dir = QTC_DATA / "sub-10"
+    Parameters
+    ----------
+    eeg_array : ndarray
+        EEG input signal, shape (n_samples, n_eeg_channels) or (n_eeg_channels, n_samples)
+    emg_array : ndarray
+        EMG input signal, shape (n_samples, n_emg_channels) or (n_emg_channels, n_samples)
+    sampling_freq : float
+        Sampling frequency (Hz)
+    nw : float
+        Time-half-bandwidth product (affects frequency smoothing). Default: 3
+    window_length_sec : float
+        Window length in seconds (affects time resolution). Default: 1.0
+    overlap_frac : float
+        Overlap between windows (0.5 = 50%, standard). Default: 0.5
+    eeg_axis : Literal[0, 1]
+        Time axis of EEG array. 0 if (n_samples, n_channels), 1 if (n_channels, n_samples). Default: 0
+    emg_axis : Literal[0, 1]
+        Time axis of EMG array. 0 if (n_samples, n_channels), 1 if (n_channels, n_samples). Default: 0
+    verbose : bool
+        Print progress information. Default: False
+    plot_result : bool
+        Plot results. Default: False
+    **plot_kwargs : dict
+        Keyword arguments passed to plotting function (e.g., title)
 
-    # area to scrutinize:
-    use_ch_subset = False
-    ch_subset = visualizations.EEG_CHANNELS_BY_AREA['Fronto-Central']
-    ch_subset_inds = [visualizations.EEG_CHANNEL_IND_DICT[ch]-1 for ch in ch_subset]  # -1 to convert to computer-indices (0 = start)
+    Returns
+    -------
+    coherences : ndarray
+        Magnitude squared coherence. Shape: (n_freqs, n_times, n_eeg_channels, n_emg_channels)
+        Value range: [0, 1] where 1 = perfect coherence, 0 = no coherence
+    time_centers : ndarray
+        Time center of each window (seconds). Shape: (n_times,)
+    freqs : ndarray
+        Frequency array (Hz). Shape: (n_freqs,)
 
-    ### load data:
-    print('Loading data...')
-    # mmap_mode='r' leads to memory-mapped read-only access -> only loads data then accessed through slicing (more efficient!)
-    input_file = np.load(subject_data_dir / "motor_eeg_full.npy", mmap_mode='r').T[:2048*20, ch_subset_inds if use_ch_subset else list(range(64))]  # 1 minute
-    sampling_freq = 2048  # Hz
-    n_channels = input_file.shape[1]; n_timesteps = input_file.shape[0]
+    Notes
+    -----
+    Magnitude squared coherence is defined as:
+        MSC(f) = |CSD(f)|² / (PSD_EEG(f) * PSD_EMG(f))
 
-    # compute dynamic multi-taper PSD:
-    window_length_psd = .2
-    spectrograms, timestamps, freqs = multitaper_psd(input_array=input_file, sampling_freq=sampling_freq, nw=3,
-                                                     window_length_sec=window_length_psd, overlap_frac=0.5, axis=0, verbose=True,
-                                                     # plot spectrogram for channel-average:
-                                                     plot_result=False, frequency_range=(0, 100),)
-    # spectrograms shape: (n_channels, n_windows, n_frequencies)
-    # timestamps shape: (n_windows), frequencies shape: (n_frequencies)
-    n_windows = spectrograms.shape[1]
-    psd_sampling_freq = n_windows / (n_timesteps / sampling_freq)  # new_timesteps / time_duration
+    where CSD is the cross-spectral density and PSD is power spectral density.
 
-    # average (and eventually log-transform) spectrogram across frequency bins:
-    do_log_transform: bool = True
-    freq_averaged_psd_dict = {}  # keys: band-label keys, values: np.ndarrays shaped (n_channels, n_windows)
-    for band_label, band_range in FREQUENCY_BANDS.items():
-        frequency_mask = (freqs >= band_range[0]) & (freqs < band_range[1])  # select band frequencies
+    The multitaper method uses Slepian sequences (DPSS tapers) to reduce spectral
+    leakage and improve frequency resolution.
+    """
+
+    # Normalize input arrays to (n_samples, n_channels) format
+    eeg_array = _normalize_to_time_first(eeg_array, axis=eeg_axis)
+    emg_array = _normalize_to_time_first(emg_array, axis=emg_axis)
+
+    # Extract dimensions
+    n_samples_eeg, n_eeg_channels = eeg_array.shape
+    n_samples_emg, n_emg_channels = emg_array.shape
+
+    # Validate sample alignment
+    if n_samples_eeg != n_samples_emg:
+        raise ValueError(
+            f"EEG and EMG must have same number of samples. "
+            f"Got EEG: {n_samples_eeg}, EMG: {n_samples_emg}"
+        )
+
+    n_samples = n_samples_eeg
+
+    # Window parameters
+    window_samples = int(window_length_sec * sampling_freq)
+    hop_samples = int(window_samples * (1 - overlap_frac))
+    k = int(2 * nw - 1)  # number of tapers
+
+    # Generate DPSS tapers
+    tapers = signal.windows.dpss(M=window_samples, NW=nw, Kmax=k)
+    # tapers shape: (k, window_samples)
+
+    # Initialize output storage
+    coherence_list = []  # Will accumulate (n_windows, n_freqs, n_eeg_ch, n_emg_ch)
+    time_centers = []
+
+    if verbose:
+        print(
+            f"Computing magnitude squared coherence between {n_eeg_channels} EEG "
+            f"and {n_emg_channels} EMG channels."
+        )
+        print(
+            f"Window length: {window_length_sec:.3f}s, "
+            f"Overlap: {overlap_frac*100:.1f}%, "
+            f"Tapers: {k}"
+        )
+
+    # Slide window across signal
+    n_windows = (n_samples - window_samples) // hop_samples + 1
+
+    for win_idx in tqdm(range(n_windows), disable=not verbose):
+        start_idx = win_idx * hop_samples
+        end_idx = start_idx + window_samples
+
+        # Extract windows for this timestep
+        eeg_window = eeg_array[start_idx:end_idx, :]  # (window_samples, n_eeg_ch)
+        emg_window = emg_array[start_idx:end_idx, :]  # (window_samples, n_emg_ch)
+
+        # Compute PSD for EEG and EMG, and CSD between all pairs using all tapers
+        psd_eeg_tapered = []  # Will be (k, n_freqs, n_eeg_ch)
+        psd_emg_tapered = []  # Will be (k, n_freqs, n_emg_ch)
+        csd_tapered = []      # Will be (k, n_freqs, n_eeg_ch, n_emg_ch)
+
+        for taper in tapers:
+            # Apply taper to both signals
+            eeg_tapered = eeg_window * taper[:, np.newaxis]  # (window_samples, n_eeg_ch)
+            emg_tapered = emg_window * taper[:, np.newaxis]  # (window_samples, n_emg_ch)
+
+            # Compute FFTs
+            eeg_fft = np.fft.rfft(eeg_tapered, axis=0)  # (n_freqs, n_eeg_ch)
+            emg_fft = np.fft.rfft(emg_tapered, axis=0)  # (n_freqs, n_emg_ch)
+
+            # Compute one-sided PSD (power spectral density)
+            psd_eeg = np.abs(eeg_fft) ** 2 / (sampling_freq * window_samples)  # (n_freqs, n_eeg_ch)
+            psd_emg = np.abs(emg_fft) ** 2 / (sampling_freq * window_samples)  # (n_freqs, n_emg_ch)
+
+            psd_eeg_tapered.append(psd_eeg)
+            psd_emg_tapered.append(psd_emg)
+
+            # Compute cross-spectral density (CSD) between all EEG-EMG pairs
+            # CSD[f, eeg_ch, emg_ch] = conj(EEG_FFT[f, eeg_ch]) * EMG_FFT[f, emg_ch] / (sampling_freq * window_samples)
+            csd = (
+                np.conj(eeg_fft)[:, :, np.newaxis] * emg_fft[:, np.newaxis, :]
+                / (sampling_freq * window_samples)
+            )  # (n_freqs, n_eeg_ch, n_emg_ch)
+            csd_tapered.append(csd)
+
+        # Average across tapers
+        psd_eeg_mean = np.mean(psd_eeg_tapered, axis=0)  # (n_freqs, n_eeg_ch)
+        psd_emg_mean = np.mean(psd_emg_tapered, axis=0)  # (n_freqs, n_emg_ch)
+        csd_mean = np.mean(csd_tapered, axis=0)          # (n_freqs, n_eeg_ch, n_emg_ch)
+
+        # Compute magnitude squared coherence
+        # MSC = |CSD|² / (PSD_EEG * PSD_EMG)
+        # Numerator: |CSD|²
+        numerator = np.abs(csd_mean) ** 2  # (n_freqs, n_eeg_ch, n_emg_ch)
+
+        # Denominator: PSD_EEG[:, :, None] * PSD_EMG[:, None, :]
+        # Broadcast to (n_freqs, n_eeg_ch, n_emg_ch)
+        denominator = (
+            psd_eeg_mean[:, :, np.newaxis] * psd_emg_mean[:, np.newaxis, :]
+        )
+
+        # Compute coherence (clip to [0, 1] to handle numerical errors)
+        coherence_window = np.clip(numerator / denominator, 0, 1)  # (n_freqs, n_eeg_ch, n_emg_ch)
+
+        coherence_list.append(coherence_window)
+
+        # Save time center (only needed once)
+        if win_idx == 0:
+            freqs = np.fft.rfftfreq(window_samples, d=1/sampling_freq)
+
+        time_center = (start_idx + window_samples / 2) / sampling_freq
+        time_centers.append(time_center)
+
+    # Convert to numpy arrays
+    # Shape: (n_windows, n_freqs, n_eeg_ch, n_emg_ch) -> transpose to (n_freqs, n_times, n_eeg_ch, n_emg_ch)
+    coherences = np.array(coherence_list)  # (n_windows, n_freqs, n_eeg_ch, n_emg_ch)
+    coherences = np.transpose(coherences, (1, 0, 2, 3))  # (n_freqs, n_times, n_eeg_ch, n_emg_ch)
+    time_centers = np.array(time_centers)
+
+    # Plot if desired
+    if plot_result:
+        _plot_coherence_result(
+            coherences=coherences,
+            time_centers=time_centers,
+            freqs=freqs,
+            n_eeg_channels=n_eeg_channels,
+            n_emg_channels=n_emg_channels,
+            **plot_kwargs
+        )
+
+    return coherences, time_centers, freqs
+
+
+def _normalize_to_time_first(
+        array: np.ndarray,
+        axis: Literal[0, 1]) -> np.ndarray:
+    """
+    Normalize input array to (n_samples, n_channels) format.
+
+    Parameters
+    ----------
+    array : ndarray
+        Input signal, either (n_samples, n_channels) or (n_channels, n_samples)
+    axis : Literal[0, 1]
+        Time axis. 0 if already (n_samples, n_channels), 1 if (n_channels, n_samples)
+
+    Returns
+    -------
+    normalized : ndarray
+        Array in (n_samples, n_channels) format
+    """
+    if array.ndim != 2:
+        raise ValueError(f"Input array must be 2D. Got shape {array.shape}")
+
+    if axis == 0:
+        return array
+    elif axis == 1:
+        return array.T
+    else:
+        raise ValueError(f"axis must be 0 or 1. Got {axis}")
+
+
+def _plot_coherence_result(
+        coherences: np.ndarray,
+        time_centers: np.ndarray,
+        freqs: np.ndarray,
+        n_eeg_channels: int,
+        n_emg_channels: int,
+        **plot_kwargs) -> None:
+    """
+    Plot coherence results. Currently plots average across all channel pairs.
+
+    Parameters
+    ----------
+    coherences : ndarray
+        Shape (n_freqs, n_times, n_eeg_ch, n_emg_ch)
+    time_centers : ndarray
+        Time centers (seconds)
+    freqs : ndarray
+        Frequency array (Hz)
+    n_eeg_channels : int
+        Number of EEG channels
+    n_emg_channels : int
+        Number of EMG channels
+    **plot_kwargs : dict
+        Additional plotting kwargs
+    """
+    # Average across all channel pairs
+    coherence_avg = np.mean(coherences, axis=(2, 3))  # (n_freqs, n_times)
+
+    try:
+        from . import visualizations
+        fig_title = (
+            f'Average MSC: {n_eeg_channels} EEG × {n_emg_channels} EMG'
+            if "title" not in plot_kwargs else plot_kwargs.pop("title")
+        )
+        visualizations.plot_spectrogram(
+            spectrogram=coherence_avg,
+            title=fig_title,
+            timestamps=time_centers,
+            frequencies=freqs,
+            **plot_kwargs
+        )
+    except ImportError:
+        print(
+            "Visualization module not available. Skipping plot. "
+            "Coherence shape: (n_freqs, n_times, n_eeg_ch, n_emg_ch) = "
+            f"({coherences.shape[0]}, {coherences.shape[1]}, {n_eeg_channels}, {n_emg_channels})"
+        )
+
+
+def freq_average_spectrogram(
+        spectrograms,
+        freqs,
+        frequency_bands=None,
+        log_transform=True,
+        log_epsilon=1e-10,
+        aggregate_axis=2
+) -> dict[str, np.ndarray]:
+    """
+    Compute frequency-averaged power spectral density for defined frequency bands.
+
+    Parameters
+    ----------
+    spectrograms : np.ndarray
+        Spectrogram data of shape (n_channels, n_windows, n_frequencies).
+    freqs : np.ndarray
+        Frequency values corresponding to spectrogram axis. Shape (n_frequencies,).
+    frequency_bands : dict, optional
+        Mapping of band labels to (min_freq, max_freq) tuples.
+        Example: {'alpha': (8, 12), 'beta': (12, 30)}.
+        If None, uses DEFAULT_FREQUENCY_BANDS.
+    log_transform : bool, optional
+        Whether to apply log10 transform to spectrograms. Default is True.
+    log_epsilon : float, optional
+        Small constant added before log transform to avoid log(0). Default is 1e-10.
+    aggregate_axis : int, optional
+        Axis along which to average (typically 2 for frequencies). Default is 2.
+
+    Returns
+    -------
+    eeg_freq_averaged_psd_dict : dict
+        Dictionary with band labels as keys and (n_windows, n_channels) arrays as values.
+
+    Raises
+    ------
+    ValueError
+        If spectrograms shape is invalid, frequency ranges exceed available frequencies,
+        or required inputs are missing.
+    """
+
+    # Use default frequency bands if not provided
+    if frequency_bands is None:
+        frequency_bands = FREQUENCY_BANDS
+
+    # Input validation
+    if spectrograms.ndim != 3:
+        raise ValueError(
+            f"spectrograms must be 3D array, got shape {spectrograms.shape}"
+        )
+
+    n_channels, n_windows, n_frequencies = spectrograms.shape
+
+    if len(freqs) != n_frequencies:
+        raise ValueError(
+            f"freqs length ({len(freqs)}) must match spectrograms frequency axis ({n_frequencies})"
+        )
+
+    if not frequency_bands:
+        raise ValueError("frequency_bands dict cannot be empty")
+
+    # Initialize output dictionary
+    eeg_freq_averaged_psd_dict = {}
+
+    # Process each frequency band
+    for band_label, (min_freq, max_freq) in frequency_bands.items():
+        # Validate frequency range
+        if min_freq < freqs.min() or max_freq > freqs.max():
+            raise ValueError(
+                f"Band '{band_label}' range ({min_freq}, {max_freq}) exceeds available "
+                f"frequencies ({freqs.min():.2f}, {freqs.max():.2f})"
+            )
+
+        # Create frequency mask for this band
+        frequency_mask = (freqs >= min_freq) & (freqs < max_freq)
+
+        if not frequency_mask.any():
+            print(f"No frequencies found for band '{band_label}' in range ({min_freq}, {max_freq})")
+
+        # Extract spectrogram subset for this band
         spectrogram_subset = spectrograms[:, :, frequency_mask]
-        if do_log_transform: spectrogram_subset = np.log10(spectrogram_subset + 1e-10)
-        freq_averaged_psd_dict[band_label] = np.squeeze(np.mean(spectrogram_subset, axis=2))  # average across freqs.
 
-    # lineplot overview:
-    """
-    fig, ax = plt.subplots()
-    for ch in range(n_channels):
-        ax.plot(timestamps, freq_averaged_psd_dict['beta'][ch, :],
-                 label=visualizations.EEG_CHANNELS[ch])
-    plt.xlabel('Time [s]'); plt.ylabel('Power [V^2/Hz]')
-    plt.legend()
-    plt.show()
-    """
+        # Apply log transform if requested
+        if log_transform:
+            spectrogram_subset = np.log10(spectrogram_subset + log_epsilon)
 
-    # todo: ponder visualization of subset of EEG channels (e.g. np.zeros for the others)
+        # Average across frequencies and transpose to (n_windows, n_channels)
+        averaged = np.mean(spectrogram_subset, axis=aggregate_axis)
+        eeg_freq_averaged_psd_dict[band_label] = np.squeeze(averaged).T
 
-    # animation:
-    print(psd_sampling_freq)
-    visualizations.animate_electrode_heatmap(
-        freq_averaged_psd_dict['beta'].T,  # requires shape (n_timesteps, n_channels)
-        positions=visualizations.EMG_POSITIONS, add_head_shape=False,
-        sampling_rate=psd_sampling_freq, animation_fps=psd_sampling_freq,
-        value_label="Power [V^2/Hz]" if not do_log_transform else "Power [V^2/Hz] [log10]",
-        plot_title="EEG PSD (Beta-Band)"
-    )
+    return eeg_freq_averaged_psd_dict
 
 
+
+########### STATISTICAL FEATURES ###########
 def compute_feature_mi_importance(feature_array, target_array, feature_labels,
                                   target_label: str = 'Target', target_type: str = 'auto',
                                   feature_type: str = 'auto', random_state: int = 42,
@@ -584,3 +883,73 @@ def compute_feature_mi_importance(feature_array, target_array, feature_labels,
         return fig, ax, feature_importance
 
     return feature_importance
+
+
+
+
+if __name__ == '__main__':
+    from pathlib import Path
+    from matplotlib import pyplot as plt
+    import matplotlib as mpl
+
+    mpl.use('MacOSX')
+
+    # global vars:
+    ROOT = Path().resolve().parent.parent
+    QTC_DATA = ROOT / "data" / "qtc_measurements" / "2025_06"
+    subject_data_dir = QTC_DATA / "sub-10"
+
+    # area to scrutinize:
+    use_ch_subset = False
+    ch_subset = visualizations.EEG_CHANNELS_BY_AREA['Fronto-Central']
+    ch_subset_inds = [visualizations.EEG_CHANNEL_IND_DICT[ch]-1 for ch in ch_subset]  # -1 to convert to computer-indices (0 = start)
+
+    ### load data:
+    print('Loading data...')
+    # mmap_mode='r' leads to memory-mapped read-only access -> only loads data then accessed through slicing (more efficient!)
+    input_file = np.load(subject_data_dir / "motor_eeg_full.npy", mmap_mode='r').T[:2048*20, ch_subset_inds if use_ch_subset else list(range(64))]  # 1 minute
+    sampling_freq = 2048  # Hz
+    n_channels = input_file.shape[1]; n_timesteps = input_file.shape[0]
+
+    # compute dynamic multi-taper PSD:
+    window_length_psd = .2
+    spectrograms, timestamps, freqs = multitaper_psd(input_array=input_file, sampling_freq=sampling_freq, nw=3,
+                                                     window_length_sec=window_length_psd, overlap_frac=0.5, axis=0, verbose=True,
+                                                     # plot spectrogram for channel-average:
+                                                     plot_result=False, frequency_range=(0, 100),)
+    # spectrograms shape: (n_channels, n_windows, n_frequencies)
+    # timestamps shape: (n_windows), frequencies shape: (n_frequencies)
+    n_windows = spectrograms.shape[1]
+    psd_sampling_freq = n_windows / (n_timesteps / sampling_freq)  # new_timesteps / time_duration
+
+    # average (and eventually log-transform) spectrogram across frequency bins:
+    do_log_transform: bool = True
+    freq_averaged_psd_dict = {}  # keys: band-label keys, values: np.ndarrays shaped (n_channels, n_windows)
+    for band_label, band_range in FREQUENCY_BANDS.items():
+        frequency_mask = (freqs >= band_range[0]) & (freqs < band_range[1])  # select band frequencies
+        spectrogram_subset = spectrograms[:, :, frequency_mask]
+        if do_log_transform: spectrogram_subset = np.log10(spectrogram_subset + 1e-10)
+        freq_averaged_psd_dict[band_label] = np.squeeze(np.mean(spectrogram_subset, axis=2))  # average across freqs.
+
+    # lineplot overview:
+    """
+    fig, ax = plt.subplots()
+    for ch in range(n_channels):
+        ax.plot(timestamps, freq_averaged_psd_dict['beta'][ch, :],
+                 label=visualizations.EEG_CHANNELS[ch])
+    plt.xlabel('Time [s]'); plt.ylabel('Power [V^2/Hz]')
+    plt.legend()
+    plt.show()
+    """
+
+    # todo: ponder visualization of subset of EEG channels (e.g. np.zeros for the others)
+
+    # animation:
+    print(psd_sampling_freq)
+    visualizations.animate_electrode_heatmap(
+        freq_averaged_psd_dict['beta'].T,  # requires shape (n_timesteps, n_channels)
+        positions=visualizations.EMG_POSITIONS, add_head_shape=False,
+        sampling_rate=psd_sampling_freq, animation_fps=psd_sampling_freq,
+        value_label="Power [V^2/Hz]" if not do_log_transform else "Power [V^2/Hz] [log10]",
+        plot_title="EEG PSD (Beta-Band)"
+    )
