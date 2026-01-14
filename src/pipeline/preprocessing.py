@@ -192,8 +192,9 @@ class BiosignalPreprocessor:
 
         try:  # read out non-initialisation attributes
             manual_ics_to_exclude = config_dict.pop('manual_ics_to_exclude')
-        except KeyError:
-            manual_ics_to_exclude = None
+        except KeyError: manual_ics_to_exclude = None
+        try: _ = config_dict.pop('bad_channels')  # this doesn't matter for Preprocessor but data analysis, hence remove
+        except KeyError: pass
 
         # initialise (from input array and config_dict) and return instance:
         instance = cls(np_input_data=np_input_data, **config_dict)
@@ -216,7 +217,7 @@ class BiosignalPreprocessor:
         attr_list = ['sampling_freq', 'modality', 'band_pass_frequencies', 'notch_frequency',
                      'notch_harmonics', 'notch_width', 'reference_channels', 'amplitude_rejection_threshold',
                      'n_ica_components', 'automatic_ic_labelling', 'laplacian_filter_neighbor_radius', 'wavelet_type',
-                     'denoising_threshold_mode', 'manual_ics_to_exclude']
+                     'denoising_threshold_mode', 'manual_ics_to_exclude', 'bad_channels']
         config_dict = {attr_name: getattr(self, attr_name) for attr_name in attr_list}
 
         # save:
@@ -224,15 +225,18 @@ class BiosignalPreprocessor:
             json.dump(config_dict, json_file, indent=4)  # Pretty print with indent=4
         print('Saved config to ', save_path)
 
-    def export_results(self, save_dir: Path | str, identifier: str = None) -> None:
+    def export_results(self, save_dir: Path | str, identifier: str = None, with_config: bool = True) -> None:
         """ Exports results (np_output_data) to .npy """
         # prepare save-title:
-        title = f"Preprocessed {self.modality} {self.n_channels}ch {self.n_timesteps/self.sampling_freq}sec"
+        title = f"Preprocessed {self.modality} {self.n_channels}ch {int(self.n_timesteps/self.sampling_freq)}sec"
         if identifier is not None: title += f" ({identifier})"
         save_path = save_dir / filemgmt.file_title(f"{title}", ".npy")
         # save:
         np.save(save_path, self.np_output_data)
         print('Saved results to ', save_path)
+
+        if with_config:
+            self.export_config(save_dir, identifier=identifier)
 
     ############# PROPERTIES #############
     ### input properties ###
@@ -733,7 +737,13 @@ class BiosignalPreprocessor:
 
         # compute:
         self._np_artefact_free_data = self.mne_artefact_free_data.get_data().T
-        mne.utils.logger.info(f'np data also contains bad channels ({self.bad_channels}).\nConsider excluding such manually!')
+
+        if len(self.bad_channels) > 0:  # if there are bad channels
+            if self.modality == 'eeg':
+                bad_channel_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in self.bad_channels]
+            else:
+                bad_channel_inds = [ch[-2:] for ch in self.bad_channels]
+            print(f'np data also contains bad channels ({self.bad_channels}, corresponding to {bad_channel_inds}).\nConsider excluding such manually!')
 
         return self._np_artefact_free_data
 
@@ -1201,7 +1211,6 @@ class BiosignalPreprocessor:
 
     # todo: validate_artefact_rejection (trial-to-trial variability)
     # later, when multi-trial data is processed
-
     def validate_spatial_filtering(self, verbose: bool = True) -> float:
         """ Averages coherence over all frequencies. """
         with mne.utils.use_log_level('warning'):  # context manager to keep console output clean
@@ -1294,123 +1303,3 @@ class BiosignalPreprocessor:
         if temp_bad_channels != self.mne_amplitude_compliant_data.info['bads']:
             print('New bad channels (de-)selected, will clean downstream results.')
             self.clean_downstream_results(change_in='amplitude thresholding')
-
-if __name__ == '__main__':
-    ROOT = Path().resolve().parent.parent
-    OUTPUT = ROOT / 'output'
-    STUDY_PLOTS = OUTPUT / '250720 jose_data'
-    EXTERNAL_DRIVE = Path("/Volumes/Paul SSD 2/251120 INI Measurements")
-    STUDY_DATA = EXTERNAL_DRIVE / "250720 jose_data"
-    # change these to select subject and trial:
-    subject_data_dir = STUDY_DATA / "sub_03"
-    subject_plot_dir = STUDY_PLOTS / "sub_03"
-    file_title = "mvc_eeg_full"
-
-    ### DATA LOADING
-    print('Loading data...')
-    # mmap_mode='r': memory-mapped read-only access (would accelerate but sometimes deletes files)
-    input_file = np.load(subject_data_dir / f"{file_title}.npy").T#[:2048*20, :]  # 1 minute
-
-    try:  # search matching config
-        config_file = filemgmt.most_recent_file(subject_data_dir, ".json", file_title)
-    except ValueError:
-        print(f"No config file found for {file_title}")
-        config_file = None
-
-    print('Initialising BiosignalPreprocessor...')
-    if config_file is not None:  # try initialising from config:
-        prepper = BiosignalPreprocessor.init_from_config(config_file, input_file)
-    else:
-        data_modality: Literal['eeg', 'emg'] = 'emg' if 'emg' in file_title else 'eeg'
-        sampling_freq = 2048  # Hz
-        prepper = BiosignalPreprocessor(
-            np_input_data=input_file,
-            sampling_freq=sampling_freq,
-            modality=data_modality,
-            band_pass_frequencies='auto',
-            amplitude_rejection_threshold=.005
-        )
-
-    ### INPUT PLOTS
-    # fourier spectrum:
-    features.discrete_fourier_transform(prepper.np_input_data,
-                                        sampling_freq=prepper.sampling_freq,
-                                        frequency_range=(0, 100),
-                                        plot_title=f'Raw Data - Fourier Spectrum ({file_title})',
-                                        save_dir=subject_plot_dir,
-
-                                        plot_result=True, )
-    # PSD spectrogram:
-    features.multitaper_psd(input_array=prepper.np_input_data, sampling_freq=prepper.sampling_freq, nw=3,
-                            window_length_sec=1.0, overlap_frac=0.5, axis=0, verbose=True,
-                            plot_result=True, frequency_range=(0, 100),
-                            save_dir=subject_plot_dir, title=f'Input Averaged PSD ({file_title})')
-
-    ### ARTEFACT REJECTION
-    # automatic artefact rejection:
-    _ = prepper.mne_artefact_free_data
-
-    if prepper.modality == 'eeg':  # manual inspection of ICs (only for EEG!)
-        if input("Do you want to visualize all ICs? Press enter if yes, else type anything: ") == "":
-            for ic_ind in range(prepper.n_ica_components):
-                prepper.plot_independent_component(ic_ind,
-                                                   verbose=(ic_ind == 0),  # print only on first iteration
-                                                   )
-        # possibility for changes:
-        manual_ics = input(
-            "Please enter additional independent components to exclude, separated by space (e.g. '10 13 7'): ")
-        if manual_ics != '':
-            manual_ics = [int(ind_str.strip()) for ind_str in manual_ics.split(' ')]
-            prepper.manual_ics_to_exclude = manual_ics
-
-    # save to config:
-    prepper.export_config(subject_data_dir, file_title)
-
-    ### OUTPUT PLOTS
-    # fourier spectrum:
-
-    features.discrete_fourier_transform(prepper.np_output_data,
-                                        sampling_freq=prepper.sampling_freq,
-                                        frequency_range=(0, 100),
-                                        plot_title=f'Preprocessed Data - Fourier Spectrum ({file_title})',
-                                        save_dir=subject_plot_dir,
-                                        plot_result=True)
-    # PSD spectrogram:
-    spectrograms, timestamps, freqs = features.multitaper_psd(input_array=prepper.np_output_data,
-                                                              sampling_freq=prepper.sampling_freq, nw=3,
-                                                              window_length_sec=.2, overlap_frac=0.5, axis=0,
-                                                              verbose=True,
-                                                              plot_result=True, frequency_range=(0, 100),
-                                                              save_dir=subject_plot_dir,
-                                                              title=f'Output Averaged PSD ({file_title})')
-
-    # spectrograms shape: (n_channels, n_windows, n_frequencies)
-    # timestamps shape: (n_windows), frequencies shape: (n_frequencies)
-    psd_sampling_freq = spectrograms.shape[1] / (len(prepper.np_output_data) / prepper.sampling_freq)  # new_timesteps / time_duration
-
-    # average (and eventually log-transform) spectrogram across frequency bins:
-    do_log_transform: bool = True
-    freq_averaged_psd_dict = {}  # keys: band-label keys, values: np.ndarrays shaped (n_channels, n_windows)
-    for band_label, band_range in features.FREQUENCY_BANDS.items():
-        frequency_mask = (freqs >= band_range[0]) & (freqs < band_range[1])  # select band frequencies
-        spectrogram_subset = spectrograms[:, :, frequency_mask]
-        if do_log_transform: spectrogram_subset = np.log10(spectrogram_subset + 1e-10)
-        freq_averaged_psd_dict[band_label] = np.squeeze(np.mean(spectrogram_subset, axis=2))  # average across freqs.
-
-    # animation:
-    band_to_scrutinize = 'beta'
-    visualizations.animate_electrode_heatmap(
-        freq_averaged_psd_dict[band_to_scrutinize].T,  # requires shape (n_timesteps, n_channels)
-        positions=visualizations.EEG_POSITIONS if prepper.modality == 'eeg' else visualizations.EMG_POSITIONS,
-        add_head_shape=prepper.modality == 'eeg',
-        sampling_rate=psd_sampling_freq, animation_fps=psd_sampling_freq,
-        value_label="Power [V^2/Hz]" if not do_log_transform else "Power [V^2/Hz] [log10]",
-        plot_title=f"{prepper.modality.upper()} PSD ({band_to_scrutinize}-band)"
-    )
-
-    ### VALIDATION
-    filt_snr_increase, filt_psd_diff = prepper.validate_filtering()
-    if prepper.modality == 'eeg': ref_snr_increase = prepper.validate_referencing()
-    specificity, selectivity = prepper.validate_amplitude_thresholding()
-    spat_filt_local_coh_decrease = prepper.validate_spatial_filtering()
-    denoise_snr_increase = prepper.validate_wavelet_denoising()
