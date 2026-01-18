@@ -216,7 +216,7 @@ def dynamometer_force_mapping(v, mvc_kg: float | None = None):  # here with defa
     Returns [kg] if global var. _current_mvc_kg is None else [% MVC].
     """
     factor = 1 if mvc_kg is None else 100 / mvc_kg  # consider MVC
-    return (2.2 * (v ** 4.1071) - 6) * factor  # 2.8708 * (v ** 4.1071) - 3 before!
+    return (2.2 * (v ** 4.1071) - 15) * factor  # 2.8708 * (v ** 4.1071) - 3 before!
 
 
 def sampling_process(shared_dict,
@@ -2135,7 +2135,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             elif save_log_counter % (save_log_working_memory_size // 200) == 0:  # interim save
                 save_log_dict(suffix="Interim Save")
             elif force_log_saving_event.is_set():  # forced full save
-                save_log_dict(suffix="Forced Full Save")
+                save_log_dict(suffix="Final Full Save")
                 force_log_saving_event.clear()
                 log_saving_done_event.set()
 
