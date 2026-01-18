@@ -5,6 +5,7 @@ import numpy as np
 from pathlib import Path
 from typing import Union, Literal
 
+
 def file_title(title: str, dtype_suffix=".svg", short=False):
     '''
     Creates a file title containing the current time and a data-type suffix.
@@ -27,70 +28,102 @@ def file_title(title: str, dtype_suffix=".svg", short=False):
     else:
         return datetime.now().strftime('%Y-%m-%d %H_%M_%S') + " " + title + dtype_suffix
 
-def most_recent_file(directory: Path | str, suffix_to_consider: str | None = None, file_title_keywords: list[str] | None = None,
-                     search_by: Literal["file-title", "meta-data"]= "file-title") -> str:
-    """ search_by='file-title' works only with file-titles starting with YYYY-MM-DD HH_MM_SS (as created by the file_title method above) """
-    if "." not in str(directory).split('/')[-1]:
 
-        if search_by == "file-title":  # return file with most recent date in file title
-            file_array, date_array = np.array([]), np.array([])
-            for file in os.listdir(directory):
-                # check for latest csv with ticker in title
-                if suffix_to_consider is not None:
-                    if not file.endswith(suffix_to_consider): continue
-                elif '.DS_Store' in file: continue
+def most_recent_file(directory: Path | str,
+                     suffix_to_consider: str | None = None,
+                     file_title_keywords: list[str] | None = None,
+                     search_by: Literal["file-title", "meta-data"] = "file-title",
+                     return_type: Literal["dict", "latest_file_path"] = "latest_file_path") -> Path | dict:
+    """
+    Find most recent file(s) in directory by filename date or modification time.
 
-                # check provided keywords
-                if file_title_keywords is not None:  # if provided
-                    if isinstance(file_title_keywords, str): file_title_keywords = [file_title_keywords]  # convert to list if required
-                    match = True  # bool to only remain true if all keywords found
-                    for file_title_keyword in file_title_keywords:
-                        if file_title_keyword not in file: match = False
-                    if not match: continue  # view next file
+    search_by='file-title' works only with file-titles starting with YYYY-MM-DD HH_MM_SS
 
-                din_datestring = file[:10]
-                din_timestring = file[11:19].replace('_', ':')
+    Args:
+        directory: Directory path to search
+        suffix_to_consider: File suffix filter (e.g., '.csv')
+        file_title_keywords: Keywords that must appear in filename
+        search_by: 'file-title' uses date in filename, 'meta-data' uses file modification time
+        return_type: 'latest_file_path' returns Path, 'dict' returns sorted files with dates
+
+    Returns:
+        - "latest_file_path": Path to most recent file
+        - "dict": {"files": [sorted Path objects], "dates": [corresponding dates]} sorted by date descending
+
+    Raises:
+        NotADirectoryError: If provided path is not a directory
+        ValueError: If no files match criteria
+    """
+    # Validate inputs
+    if search_by not in ("file-title", "meta-data"):
+        raise ValueError(f"search_by must be 'file-title' or 'meta-data', got {search_by}")
+
+    # Convert to Path and validate directory
+    directory = Path(directory)
+    if not directory.is_dir():
+        raise NotADirectoryError("Provided path is not a directory!")
+
+    # Normalize file_title_keywords to list once
+    if file_title_keywords is not None:
+        if isinstance(file_title_keywords, str):
+            file_title_keywords = [file_title_keywords]
+
+    # Collect files and dates
+    file_list = []
+    date_list = []
+
+    for entry in os.scandir(directory):
+        if not entry.is_file():
+            continue
+
+        filename = entry.name
+
+        # Check suffix
+        if suffix_to_consider is not None:
+            if not filename.endswith(suffix_to_consider):
+                continue
+        elif '.DS_Store' in filename:
+            continue
+
+        # Check keywords
+        if file_title_keywords is not None:
+            if not all(keyword in filename for keyword in file_title_keywords):
+                continue
+
+        file_path = directory / filename
+
+        # Extract date based on search mode
+        if search_by == "file-title":
+            try:
+                din_datestring = filename[:10]
+                din_timestring = filename[11:19].replace('_', ':')
                 date = datetime.fromisoformat(din_datestring + ' ' + din_timestring)
-                date_array = np.append(date_array, date)
-                file_array = np.append(file_array, file)
+            except (ValueError, IndexError):
+                # Skip files with invalid date format
+                continue
+        else:  # meta-data
+            date = entry.stat().st_mtime  # seconds since epoch as float
 
-            try:
-                return directory / file_array[date_array.argsort()[-1]]
-            except IndexError:
-                raise ValueError("Provided directory doesn't contain files matching the provided criteria!")
+        file_list.append(file_path)
+        date_list.append(date)
 
-        elif search_by == "meta-data":  # return file last edited
-            # scan by meta-data:
-            most_recent_file = None
-            most_recent_time = 0
+    # Validate we found files
+    if not file_list:
+        raise ValueError("Provided directory doesn't contain files matching the provided criteria!")
 
-            for entry in os.scandir(directory):
-                if entry.is_file():
-                    # check for latest csv with ticker in title
-                    if suffix_to_consider is not None:
-                        if not entry.name.endswith(suffix_to_consider): continue
+    # Sort by date descending
+    sorted_indices = np.argsort(date_list)[::-1]
+    sorted_files = [file_list[i] for i in sorted_indices]
+    sorted_dates = [date_list[i] for i in sorted_indices]
 
-                    # check provided keywords
-                    if file_title_keywords is not None:  # if provided
-                        if isinstance(file_title_keywords, str): file_title_keywords = [
-                            file_title_keywords]  # convert to list if required
-                        match = True  # bool to only remain true if all keywords found
-                        for file_title_keyword in file_title_keywords:
-                            if file_title_keyword not in entry.name: match = False
-                        if not match: continue  # view next file
-
-                    # scan meta-data
-                    mod_time = entry.stat().st_mtime  # modification time in seconds since epoch
-                    if mod_time > most_recent_time:
-                        most_recent_time = mod_time
-                        most_recent_file = entry.name
-
-            try:
-                return directory / most_recent_file
-            except TypeError:
-                raise ValueError("Provided directory doesn't contain files matching the provided criteria!")
-    else:
-        raise NotADirectoryError("Provided path is not a directory (i.e. contains dots)!")
+    # Return based on return_type
+    if return_type == "latest_file_path":
+        return sorted_files[0]
+    else:  # dict
+        return {
+            "files": sorted_files,
+            "dates": sorted_dates
+        }
 
 
 def assert_dir(dir_path: str | Path):
