@@ -86,6 +86,8 @@ def start_experiment_processes(
     display_gsr = experiment_config_file.get_as_type("Display GSR", "bool") if experiment_config_txt is not None else True
     display_refresh_rate_hz = experiment_config_file.get_as_type("Display Refresh Rate", "int") if experiment_config_txt is not None else 30
     start_song_counter = experiment_config_file.get_as_type("Last Song Counter", "int") if experiment_config_txt is not None else 0
+    start_silence_counter = experiment_config_file.get_as_type("Last Silence Counter",
+                                                            "int") if experiment_config_txt is not None else 0
 
     display_relative_performance = experiment_config_file.get_as_type("Display Relative Performance", "bool") if experiment_config_txt is not None else True
     include_fsr_gauge = experiment_config_file.get_as_type("Include Force Gauge Plot", "bool") if experiment_config_txt is not None else False
@@ -287,6 +289,8 @@ def start_experiment_processes(
         master_displayer.start()
         global song_counter
         song_counter = start_song_counter
+        global silence_counter
+        silence_counter = start_silence_counter
 
         # check for commands:
         while master_displayer.is_alive():
@@ -451,7 +455,7 @@ def start_experiment_processes(
                     is_music_trial = start_music_motor_task_event.is_set()
 
                     # prepare directory:
-                    trial_label = f"song_{song_counter:03}" if is_music_trial else "silence"
+                    trial_label = f"song_{song_counter:03}" if is_music_trial else f"silence_{silence_counter:03}"
                     current_song_data_dir = personal_data_dir / trial_label
                     filemgmt.assert_dir(current_song_data_dir)  # create dir
 
@@ -505,7 +509,7 @@ def start_experiment_processes(
                         pretrial_process.start()
 
                     else:
-                        target_freq = target_sine_freq_abs  # silence trial cannot use relative target
+                        target_freq = target_sine_freq_abs  # silence-trial cannot use relative target
 
                         # breakout_screen:
                         pretrial_shutdown_event = mptools.RobustEventManager()
@@ -522,6 +526,7 @@ def start_experiment_processes(
                     start_music_motor_task_event.clear()  # clear event to allow for restarting
                     start_silent_motor_task_event.clear()
                     if is_music_trial: song_counter += 1  # increase song counter already (if music trial)
+                    else: silence_counter += 1
 
                     # wait at least 30seconds until pretrial process is closed, or experiment is restarted:
                     start = time.time()
@@ -544,7 +549,7 @@ def start_experiment_processes(
                             kwargs={'title': 'Have a break. Your trial will start soon.',
                                     'anim_shutdown_event': pretrial_break_shutdown_event,},
                             name=f"Pretrial Break Process {trial_label}")
-                        # only show if not already breakup screen (during silence trial) was shown
+                        # only show if not already breakup screen (during silence-trial) was shown
                         if is_music_trial: pretrial_break_process.start()
                         while time.time() - start < pre_trial_time and not (  # waiting time but still allow for restart
                             start_music_motor_task_event.is_set() or start_silent_motor_task_event.is_set()):

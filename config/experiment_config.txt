@@ -27,6 +27,7 @@ Display Refresh Rate --- 30
 ### general:
 # enter 0 if this is the first trial of this subject:
 Last Song Counter --- 0
+Last Silence Counter --- 0
 
 
 ### motor task:
