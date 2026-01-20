@@ -9,13 +9,16 @@ from pandas import DatetimeIndex
 
 import src.pipeline.signal_features as features
 import src.pipeline.preprocessing as preprocessing
-from src.pipeline.preprocessing import BiosignalPreprocessor
 import src.pipeline.visualizations as visualizations
+import src.pipeline.data_analysis as data_analysis
 import src.utils.file_management as filemgmt
+
+from src.pipeline.preprocessing import BiosignalPreprocessor
 from src.pipeline.visualizations import EEG_CHANNEL_IND_DICT, EEG_CHANNELS_BY_AREA
 
-######## WORKFLOW #########
+
 if __name__=="__main__":
+    ######## PREPARATION #########
     ROOT = Path().resolve().parent
     OUTPUT = ROOT / 'output'
     STUDY_PLOTS = OUTPUT / 'plots' / 'data_analysis_plots'
@@ -28,7 +31,7 @@ if __name__=="__main__":
     # EEG / EMG import behaviour:
     subject_qtc_data_dir = QTC_DATA / "subject_01"
     retrieve_latest_config: bool = True
-    load_only_first_n_seconds: int | None = 1200
+    load_only_first_n_seconds: int | None = None
     eeg_channel_subset = EEG_CHANNELS_BY_AREA['Fronto-Central'] + EEG_CHANNELS_BY_AREA['Central'] + EEG_CHANNELS_BY_AREA['Centro-Parietal'] + EEG_CHANNELS_BY_AREA['Temporal']
     eeg_channel_subset_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in eeg_channel_subset]
     print(f"Reducing EEG dataset to {len(eeg_channel_subset)} channels: {eeg_channel_subset}\n")
@@ -39,13 +42,16 @@ if __name__=="__main__":
     # analysis behaviour:
     bad_channel_treatment: Literal['None', 'Zero'] = 'Zero'  # leads to setting to zero
     eeg_do_psd_log_transform: bool = False
-    do_compute_psd: bool = True
+    do_compute_psd: bool = False
     do_compute_cmc: bool = False
     psd_window_size_sec: float = .2
     cmc_window_size_sec: float = 2.0
 
 
-    ### WORKFLOW
+
+
+    ######## WORKFLOW #########
+    ### Import:
     # load experiment files:
     log_frame = preprocessing.fetch_experiment_log(subject_experiment_data)
     # log columns: ['Time', 'Music', 'Event', 'Questionnaire']
@@ -53,14 +59,15 @@ if __name__=="__main__":
     # serial columns: ['Time', 'fsr', 'ecg', 'gsr']
 
     # enrich log frame columns based on 'Event' and 'Questionnaire' data:
-    log_frame = preprocessing.prepare_log_frame(log_frame, set_time_index=True)
+    log_frame = data_analysis.prepare_log_frame(log_frame, set_time_index=True)
+
+    print(log_frame)
 
     # select relevant log frame part:
-    qtc_start = log_frame.loc[log_frame['Event'] == "Start Trigger"].index.item()
-    qtc_end = log_frame.loc[log_frame['Event'] == "Stop Trigger"].index.item()
-    print(f"EEG and EMG measurements last from {qtc_start} to {qtc_end}!")
+    qtc_start, qtc_end = data_analysis.get_qtc_measurement_start_end(log_frame)
     within_qtc_log_frame = log_frame[qtc_start:qtc_end]  # time slice
     within_qtc_serial_frame = serial_frame[qtc_start:qtc_end]
+
     if load_only_first_n_seconds is not None:
         within_qtc_log_frame = within_qtc_log_frame[:qtc_start + pd.Timedelta(seconds=load_only_first_n_seconds)]
         within_qtc_serial_frame = within_qtc_serial_frame[:qtc_start + pd.Timedelta(seconds=load_only_first_n_seconds)]
@@ -78,7 +85,9 @@ if __name__=="__main__":
 
 
 
-    ### PSD computation:
+
+
+    ### PSD Computation:
     if do_compute_psd:
         # compute EEG psd:
         eeg_psd, eeg_psd_times, eeg_psd_freqs = features.multitaper_psd(input_array=eeg_array,
@@ -213,7 +222,7 @@ if __name__=="__main__":
                 result = grouped.agg(operation)
 
             all_windows = pd.RangeIndex(len(window_time_centers), name='_window')
-            result = result.reindex(all_windows)  # Ensures all windows present
+            result = result.reindex(all_windows)  # ensures all windows present
             result = result.fillna(0)  # or ffill(), but now consistent
             return result.tolist()
 
