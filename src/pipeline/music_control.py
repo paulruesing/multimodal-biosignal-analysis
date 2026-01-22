@@ -67,7 +67,7 @@ class SpotifyController:
         self.category_counter_dict: dict[str, int] = {}
         if category_url_dict is not None:
             for category in category_url_dict.keys():
-                self.category_counter_dict[category] = 0  # initial category counter at 0
+                self.category_counter_dict[category] = - 1  # initial category counter at -1 (because +1 happens before starting first song)
         self.current_category: str | None = None
         # self.current_category_and_counter: tuple[str, int] | None = None  (OLD LOGIC)
 
