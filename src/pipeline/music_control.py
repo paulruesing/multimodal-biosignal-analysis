@@ -757,7 +757,41 @@ def compute_all_musical_features(audio_path: str | Path, verbose: bool = False):
     return bpm_from_beats, spectral_flux_normalized, spectral_centroid, ioi_cv, syncopation_degree, syncopation_ratio
 
 
-# todo: include loudness (LUFS)?
+def add_metrics_from_txt(characteristics_df: pd.DataFrame,
+                         txt_file_path: Path | str,
+                         ) -> pd.DataFrame:
+    controller = SpotifyController(txt_file_path)
+
+    # iterate over all categories:
+    titles = []; artists = []; bpms = []; genres = []; file_titles = []; categories = []
+    for category in controller.category_url_dict.keys():
+        # iterate over all songs from categories:
+        for song_ind in range(len(controller.category_url_dict[category])):
+            controller.play_next_from(category)
+            time.sleep(1)  # wait for song to start
+
+            # get and append information:
+            characteristics_dict = controller.get_current_track()
+            print(characteristics_dict)
+            titles.append(characteristics_dict["Title"])
+            artists.append(characteristics_dict["Artist"])
+            bpms.append(characteristics_dict["BPM"])
+            genres.append(characteristics_dict["Genre"])
+            file_titles.append(characteristics_dict["File Title"])
+
+            # append category:
+            categories.append(category)
+
+    new_df = pd.DataFrame(index=file_titles, data={"Title": titles, "Artist": artists, "BPM": bpms})
+
+    return characteristics_df.join(new_df, how="inner", rsuffix="_manual")
+
+
+
+
+
+
+
 
 if __name__ == '__main__':
     # load audio:
@@ -770,10 +804,12 @@ if __name__ == '__main__':
     filemgmt.assert_dir(PLOT_DIR)
 
     # which parts to execute:
-    compute_metrics: bool = False
+    compute_metrics: bool = False  # compute music metrics (BPM, Syncopation, Spectral Flux, ...)
+    extend_metrics: bool = False  # extend computed metrics by Song Title, Artist & Manual BPM
     cluster_results: bool = False
-    compute_mutual_information: bool = True
-    plot_scatters: bool = True
+    compute_mutual_information: bool = False  # analyse relation music features -> genres / categories
+    plot_scatters: bool = False  # plot feature distribution across categories
+
 
     if compute_metrics:
         # initialise spotify controller:
@@ -858,8 +894,24 @@ if __name__ == '__main__':
         frame = pd.read_csv(filemgmt.most_recent_file(RESULT_DIR, ".csv", ["Song Characteristic Lookup Table"]))
         print(f"Imported music characteristics for {len(frame)} songs")
 
+
+
+
+    ### EXTEND METRICS
+    if extend_metrics:
+        previous_frame = pd.read_csv(filemgmt.most_recent_file(RESULT_DIR, ".csv", ["Song Characteristic Lookup Table"]))
+        previous_frame.set_index("Unnamed: 0", inplace=True)
+        print(previous_frame)
+        new_frame = add_metrics_from_txt(previous_frame, AUDIO_CONFIG)
+        new_frame.to_csv(RESULT_DIR / filemgmt.file_title("Extended Song Characteristic Lookup Table", ".csv"))
+
+
+
+
+
+    ### CLUSTERING
     # select characteristics:
-    feature_df = frame.drop(columns=["Unnamed: 0", "Category", "Genre", "Spotify URL", "Intended Start [sec]",])
+    feature_df = frame.drop(columns=["Unnamed: 0", "Category", "Genre", "Spotify URL", "Intended Start [sec]", ])
     feature_array = feature_df.to_numpy()
     feature_labels = feature_df.columns
     print("Feature indices: ", list(enumerate(feature_labels)))
@@ -870,14 +922,11 @@ if __name__ == '__main__':
     scaler = StandardScaler()
     standardized_feature_array = scaler.fit_transform(feature_array)
 
-
-    ### CLUSTERING
     if cluster_results:
-
         # parameters:
         visualize_umap: bool = True  # overwrites the below two
         plot_centroids: bool = True
-        k = 3
+        k = 4
         x_feature_ind: int = 0
         y_feature_ind: int = 3
 
