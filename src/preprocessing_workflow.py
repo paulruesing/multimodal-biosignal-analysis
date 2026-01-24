@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from typing import Callable, Literal, Tuple
 
@@ -12,21 +13,20 @@ if __name__=="__main__":
     ROOT = Path().resolve().parent
     OUTPUT = ROOT / 'output'
     STUDY_PLOTS = OUTPUT / 'preprocessing_plots'
-    EXTERNAL_DRIVE = Path("/Volumes/Paul SSD 2/251120 INI Measurements")
     QTC_DATA = ROOT / "data" / "qtc_data"
 
     ### WORKFLOW CONTROL
     # change these to select subject and trial:
-    subject_data_dir = QTC_DATA / "subject_01"
-    subject_plot_dir = STUDY_PLOTS / "subject_01"
-    file_title = "emg_2_extensor"
-    load_only_first_n_seconds: int | None = 1200  # if None, loads full file
+    subject_data_dir = QTC_DATA / "subject_00"
+    subject_plot_dir = STUDY_PLOTS / "subject_00"; filemgmt.assert_dir(subject_plot_dir)
+    file_title = "sub_00_emg_2_extensor"
+    load_only_first_n_seconds: int | None = None  # if None, loads full file
     retrieve_latest_config: bool = True  # search .json config file in subject_data dir with matching file_title key
 
     # interactive workflow behavior:
-    plot_input_plots: bool = False
+    plot_input_plots: bool = True
     allow_manual_ic_input: bool = False  # only pertains to EEG data + if configured once, this isn't necessary anymore
-    plot_output_plots: bool = False
+    plot_output_plots: bool = True
     plot_psd_animation: bool = False
     conduct_validation: bool = False
 
@@ -40,8 +40,10 @@ if __name__=="__main__":
     try:  # try npy
         input_file = np.load(subject_data_dir / f"{file_title}.npy").T
     except FileNotFoundError:  # try csv
-        input_file = np.genfromtxt(subject_data_dir / f"{file_title}.csv", delimiter=";",
-                                   max_rows=2048*int(load_only_first_n_seconds) if load_only_first_n_seconds else None)
+        input_file = pd.read_csv(subject_data_dir / f"{file_title}.csv", delimiter=",",
+                                 nrows=2048*int(load_only_first_n_seconds) if load_only_first_n_seconds else None,
+                                 dtype=float).to_numpy()
+
         # csvs have time at column 0
         #timestamps_s = input_file[:, 0].copy()
         input_file = input_file[:, 1:65]
@@ -68,7 +70,7 @@ if __name__=="__main__":
             sampling_freq=sampling_freq,
             modality=data_modality,
             band_pass_frequencies='auto',
-            amplitude_rejection_threshold=.001
+            amplitude_rejection_threshold=.01
         )
 
     ### INPUT PLOTS
@@ -82,9 +84,11 @@ if __name__=="__main__":
                                             plot_result=True, )
         # PSD spectrogram:
         features.multitaper_psd(input_array=prepper.np_input_data, sampling_freq=prepper.sampling_freq, nw=3,
-                                window_length_sec=1.0, overlap_frac=0.5, axis=0, verbose=True,
+                                window_length_sec=1.0, overlap_frac=0.5, axis=0, 
                                 plot_result=True, frequency_range=(0, 100),
-                                save_dir=subject_plot_dir, title=f'Input Averaged PSD ({file_title})')
+                                save_dir=subject_plot_dir, title=f'Input Averaged PSD ({file_title})',
+                                log_scale=True
+                                )
 
     ### ARTEFACT REJECTION
     # automatic artefact rejection:
@@ -119,19 +123,19 @@ if __name__=="__main__":
         spectrograms, timestamps, freqs = features.multitaper_psd(input_array=prepper.np_output_data,
                                                                   sampling_freq=prepper.sampling_freq, nw=3,
                                                                   window_length_sec=.2, overlap_frac=0.5, axis=0,
-                                                                  verbose=True,
                                                                   plot_result=True, frequency_range=(0, 100),
                                                                   save_dir=subject_plot_dir,
-                                                                  title=f'Output Averaged PSD ({file_title})')
+                                                                  title=f'Output Averaged PSD ({file_title})',
+                                                                  log_scale=True)
 
     ### PSD Animation
     if plot_psd_animation:
         if not plot_output_plots:
             # PSD spectrogram:
             spectrograms, _, freqs = features.multitaper_psd(input_array=prepper.np_output_data,
-                                                         sampling_freq=prepper.sampling_freq, nw=3,
-                                                         window_length_sec=.2, overlap_frac=0.5, axis=0,
-                                                         verbose=True, plot_result=False, frequency_range=(0, 100))
+                                                             sampling_freq=prepper.sampling_freq, nw=3,
+                                                             window_length_sec=.2, overlap_frac=0.5, axis=0,
+                                                          plot_result=False, frequency_range=(0, 100))
 
         # spectrograms shape: (n_channels, n_windows, n_frequencies)
         # timestamps shape: (n_windows), frequencies shape: (n_frequencies)
