@@ -216,7 +216,7 @@ def dynamometer_force_mapping(v, mvc_kg: float | None = None):  # here with defa
     Returns [kg] if global var. _current_mvc_kg is None else [% MVC].
     """
     factor = 1 if mvc_kg is None else 100 / mvc_kg  # consider MVC
-    return (2.2 * (v ** 4.1071) - 15) * factor  # 2.8708 * (v ** 4.1071) - 3 before!
+    return (2.2 * (v ** 4.1071) - 10) * factor  # 2.8708 * (v ** 4.1071) - 3 before!
 
 
 def sampling_process(shared_dict,
