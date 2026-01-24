@@ -51,8 +51,7 @@ def most_recent_file(directory: Path | str,
         - "dict": {"files": [sorted Path objects], "dates": [corresponding dates]} sorted by date descending
 
     Raises:
-        NotADirectoryError: If provided path is not a directory
-        ValueError: If no files match criteria
+        ValueError: If provided path is not a directory or no files match criteria
     """
     # Validate inputs
     if search_by not in ("file-title", "meta-data"):
@@ -61,7 +60,7 @@ def most_recent_file(directory: Path | str,
     # Convert to Path and validate directory
     directory = Path(directory)
     if not directory.is_dir():
-        raise NotADirectoryError("Provided path is not a directory!")
+        raise ValueError(f"Provided path {directory} is not a directory!")
 
     # Normalize file_title_keywords to list once
     if file_title_keywords is not None:
