@@ -792,7 +792,6 @@ def add_metrics_from_txt(characteristics_df: pd.DataFrame,
 
 
 
-
 if __name__ == '__main__':
     # load audio:
     ROOT = Path().resolve().parent.parent
@@ -806,9 +805,106 @@ if __name__ == '__main__':
     # which parts to execute:
     compute_metrics: bool = False  # compute music metrics (BPM, Syncopation, Spectral Flux, ...)
     extend_metrics: bool = False  # extend computed metrics by Song Title, Artist & Manual BPM
+
+    # single songs to add to existing look up table:
+    # below structure [(filepath, Artist, Title, Category, Genre, Spotify URL, Start After), ...]:
+    single_files_to_add: list[tuple[str, str, str, str, str, str, float]] = [
+
+    ]
+
     cluster_results: bool = False
     compute_mutual_information: bool = False  # analyse relation music features -> genres / categories
     plot_scatters: bool = False  # plot feature distribution across categories
+
+
+    music_controller = SpotifyController(AUDIO_CONFIG)
+    music_controller.play_track('https://open.spotify.com/intl-de/track/13qX3v31O0UBg59v3BC6fU?si=e13034bae8fa4959')
+    track_info = music_controller.get_current_track(output_type='dict')
+
+
+    ### ADD NEW SINGLE ENTRIES
+    if len(single_files_to_add) > 0:
+        current_frame = pd.read_csv(filemgmt.most_recent_file(RESULT_DIR, ".csv", ["Extended Song Characteristic Lookup Table"]))
+        current_frame.drop(columns=[col for col in current_frame.columns if 'Unnamed' in col], inplace=True)
+
+        # feature lists:
+        artists = []
+        titles = []
+        manual_bpms = []
+        categories = []
+        genres = []
+        spotify_urls = []
+        start_afters = []
+        file_names = []
+        bpm_list = []
+        spectral_flux_mins = []
+        spectral_flux_maxs = []
+        spectral_flux_means = []
+        spectral_flux_stds = []
+        spectral_centroid_mins = []
+        spectral_centroid_maxs = []
+        spectral_centroid_means = []
+        ioi_var_coeffs = []
+        syncopation_degrees = []
+        syncopation_ratios = []
+
+
+        for audio_file_title, artist, title, category, genre, spotify_url, start_after in single_files_to_add:
+            bpm_from_beats, spectral_flux_normalized, spectral_centroid, ioi_cv, syncopation_degree, syncopation_ratio = compute_all_musical_features(
+                AUDIO_DIR / audio_file_title, verbose=False)
+
+            artists.append(artist)
+            titles.append(title)
+            categories.append(category)
+            genres.append(genre)
+            spotify_urls.append(spotify_url)
+            start_afters.append(start_after)
+
+            # computed data:
+            file_names.append(audio_file_title)
+            bpm_list.append(bpm_from_beats)
+            manual_bpms.append(bpm_from_beats)
+            spectral_flux_mins.append(spectral_flux_normalized.min())
+            spectral_flux_maxs.append(spectral_flux_normalized.max())
+            spectral_flux_means.append(spectral_flux_normalized.mean())
+            spectral_flux_stds.append(spectral_flux_normalized.std())
+            spectral_centroid_mins.append(spectral_centroid.min())
+            spectral_centroid_maxs.append(spectral_centroid.max())
+            spectral_centroid_means.append(spectral_centroid.mean())
+            ioi_var_coeffs.append(ioi_cv)
+            syncopation_degrees.append(syncopation_degree)  # (0 = strictly on-beat, 1 = highly syncopated)
+            syncopation_ratios.append(syncopation_ratio)  # syncopated onsets (>0.2 beat away)
+
+
+        # create new rows:
+        new_rows = pd.DataFrame(index=file_names, data={
+            'Category': categories,
+            'Genre': genres,
+            'Spotify URL': spotify_urls,
+            'Intended Start [sec]': start_afters,
+            'BPM': bpm_list,
+            'Spectral Flux Min.': spectral_flux_mins,
+            'Spectral Flux Max.': spectral_flux_maxs,
+            'Spectral Flux Mean': spectral_flux_means,
+            'Spectral Flux Std.': spectral_flux_stds,
+            'Spectral Centroid Min': spectral_centroid_mins,
+            'Spectral Centroid Max': spectral_centroid_maxs,
+            'Spectral Centroid Mean': spectral_centroid_means,
+            'IOI Variance Coeff': ioi_var_coeffs,
+            'Syncopation Degree': syncopation_degrees,
+            'Syncopation Ratio': syncopation_ratios,
+            'Title': titles,
+            'Artist': artists,
+            'BPM_manual': manual_bpms,
+        })
+
+        # and append
+        new_frame = pd.concat([current_frame, new_rows], ignore_index=True)
+
+        new_frame.to_csv(RESULT_DIR / filemgmt.file_title("Extended Song Characteristic Lookup Table", ".csv"),
+                         index=False)
+
+
 
 
     if compute_metrics:
@@ -910,19 +1006,20 @@ if __name__ == '__main__':
 
 
     ### CLUSTERING
-    # select characteristics:
-    feature_df = frame.drop(columns=["Unnamed: 0", "Category", "Genre", "Spotify URL", "Intended Start [sec]", ])
-    feature_array = feature_df.to_numpy()
-    feature_labels = feature_df.columns
-    print("Feature indices: ", list(enumerate(feature_labels)))
-    categories = frame['Category'].to_list()
-    genres = frame['Genre'].to_list()
-
-    # standardize:
-    scaler = StandardScaler()
-    standardized_feature_array = scaler.fit_transform(feature_array)
-
     if cluster_results:
+        # select characteristics:
+        feature_df = frame.drop(columns=["Unnamed: 0", "Category", "Genre", "Spotify URL", "Intended Start [sec]", ])
+        feature_array = feature_df.to_numpy()
+        feature_labels = feature_df.columns
+        print("Feature indices: ", list(enumerate(feature_labels)))
+        categories = frame['Category'].to_list()
+        genres = frame['Genre'].to_list()
+
+        # standardize:
+        scaler = StandardScaler()
+        standardized_feature_array = scaler.fit_transform(feature_array)
+
+    if cluster_results or compute_mutual_information:
         # parameters:
         visualize_umap: bool = True  # overwrites the below two
         plot_centroids: bool = True
