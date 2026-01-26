@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-from scipy.interpolate import interp1d
 import re
 import json
 from pathlib import Path
@@ -10,6 +9,94 @@ import src.utils.file_management as filemgmt
 
 
 ############################## LOG FRAME HANDLING ##############################
+def fetch_experiment_log(subject_data_dir: Path) -> pd.DataFrame:
+    """
+    Fetch and concatenate the most recent experiment log files from a subject directory.
+
+    Prioritizes "Final Full Save" and concatenates "Working Memory Full Save" files.
+    Falls back to "Interim Save" only if no "Final Full Save" exists. Converts 'Time'
+    to datetime, sorts descending (newest first), and removes duplicates by timestamp.
+
+    Parameters
+    ----------
+    subject_data_dir : Path
+        Path to the subject data directory containing 'experiment_logs' subfolder.
+
+    Returns
+    -------
+    pd.DataFrame
+        Processed experiment log DataFrame, sorted descending by 'Time' (datetime),
+        duplicates removed. Columns include 'Time' as datetime and experiment data.
+
+    Raises
+    ------
+    ValueError
+        If no log files found, incompatible columns, or missing 'Time' column.
+    FileNotFoundError
+        If log directory does not exist.
+
+    Notes
+    -----
+    "Working Memory Full Save" files always concatenated with final save.
+    "Interim Save" used only as fallback if no "Final Full Save" exists.
+    Duplicates dropped keeping first occurrence (earliest load order).
+    'Time' parsed via pd.to_datetime (inferred format).
+    """
+    log_dir = subject_data_dir / 'experiment_logs'
+    if not log_dir.exists():
+        raise FileNotFoundError(f"Log directory not found: {log_dir}")
+
+    # Fetch Working Memory Full Save frames (always concatenate if present)
+    wm_frames = []
+    try:
+        wm_data = filemgmt.most_recent_file(log_dir, ".csv",
+                                            ["Working Memory Full Save"],
+                                            return_type='dict')
+        wm_frame_paths = wm_data['files']
+        wm_frames = [pd.read_csv(path) for path in wm_frame_paths]
+        print(f"Found {len(wm_frames)} Working Memory Full Save logs in {log_dir}.")
+    except ValueError:
+        print(f"No Working Memory Full Save logs found in {log_dir}.")
+
+    # Fetch final frame: Final Full Save or fallback to Interim Save
+    try:
+        final_frame_path = filemgmt.most_recent_file(log_dir, ".csv", ["Final Full Save"])
+    except ValueError:
+        print(f"No 'Final Full Save' in {log_dir}. Using 'Interim Save' as fallback.")
+        try:
+            final_frame_path = filemgmt.most_recent_file(log_dir, ".csv", ["Interim Save"])
+        except ValueError:
+            raise ValueError(f"No log files found in {log_dir}")
+
+    final_frame = pd.read_csv(final_frame_path)
+
+    # Concat if Working Memory frames exist, validate columns
+    frames = wm_frames + [final_frame] if wm_frames else [final_frame]
+    if len(frames) > 1:
+        if not all(frame.shape[1] == frames[0].shape[1] for frame in frames[1:]):
+            raise ValueError("Incompatible columns across frames.")
+        combined = pd.concat(frames, ignore_index=True)
+    else:
+        combined = frames[0]
+
+    # Process: convert Time, sort desc, drop dups
+    return _process_frame(combined)
+
+
+def _process_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Helper: Convert 'Time' to datetime, sort desc by Time, drop timestamp dups."""
+    if 'Time' not in df.columns:
+        raise ValueError("DataFrame missing 'Time' column.")
+
+    # Parse Time to datetime
+    df['Time'] = pd.to_datetime(df['Time'])
+
+    # Sort descending (newest first), drop duplicates keeping first, reset index
+    df = df.sort_values('Time', ascending=True).drop_duplicates(subset=['Time'], keep='first').reset_index(drop=True)
+
+    return df
+
+
 def prepare_log_frame(log_frame: pd.DataFrame, set_time_index: bool = True) -> pd.DataFrame:
     ############### Derive Values from Status Strings ###############
     def derive_song_category_string(input: str) -> str:
@@ -77,7 +164,7 @@ def prepare_log_frame(log_frame: pd.DataFrame, set_time_index: bool = True) -> p
             r'target frequency ([\d.]+)Hz',
             expand=False
         )
-        df['Task Avg. RMSE'] = df['Questionnaire'].str.extract(
+        df['Task RMSE'] = df['Questionnaire'].str.extract(
             r'Achieved RMSE: ([\d.]+)',
             expand=False
         )
@@ -104,7 +191,7 @@ def prepare_log_frame(log_frame: pd.DataFrame, set_time_index: bool = True) -> p
         df['Task Frequency'] = df.groupby('task_id')['Task Frequency'].ffill()
 
         # Step 4: Backward fill RMSE within task groups
-        df['Task Avg. RMSE'] = df.groupby('task_id')['Task Avg. RMSE'].bfill()
+        df['Task RMSE'] = df.groupby('task_id')['Task RMSE'].bfill()
 
         # Step 5: Create mask to clear frequency values AFTER the RMSE row
         is_end = df['Questionnaire'].str.contains('Achieved RMSE', na=False)
@@ -342,9 +429,38 @@ def prepare_log_frame(log_frame: pd.DataFrame, set_time_index: bool = True) -> p
 
     ############### Format and Return ###############
     if set_time_index:
+        log_frame['Time'] = pd.to_datetime(log_frame['Time'])
         log_frame = log_frame.set_index('Time')
 
     return log_frame
+
+
+def turn_trial_id_into_song_or_silence_id(log_df: pd.DataFrame,
+                                          trial_id: int) -> tuple[int | None, int | None]:
+    """ Returns song_id and silence_id as tuple, one is np.nan """
+    subset = log_df.loc[log_df['Trial ID'] == trial_id]
+    song_id = subset.iloc[0]['Song ID']
+    silence_id = subset.iloc[0]['Silence ID']
+    return int(song_id) if not np.isnan(song_id) else None, int(silence_id) if not np.isnan(silence_id) else None
+
+
+def turn_song_or_silence_id_into_trial_id(log_df: pd.DataFrame,
+                                          song_id: int | None = None,
+                                          silence_id: int | None = None) -> int:
+    """ Returns trial_id given either song_id or silence_id (one must be provided) """
+    if song_id is not None:
+        subset = log_df.loc[log_df['Song ID'] == song_id]
+    elif silence_id is not None:
+        subset = log_df.loc[log_df['Silence ID'] == silence_id]
+    else:
+        raise ValueError("Either song_id or silence_id must be provided")
+
+    if len(subset) == 0:
+        raise ValueError(f"No trial found with song_id={song_id} or silence_id={silence_id}")
+
+    trial_id = subset.iloc[0]['Trial ID']
+    return int(trial_id)
+
 
 
 def get_song_start_end(df: pd.DataFrame,
@@ -426,7 +542,29 @@ def get_task_start_end(df: pd.DataFrame,
     return times.min(), times.max()
 
 
+def get_all_task_start_ends(enriched_log_df: pd.DataFrame,
+                            output_type: Literal['dict', 'list'] = 'dict'
+                            ) -> dict[int, tuple[pd.Timestamp, pd.Timestamp]] | list[tuple[pd.Timestamp, pd.Timestamp]]:
+    if output_type == 'dict': trial_start_end_dict: dict[int, tuple[pd.Timestamp, pd.Timestamp]] = {}
+    else: start_end_list: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+
+    for trial in enriched_log_df['Trial ID'].unique():
+        if pd.isna(trial): continue
+        try:
+            start, end = get_task_start_end(enriched_log_df, trial_id=trial)
+        except ValueError:
+            continue
+
+        if output_type == 'dict': trial_start_end_dict[int(trial)] = (start, end)
+        else: start_end_list.append((start, end))
+
+    return trial_start_end_dict if output_type == 'dict' else start_end_list
+
+
+
 def get_qtc_measurement_start_end(df: pd.DataFrame, verbose: bool = True) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """ Derive QTC measurement duration based on 'Start Trigger' and 'Stop Trigger' keywords in 'Event' column.
+    If during data-integration, 'Actual Start Trigger' was inserted to indicate a measurement cut-off, this will be leveraged."""
     df = df.copy()  # copied here because we change the index below
 
     # convert to datetime index timestamps:
@@ -449,6 +587,13 @@ def get_qtc_measurement_start_end(df: pd.DataFrame, verbose: bool = True) -> tup
     except ValueError:  # if 'Stop Trigger' not found
         print("No 'Stop Trigger' event found, assuming measurement ran until end.")
         qtc_end = df.index.max()
+
+    try:
+        actual_qtc_start = df.loc[df['Event'] == "Actual Start Trigger"].index.item()
+        print(f"Found 'Actual Start Trigger' event, indicating cut-off of initial measurements. Will return actual start timestamp: {actual_qtc_start}")
+        qtc_start = actual_qtc_start
+    except ValueError:
+        pass
 
     if verbose: print(f"EEG and EMG measurements last from {qtc_start} to {qtc_end}!\n")
 
@@ -974,251 +1119,145 @@ def annotate_trial(log_df, comment: str, exclude: bool,
     return log_df
 
 
-############################## DATA MANIPULATION / INTEGRATION METHODS ##############################
-def apply_window_operator(
-        window_time_steps: np.ndarray,
-        is_time_center: bool,
-        window_size: float,
-        target_series: pd.Series,
-        operation: Literal['min', 'max', 'mean', 'median', 'mode', 'std'] = 'mean',
-) -> list:
-    """ Target series needs to have time index (seconds or absolute). """
-
-    # convert data to numeric only for non-mode operations:
-    if operation != 'mode' and target_series.dtype == 'object':
-        target_series = pd.to_numeric(target_series, errors='coerce')
-
-    # derive time in seconds from time index:
-    if isinstance(target_series.index, pd.DatetimeIndex):
-        time_seconds = (target_series.index - target_series.index[0]).total_seconds().values
-    else:
-        time_seconds = target_series.index.values.astype(float)
-
-    # create window boundaries:
-    if is_time_center:
-        starts = window_time_steps - window_size / 2
-        ends = window_time_steps + window_size / 2
-    else:
-        starts = window_time_steps
-        ends = window_time_steps + window_size
-
-    # For each time point, find which window it belongs to
-    window_indices = np.full(len(time_seconds), np.nan, dtype=float)
-
-    for i, (start, end) in enumerate(zip(starts, ends)):
-        mask = (time_seconds >= start) & (time_seconds < end)
-        window_indices[mask] = i
-
-    # Create dataframe with both the data and window indices
-    df_with_windows = pd.DataFrame({
-        'data': target_series.values,
-        '_window': window_indices
-    })
-
-    # Filter out NaN groups BEFORE groupby
-    df_with_windows_filtered = df_with_windows[df_with_windows['_window'].notna()]
-    grouped = df_with_windows_filtered.groupby('_window', sort=False)['data']
-
-    # Handle mode separately, use agg for others
-    if operation == 'mode':
-        result = grouped.apply(lambda x: x.mode()[0] if len(x.mode()) > 0 else np.nan)
-    else:
-        result = grouped.agg(operation)
-
-    all_windows = pd.RangeIndex(len(window_time_steps), name='_window')
-    result = result.reindex(all_windows)  # ensures all windows present
-    result = result.fillna(0)  # or ffill(), but now consistent
-    return result.tolist()
-
-
-def interpolate_per_window(
-        window_time_steps: np.ndarray,
-        target_series: pd.Series,
-        method: Literal['linear', 'nearest', 'cubic', 'spline'] = 'linear',
-        window_size: float = None,
-        is_time_center: bool = False,
-        extrapolate: bool = False,
-        return_type: Literal['pandas', 'numpy'] = 'numpy'
-) -> np.ndarray | pd.Series:
-    """
-    Interpolate target series values to match window_time_steps using temporal windows.
-
-    Parameters
-    ----------
-    window_time_steps : np.ndarray
-        Target timestamps (in seconds) where interpolation occurs.
-    target_series : pd.Series
-        Series with time index (sparse sampling) to interpolate from.
-    method : Literal['linear', 'nearest', 'cubic', 'spline'], default 'linear'
-        Interpolation method.
-    window_size : float, optional
-        Restricts interpolation to local window around each target.
-        If None, uses full-range interpolation.
-    is_time_center : bool, default False
-        If True, window_size centers on window_time_steps.
-        If False, window starts at window_time_steps.
-    extrapolate : bool, default False
-        Allow extrapolation beyond target_series time range.
-    return_type : Literal['pandas', 'numpy'], default 'numpy'
-        Return format: 'numpy' for array, 'pandas' for Series with window_time_steps as Index.
-
-    Returns
-    -------
-    np.ndarray | pd.Series
-        Interpolated values matching len(window_time_steps).
-        If return_type='pandas', returns Series with window_time_steps as Index.
-
-    Raises
-    ------
-    ValueError
-        If target_series is empty or has fewer than 2 points for full-range interpolation.
-    TypeError
-        If window_time_steps is not array-like or target_series is not pd.Series.
-    """
-
-    # Input validation
-    if not isinstance(target_series, pd.Series):
-        raise TypeError(f"target_series must be pd.Series, got {type(target_series)}")
-
-    if len(target_series) == 0:
-        raise ValueError("target_series cannot be empty")
-
-    window_time_steps = np.asarray(window_time_steps, dtype=float)
-
-    # Normalize target_series time to seconds
-    if isinstance(target_series.index, pd.DatetimeIndex):
-        source_times = (target_series.index - target_series.index[0]).total_seconds().values
-    else:
-        source_times = target_series.index.values.astype(float)
-
-    target_times = window_time_steps
-
-    if window_size is None:
-        # Full-range interpolation across entire dataset
-        if len(target_series) < 2:
-            raise ValueError("target_series must have at least 2 points for interpolation")
-
-        interp_func = interp1d(
-            source_times, target_series.values,
-            kind=method, bounds_error=not extrapolate,
-            fill_value='extrapolate' if extrapolate else np.nan
-        )
-
-        try:
-            result = interp_func(target_times)
-        except ValueError as e:
-            raise ValueError(
-                f"Interpolation failed. Ensure window_time_steps are within data range "
-                f"[{source_times.min()}, {source_times.max()}] or set extrapolate=True"
-            ) from e
-
-    else:
-        # Window-constrained interpolation
-        result = np.full(len(target_times), np.nan)
-
-        for i, t in enumerate(target_times):
-            # Define window boundaries
-            if is_time_center:
-                start = t - window_size / 2
-                end = t + window_size / 2
-            else:
-                start = t
-                end = t + window_size
-
-            # Find source data within window
-            mask = (source_times >= start) & (source_times < end)
-            num_points = np.sum(mask)
-
-            if num_points < 2:
-                # Insufficient points for interpolation within window
-                continue
-
-            window_source_times = source_times[mask]
-            window_source_values = target_series.values[mask]
-
-            # Interpolate within this window
-            try:
-                interp_func = interp1d(
-                    window_source_times, window_source_values,
-                    kind=method, bounds_error=False, fill_value=np.nan
-                )
-                result[i] = interp_func(t)
-            except ValueError as e:
-                # Skip this window if interpolation fails
-                continue
-
-        # Final fill for remaining NaNs if extrapolate enabled
-        if extrapolate:
-            remaining_mask = np.isnan(result)
-            if np.any(remaining_mask):
-                full_interp_func = interp1d(
-                    source_times, target_series.values,
-                    kind=method, bounds_error=False,
-                    fill_value='extrapolate'
-                )
-                try:
-                    result[remaining_mask] = full_interp_func(target_times[remaining_mask])
-                except ValueError:
-                    pass  # Leave as NaN if extrapolation fails
-
-    # Format output
-    if return_type == 'pandas':
-        return pd.Series(result, index=window_time_steps, name=target_series.name)
-    elif return_type == 'numpy':
-        return result
-    else:
-        raise ValueError(f"return_type must be 'pandas' or 'numpy', got {return_type}")
-
-
-def add_time_index(target_array: pd.Series | np.ndarray,
-                   start_timestamp: pd.Timestamp, end_timestamp: pd.Timestamp,
-                   ) -> pd.Series:
-    """
-    Add a time index to an array assuming constant sampling rate.
-
-    Parameters
-    ----------
-    target_array : pd.Series | np.ndarray
-        Data array to which time index will be added.
-    start_timestamp : pd.Timestamp
-        Start time of the time series.
-    end_timestamp : pd.Timestamp
-        End time of the time series.
-
-    Returns
-    -------
-    pd.Series
-        Series with DatetimeIndex calculated from start/end timestamps and array length.
-
-    Raises
-    ------
-    ValueError
-        If start_timestamp >= end_timestamp or array is empty.
-    """
-
-    if isinstance(target_array, pd.Series):
-        target_array = target_array.to_numpy()
-
-    if len(target_array) == 0:
-        raise ValueError("target_array cannot be empty")
-
-    if start_timestamp >= end_timestamp:
-        raise ValueError(f"start_timestamp ({start_timestamp}) must be before end_timestamp ({end_timestamp})")
-
-    # Create evenly-spaced time index based on array length
-    time_index = pd.date_range(
-        start=start_timestamp,
-        end=end_timestamp,
-        periods=len(target_array)
-    )
-
-    return pd.Series(target_array, index=time_index)
-
-
-
 
 
 ############################## DATABASE MGMT. METHODS ##############################
+def fetch_serial_measurements(subject_data_dir: Path, load_only_first_n_seconds: int | None = None,
+                              set_time_index: bool = True) -> pd.DataFrame:
+    """
+    Fetch most recent serial measurements from a subject directory.
+
+    Concatenates "Interim Save WorkMem Full" files in order, then appends
+    the latest "Final Save". Falls back to latest "Redundant Save" if no
+    "Final Save" exists.
+
+    Args:
+        subject_data_dir: Path to subject data directory
+        load_only_first_n_seconds: If provided, stops loading data after first n seconds
+            based on first column's timestamps. Occurs before concatenation, so interim
+            saves may suffice without loading final save.
+
+    Returns:
+        pd.DataFrame: Concatenated serial measurements with datetime-converted timestamp column,
+            sorted by time ascending, duplicates removed
+
+    Raises:
+        ValueError: If no measurement files found matching criteria
+    """
+    measurements_dir = subject_data_dir / 'serial_measurements'
+
+    # Helper function to load CSV, handle index column, and convert first real column to datetime
+    def _load_and_convert_timestamps(path: Path) -> pd.DataFrame:
+        """
+        Load CSV and convert time column to datetime format.
+        Assumes time column is the last 'Unnamed' column before real data.
+        """
+        df = pd.read_csv(path)
+
+        # Find the last Unnamed column (time column)
+        unnamed_cols = [col for col in df.columns if str(col).startswith('Unnamed')]
+        if unnamed_cols:
+            time_col = unnamed_cols[-1]
+            df[time_col] = pd.to_datetime(df[time_col])
+            # Drop other Unnamed columns (index artifacts)
+            df = df.drop(columns=[col for col in unnamed_cols if col != time_col])
+            df.rename(columns={time_col: 'Time'}, inplace=True)
+
+        return df
+
+    # Helper function to filter dataframe by time window
+    def _filter_by_time_window(df: pd.DataFrame, n_seconds: int) -> pd.DataFrame:
+        """Filter dataframe to only include first n seconds from start timestamp."""
+        first_col = df.columns[0]
+        start_time = df[first_col].min()
+        cutoff_time = start_time + pd.Timedelta(seconds=n_seconds)
+        return df[df[first_col] <= cutoff_time]
+
+    # Helper function to sort by time and remove duplicates
+    def _sort_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Sort rows by first (timestamp) column ascending and remove duplicates
+        with equal timestamps, keeping first occurrence.
+        """
+        first_col = df.columns[0]
+        df = df.sort_values(by=first_col, ascending=True)
+        df = df.drop_duplicates(subset=[first_col], keep='first')
+        return df.reset_index(drop=True)
+
+    # Fetch interim saves: concatenate all "Interim Save WorkMem Full" in sorted order
+    try:
+        interim_frame_paths = filemgmt.most_recent_file(
+            measurements_dir,
+            ".csv",
+            ["Interim Save WorkMem Full"],
+            return_type='dict'
+        )['files']
+        interim_frames = [_load_and_convert_timestamps(path) for path in interim_frame_paths]
+        print(
+            f"Found {len(interim_frames)} working-memory-full measurements in {measurements_dir}. Will concatenate with final save.")
+    except ValueError:
+        interim_frames = []  # no interim frames found
+
+    # Apply time window filter to interim frames if specified
+    if load_only_first_n_seconds is not None and len(interim_frames) > 0:
+        interim_frames = [_filter_by_time_window(df, load_only_first_n_seconds) for df in interim_frames]
+
+        # Check if we have sufficient data from interim saves alone
+        total_interim_duration = (interim_frames[-1][interim_frames[-1].columns[0]].max() -
+                                  interim_frames[0][interim_frames[0].columns[0]].min()).total_seconds()
+        if total_interim_duration >= load_only_first_n_seconds:
+            print(
+                f"Interim saves cover {total_interim_duration:.1f}s (requested: {load_only_first_n_seconds}s). Skipping final save.")
+            final_frame = pd.DataFrame()  # empty frame to skip final save loading
+        else:
+            final_frame = None  # signal to load final save
+    else:
+        final_frame = None
+
+    # Fetch final frame only if needed
+    if final_frame is None:
+        try:
+            final_frame_path = filemgmt.most_recent_file(
+                measurements_dir,
+                ".csv",
+                ["Final Save"]
+            )
+            final_frame = _load_and_convert_timestamps(final_frame_path)
+
+            # Apply time window filter to final frame if specified
+            if load_only_first_n_seconds is not None:
+                final_frame = _filter_by_time_window(final_frame, load_only_first_n_seconds)
+
+        except ValueError:  # if "Final Save" not found, use latest "Redundant Save"
+            print(
+                f"No 'Final Save' measurement file found in {measurements_dir}\nWill utilize last 'Redundant Save', leading to potential data loss...")
+            final_frame_path = filemgmt.most_recent_file(
+                measurements_dir,
+                ".csv",
+                ["Redundant Save"]
+            )
+            final_frame = _load_and_convert_timestamps(final_frame_path)
+
+            # Apply time window filter to fallback frame if specified
+            if load_only_first_n_seconds is not None:
+                final_frame = _filter_by_time_window(final_frame, load_only_first_n_seconds)
+
+    # Concatenate interim frames with final frame
+    frames_to_concat = interim_frames + ([final_frame] if len(final_frame) > 0 else [])
+
+    if len(frames_to_concat) > 0:
+        result = pd.concat(frames_to_concat, ignore_index=True)
+        # Sort by timestamp ascending and remove duplicates
+        result = _sort_and_deduplicate(result)
+    else:
+        raise ValueError("No data loaded after applying filters!")
+
+    if set_time_index:  # set time index if desired
+        result = result.set_index("Time")
+
+    return result
+
+
 def fetch_trial_dir(experiment_data_dir: str | Path,
                               song_id: int | None = None, silence_id: int | None = None,
                     trial_id: int | None = None,
@@ -1241,10 +1280,10 @@ def fetch_trial_dir(experiment_data_dir: str | Path,
     else: raise FileNotFoundError(f"Trial directory {trial_dir} not found.")
 
 
-# todo: use this, to validate / overrule log frame entries
 def fetch_trial_questionnaire(experiment_data_dir: str | Path,
                               song_id: int | None = None, silence_id: int | None = None,
                               error_handling: Literal['raise', 'continue'] = 'continue',
+                              verbose: bool = False,
                               ) -> dict:
     """ Familiarity check, liking, fitting category, alternative category and emotional state. """
     trial_dir = fetch_trial_dir(experiment_data_dir, song_id, silence_id, )
@@ -1263,7 +1302,7 @@ def fetch_trial_questionnaire(experiment_data_dir: str | Path,
             if error_handling == 'raise':
                 raise ValueError(msg)
             else:
-                print(msg)
+                if verbose: print(msg)
                 return output_dict
 
     # fetch post trial data:
@@ -1275,36 +1314,10 @@ def fetch_trial_questionnaire(experiment_data_dir: str | Path,
         msg = f"Couldn't find post-trial questionnaire for {f'song_{song_id:03}' if song_id is not None else f'silence_{silence_id:003}'}. Perhaps trial was skipped."
         if error_handling == 'raise':
             raise ValueError(msg)
-        else: print(msg)
+        else:
+            if verbose: print(msg)
 
     return output_dict
-
-
-def turn_trial_id_into_song_or_silence_id(log_df: pd.DataFrame,
-                                          trial_id: int) -> tuple[int | None, int | None]:
-    """ Returns song_id and silence_id as tuple, one is np.nan """
-    subset = log_df.loc[log_df['Trial ID'] == trial_id]
-    song_id = subset.iloc[0]['Song ID']
-    silence_id = subset.iloc[0]['Silence ID']
-    return int(song_id) if not np.isnan(song_id) else None, int(silence_id) if not np.isnan(silence_id) else None
-
-
-def turn_song_or_silence_id_into_trial_id(log_df: pd.DataFrame,
-                                          song_id: int | None = None,
-                                          silence_id: int | None = None) -> int:
-    """ Returns trial_id given either song_id or silence_id (one must be provided) """
-    if song_id is not None:
-        subset = log_df.loc[log_df['Song ID'] == song_id]
-    elif silence_id is not None:
-        subset = log_df.loc[log_df['Silence ID'] == silence_id]
-    else:
-        raise ValueError("Either song_id or silence_id must be provided")
-
-    if len(subset) == 0:
-        raise ValueError(f"No trial found with song_id={song_id} or silence_id={silence_id}")
-
-    trial_id = subset.iloc[0]['Trial ID']
-    return int(trial_id)
 
 
 def fetch_trial_accuracy(experiment_data_dir: str | Path,
@@ -1312,6 +1325,7 @@ def fetch_trial_accuracy(experiment_data_dir: str | Path,
                          log_df: pd.DataFrame | None = None,
                          trial_id : int | None = None,
                          error_handling: Literal['raise', 'continue'] = 'continue',
+                         verbose: bool = False,
                          ) -> np.ndarray | None:
     trial_dir = fetch_trial_dir(experiment_data_dir, song_id, silence_id, trial_id, log_df)
 
@@ -1325,12 +1339,13 @@ def fetch_trial_accuracy(experiment_data_dir: str | Path,
         if error_handling == 'raise':
             raise ValueError(msg)
         else:
-            print(msg)
+            if verbose: print(msg)
             return None
 
 
 def fetch_all_accuracies_and_questionnaires(experiment_data_dir: str | Path,
                                             max_song_ind: int, max_silence_ind: int,
+                                            verbose: bool = False,
                                             ) -> tuple[dict[str, np.ndarray], dict[str, dict]]:
     """ Returns tuple accuracy_per_trial_dict and questionnaire_per_trial_dict. Leverages above two methods. """
     # fetch all accuracies:
@@ -1339,7 +1354,8 @@ def fetch_all_accuracies_and_questionnaires(experiment_data_dir: str | Path,
         song_id in range(max_song_ind)}
     accuracy_per_trial_dict.update({f"silence_{silence_id:03}": fetch_trial_accuracy(experiment_data_dir,
                                                                                      silence_id=silence_id,
-                                                                                     error_handling='continue') for
+                                                                                     error_handling='continue',
+                                                                                     verbose=verbose) for
                                     silence_id in range(max_silence_ind)})
 
     # fetch all questionnaires:
@@ -1348,6 +1364,7 @@ def fetch_all_accuracies_and_questionnaires(experiment_data_dir: str | Path,
         for song_id in range(max_song_ind)}
     questionnaire_per_trial_dict.update({f"silence_{silence_id:03}": fetch_trial_questionnaire(experiment_data_dir,
                                                                                                silence_id=silence_id,
+                                                                                               verbose=verbose,
                                                                                                error_handling='continue')
                                          for silence_id in range(max_silence_ind)})
 
@@ -1376,59 +1393,89 @@ def fetch_song_information(experiment_data_dir: str | Path,
             return None
 
 
-
-# todo: implement
 def fetch_onboarding_questionnaire(experiment_data_dir: str | Path,) -> dict:
-    pass
+    onboarding_filepath = filemgmt.most_recent_file(experiment_data_dir, ".json", ["Subject", "Data"])
+
+    with open(onboarding_filepath, "r") as f:
+        onboarding_dict = json.load(f)
+
+    return onboarding_dict
 
 
-# todo: implement
 def fetch_offboarding_questionnaire(experiment_data_dir: str | Path,) -> dict:
-    pass
+    offboarding_filepath = filemgmt.most_recent_file(experiment_data_dir, ".json", ["Post-Study Feedback Data"])
+
+    with open(offboarding_filepath, "r") as f:
+        offboarding_dict = json.load(f)
+
+    return offboarding_dict
 
 
+def fetch_excluded_trials(enriched_log_df: pd.DataFrame) -> list[int]:
+    excluded_trials: list[int] = []
+    if enriched_log_df['Trial Exclusion Bool'].any():
+        for trial_id in range(int(enriched_log_df['Trial ID'].max()) + 1):
+            if enriched_log_df.loc[enriched_log_df['Trial ID'] == trial_id, 'Trial Exclusion Bool'].any():
+                excluded_trials.append(int(trial_id))
+
+    return excluded_trials
 
 
+def fetch_skipped_trials(enriched_log_df: pd.DataFrame) -> list[int]:
+    skipped_trials: list[int] = []
+    if enriched_log_df['Song Skipped'].any():
+        for trial_id in range(int(enriched_log_df['Trial ID'].max()) + 1):
+            if enriched_log_df.loc[enriched_log_df['Trial ID'] == trial_id, 'Song Skipped'].any():
+                skipped_trials.append(trial_id)
+
+    return skipped_trials
 
 
-""" FUNCTION GRAVEYARD
+def fetch_enriched_log_frame(experiment_data_dir: str | Path, set_time_index: bool = True,
+                             verbose: bool = True) -> pd.DataFrame:
+    log_dir = experiment_data_dir / "experiment_logs"
+    try:
+        log_path = filemgmt.most_recent_file(log_dir, ".csv", ["Enriched Experiment Log"])
+        log_frame = pd.read_csv(log_path)
+        if set_time_index:
+            log_frame['Time'] = pd.to_datetime(log_frame['Time'])
+            log_frame = log_frame.set_index("Time")
+    except ValueError:
+        raise ValueError(f"Couldn't find enriched (integrated) experiment log frame with signature 'Enriched Experiment Log' in file title within {log_dir}...\nPlease ensure to run data_integration_workflow.py on subject data beforehand.")
 
-        def slow_info_per_window_sec(
-                window_time_centers: np.ndarray,
-                window_size: float,
-                target_series: pd.DataFrame,
-                operation: Literal['min', 'max', 'mean', 'median', 'mode', 'std'] = 'mean',
-        ) -> list:
-            ''' Target series needs to have time index (seconds or absolute). '''
-            starts = window_time_centers - window_size / 2
-            ends = window_time_centers + window_size / 2
 
-            # derive time in seconds from time index:
-            if isinstance(target_series.index, pd.DatetimeIndex):
-                time_seconds = (target_series.index - target_series.index[0]).total_seconds().to_series().reset_index(drop=True)
+    if verbose:
+        print(f"Imported enriched log frame from {experiment_data_dir}:\n")
+        qtc_start, qtc_end = get_qtc_measurement_start_end(log_frame, False)
+        print(f"- Duration of EEG/EMG measurements: {(qtc_end - qtc_start).total_seconds():.2f} seconds ({qtc_start} to {qtc_end})")
+        # trial info:
+        print(f"- Number of trials {int(log_frame['Trial ID'].max()+1)} ({int(log_frame['Song ID'].max()+1)} music, {int(log_frame['Silence ID'].max()+1)} silence)")
+        excluded_trials = fetch_excluded_trials(log_frame)
+        if len(excluded_trials) > 0:
+            print(f"- Thereof {len(excluded_trials)} trial(s) marked for exclusion: {excluded_trials}")
+        skipped_trials = fetch_skipped_trials(log_frame)
+        if len(skipped_trials) > 0:
+            print(f"- Thereof {len(skipped_trials)} trial(s) skipped: {skipped_trials}")
+        if len(skipped_trials) > 0 or len(excluded_trials) > 0:
+            print(f"- Remaining valid trials: {int(log_frame['Trial ID'].max()+1) - len(skipped_trials) - len(excluded_trials)}")
+
+        # music info:
+        print(f"- Valid trial list:")
+        for trial_id in range(int(log_frame['Trial ID'].max()+1)):
+            subset = log_frame.loc[log_frame['Trial ID'] == trial_id, :]
+            if subset['Trial Exclusion Bool'].any(): continue
+            if subset['Song Skipped'].any(): continue
             else:
-                time_seconds = target_series.index.to_series().reset_index(drop=True)
+                if subset['Silence ID'].notna().any():
+                    category = 'Silence'
+                    familiarity = None
+                else:
+                    category = subset['Music Category'].iloc[0]
+                    familiarity = subset['Familiarity'].dropna().iloc[0]
+                rmse = subset['Task RMSE'].max()
 
-            # compute target per window:
-            target_list = []
-            for ind, (start, end) in enumerate(zip(starts, ends)):
-                relevant_slice = target_series.reset_index(drop=True).loc[(time_seconds >= start) & (time_seconds < end)]
+                print(f"\t-> Trial {trial_id:<3}:\t{category:<20}\t\twith RMSE: {rmse:.2f}{f'\t\t\tand familarity: {int(familiarity)}' if familiarity is not None else ''}")
+        print("\n")
 
-                # simple:
-                if len(relevant_slice) == 0: target = target_list[ind - 1]  # if no relevant slice within window, take previous
-                elif len(relevant_slice) == 1: target = relevant_slice.item()
 
-                #
-                elif operation == 'min': target = relevant_slice.min()
-                elif operation == 'max': target = relevant_slice.max()
-                elif operation == 'mean': target = relevant_slice.mean()
-                elif operation == 'median': target = relevant_slice.median()
-                elif operation == 'mode': target = relevant_slice.mode().item()
-                elif operation == 'std': target = relevant_slice.std()
-                else: raise ValueError('Unknown operation {}'.format(operation))
-
-                target_list.append(target)
-
-            return target_list
-
-"""
+    return log_frame
