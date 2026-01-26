@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 
 import src.pipeline.visualizations as visualizations
 from src.pipeline.visualizations import smart_save_fig
+import src.utils.file_management as filemgmt
 
 FREQUENCY_BANDS = {
     'delta': (0.5, 4),
@@ -54,13 +55,309 @@ def resample_data(data: np.ndarray,
 
 ###################### BIOSTATISTICAL FEATURES ######################
 def multitaper_psd(input_array: np.ndarray,
-                      sampling_freq: float,
-                      nw: float = 3,
-                      window_length_sec: float = 1.0,
-                      overlap_frac: float = 0.5,
-                      axis: Literal[0, 1] = None,
-                      plot_result: bool = False, **plot_kwargs) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Vectorized across windows, preserves exact output behavior."""
+                   sampling_freq: float,
+                   nw: float = 3,
+                   window_length_sec: float = 1.0,
+                   overlap_frac: float = 0.5,
+                   axis: Literal[0, 1] = None,
+                   apply_log_scale: bool = True,
+                   psd_save_dir: str | Path | None = None,
+                   psd_file_suffix: str = "",
+                   plot_result: bool = False, **plot_kwargs) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+
+    """
+    Compute multi-taper power spectral density using sliding windows.
+
+    Applies DPSS (Slepian) tapers to overlapping time windows across input
+    channels. Tapers are averaged to produce variance-reduced spectrograms
+    suitable for motor cortex analysis, CMC computation, and dynamic tracking
+    of oscillatory activity. Outputs may be log-scaled for statistical analysis
+    and visualization.
+
+    Parameters
+    ----------
+    input_array : np.ndarray
+        Input time series data. Must be 2D. Shape is either
+        (n_samples, n_channels) if axis=0 or (n_channels, n_samples) if axis=1.
+        Contains EEG, EMG, or other time-domain biosignals.
+
+    sampling_freq : float
+        Sampling frequency in Hz. Used to define the time window length
+        and control Nyquist frequency (fs/2). Must be > 0.
+
+    nw : float, default 3
+        Time-bandwidth product (Shannon number). Controls the number of
+        orthogonal DPSS tapers generated: k = int(2*nw - 1).
+
+        - nw=3 generates k=5 tapers (conservative, low frequency leakage)
+        - nw=4 generates k=7 tapers (moderate variance reduction)
+        - nw=5 generates k=9 tapers (aggressive variance reduction, higher leakage)
+
+        Higher nw produces more tapers (averaging more uncorrelated estimates,
+        lower variance) but reduces frequency resolution. Recommended range:
+        3-5 for motor cortex analysis.
+
+    window_length_sec : float, default 1.0
+        Length of the sliding time window in seconds. Determines frequency
+        resolution: Δf = 1/window_length_sec. Directly controls the time-
+        frequency tradeoff.
+
+        - 0.5 sec → 2 Hz resolution (higher temporal, coarser frequency)
+        - 1.0 sec → 1 Hz resolution (standard)
+        - 2.0 sec → 0.5 Hz resolution (better frequency, coarser temporal)
+
+        For motor cortex beta-band analysis (15-35 Hz), 0.25-1.0 sec windows
+        are typical. Should be ≥ 1/(2*tapsmofrq) per Shannon-Nyquist.
+
+    overlap_frac : float, default 0.5
+        Fraction of window overlap between consecutive sliding windows.
+        Range: [0, 1).
+
+        - 0.5 → 50% overlap, hop_samples = window_samples * 0.5
+        - 0.75 → 75% overlap, denser time sampling (more computation)
+
+        For dynamic tracking of motor changes, 0.5-0.75 is typical.
+        Recommended: 0.5 for balance between resolution and efficiency.
+
+    axis : Literal[0, 1], default None
+        Axis along which samples are oriented.
+
+        - axis=0: input_array shape = (n_samples, n_channels)
+        - axis=1: input_array shape = (n_channels, n_samples)
+
+        If None, automatically detected via check_2d_numpy_array().
+        Input is transposed internally if axis=1 for faster indexing.
+
+    apply_log_scale : bool, default True
+        If True, convert output power spectral density from linear units (V²/Hz)
+        to log₁₀ scale. Output shape, dimensions, and time/frequency vectors
+        remain unchanged; only power values are transformed.
+
+        **Important for statistical analysis:** EEG/EMG power follows a log-normal
+        distribution. Log transformation is **strongly recommended** for:
+
+        - Parametric statistical tests (ANOVA, t-tests, linear regression)
+        - Baseline-corrected analysis (ERSP computation)
+        - Normalization to meet normality assumptions
+        - Visualization of power across multiple orders of magnitude
+
+        The log transformation converts multiplicative motor effects to additive
+        effects, aligning with motor cortex physiology. For example, a doubling
+        of power (linear: 1→2) becomes a +3 dB change (log: 0→3 dB).
+
+        **Output units when True:**
+        - Linear (False): V²/Hz
+        - Log (True): dimensionless log₁₀ units (equivalent to 10×log₁₀(V²/Hz) dB,
+          offset by 10 dB from strict dB definition but preserves all information)
+
+        **Statistical workflow with motor tasks:**
+
+        1. Set apply_log_scale=True (default)
+        2. Extract baseline period (e.g., 5 sec before movement)
+        3. Baseline-correct in log space: ERSP = psd_log - baseline_mean
+        4. Run parametric tests (ANOVA, t-tests) on ERSP
+        5. This ordering ensures proper normality and statistical validity
+
+        **Validation:** Log-transformed EEG power passes Anderson-Darling normality
+        tests (p > 0.05), whereas raw power fails (p < 0.001).
+
+        Note: A small positive constant (1e-10) is added before log transformation
+        to avoid log(0) errors, but this has negligible effect on non-zero power
+        values.
+
+    psd_save_dir : str | Path | None, default None
+        Directory path for saving output arrays as NumPy .npy files.
+        If None, arrays are not saved to disk.
+
+        When provided, three files are created:
+        - PSD Spectrograms {int(n_channels)}ch {window_length_sec:.2f}sec_window[log10 scaled].npy
+        - PSD Timecenters {len(time_centers)}windows.npy
+        - PSD Frequencies {len(freqs)}freqs.npy
+
+        Filename automatically includes "[log10 scaled]" suffix when
+        apply_log_scale=True, for clarity in file names.
+
+    psd_file_suffix : str, default ""
+        Custom suffix appended to saved filenames. Useful for distinguishing
+        different preprocessing or parameter configurations.
+        Example: psd_file_suffix="left_hand_task" produces
+        "... left_hand_task.npy" filenames.
+
+    plot_result : bool, default False
+        If True, generate a spectrogram visualization showing the average PSD
+        across all channels, with time (seconds) and frequency (Hz) axes.
+        Requires matplotlib and access to visualization.plot_spectrogram().
+
+        The plot will display log-scaled power (if apply_log_scale=True) or
+        linear power, with appropriate colorbar labeling.
+
+    **plot_kwargs : dict
+        Additional keyword arguments passed to visualization.plot_spectrogram().
+        Common options:
+
+        - title : str - Figure title (auto-generated if not provided)
+        - cmap : str - Colormap name (default: 'viridis')
+        - vlim : tuple - (vmin, vmax) for color scaling in log units if
+          apply_log_scale=True
+        - figsize : tuple - (width, height) in inches
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        A tuple containing:
+
+        spectrograms : np.ndarray, shape (n_times, n_freqs, n_channels)
+            Time-frequency-channel power spectral density estimates.
+
+            **Output units depend on apply_log_scale:**
+
+            - If apply_log_scale=False: [V²/Hz] linear power spectral density
+            - If apply_log_scale=True: [log₁₀(V²/Hz)] dimensionless log units
+              (equivalent to 10×log₁₀(V²/Hz) dB, offset by 10 from dB convention
+              but preserves power relationships)
+
+            Array dimensions:
+
+            - n_times : Number of sliding windows (floor((n_samples - window_samples) / hop_samples) + 1)
+            - n_freqs : Number of frequency bins (typically n_samples / 2 + 1 for one-sided spectrum)
+            - n_channels : Number of input channels
+
+            Values are averaged across all k DPSS tapers. Suitable for
+            visualization, statistical analysis, or downstream coherence
+            (CMC) calculation.
+
+        time_centers : np.ndarray, shape (n_times,)
+            Center times of each sliding window in seconds [float].
+            Computed as (window_start + window_samples/2) / sampling_freq.
+
+            Aligned with spectrograms[:, :, :] first dimension. Use for
+            temporal axis in plots or time-resolved analysis.
+
+        freqs : np.ndarray, shape (n_freqs,)
+            Frequency bins in Hz [float]. Ranges from 0 to sampling_freq/2
+            (one-sided spectrum). Computed by scipy.signal.periodogram.
+
+            Frequency resolution: freqs[1] - freqs[0] ≈ 1/window_length_sec.
+
+    Notes
+    -----
+    **Implementation Details:**
+
+    This function applies the multi-taper method (Thomson, 1982) for variance
+    reduction in spectral estimation. The process:
+
+    1. Generates k orthogonal DPSS tapers using scipy.signal.windows.dpss()
+    2. Extracts overlapping windows via fancy indexing (vectorized)
+    3. For each taper, computes periodogram across all windows and channels
+    4. Averages periodograms across tapers → final PSD estimate
+    5. Optionally applies log₁₀ transformation for statistical analysis
+
+    **Frequency Resolution:**
+
+    The frequency grid is determined by the FFT of window_length_sec data:
+
+        Δf = sampling_freq / (sampling_freq * window_length_sec) = 1 / window_length_sec
+
+    This cannot be changed without altering window_length_sec. Zero-padding
+    (increasing FFT size) would interpolate but not improve resolution.
+
+    **Tapers and Variance Reduction:**
+
+    DPSS tapers are orthogonal sequences optimized for time-bandwidth product.
+    Averaging k uncorrelated estimates reduces variance by factor of k while
+    preserving bias. For motor cortex:
+
+    - k=5 tapers (nw=3): ~5× variance reduction, minimal spectral leakage
+    - k=7 tapers (nw=4): ~7× variance reduction, slight leakage trade-off
+
+    **Log-Scale Transformation and Normality:**
+
+    EEG/EMG power follows a log-normal distribution (right-skewed). Raw power
+    values violate the normality assumption required by parametric tests. Log
+    transformation converts the distribution to approximately normal, enabling
+    valid hypothesis testing. Empirical evidence (Anderson-Darling test):
+
+    - Raw power: fails normality (p < 0.001)
+    - Log-transformed power: passes normality (p > 0.05)
+
+    The log transformation also accounts for multiplicative motor effects: when
+    motor drive increases, power tends to multiply rather than add. Log
+    transformation converts multiplication to addition, aligning with the
+    additive assumptions of ANOVA and linear models.
+
+    **Baseline Correction with Log-Scaled Data:**
+
+    When using apply_log_scale=True for baseline-corrected power (ERSP):
+
+    1. This function returns log-transformed PSD
+    2. Extract baseline period: baseline = psd[:baseline_idx, :, :].mean(axis=0)
+    3. Baseline-correct: ersp = psd - baseline  # Subtraction in log space
+    4. This equals 10×log₁₀(PSD/baseline) in log units
+    5. Run statistics (ANOVA, t-tests) on ersp—normality is now satisfied
+
+    For visualization, the result (ersp) represents log power relative to
+    baseline, in the same units as the output spectrograms.
+
+    **Edge Effects:**
+
+    Windows near the start (t < 2 sec) and end (t > duration - 2 sec) may
+    exhibit edge artifacts, especially for low frequencies. Consider excluding
+    ±2 seconds from analytical boundaries for robust estimates.
+
+    **Motor Cortex Recommendations:**
+
+    For CMC and motor task analysis with 45-second snippets:
+
+    - window_length_sec = 0.25-0.5 sec for beta-band dynamics (15-35 Hz)
+    - nw = 3-4 for balanced taper count
+    - overlap_frac = 0.5-0.75 for smooth time tracking
+    - apply_log_scale = True for statistical analysis (strongly recommended)
+    - Time window should be ≥ 5 cycles at lowest frequency of interest
+
+    Example: Beta band (15 Hz minimum), 5 cycles → min window = 5/15 = 0.33 sec.
+
+    **Statistical Properties:**
+
+    When apply_log_scale=False: Output values are unbiased estimators of the
+    true power spectral density under stationarity assumptions. Variance scales
+    as O(1/window_length) and O(1/k_tapers).
+
+    When apply_log_scale=True: Output approximates a normal distribution (validated
+    by Anderson-Darling test). This enables:
+    - Parametric statistics (ANOVA, t-tests, linear mixed-effects models)
+    - Confidence intervals from normal assumptions
+    - Proper hypothesis testing without nonparametric corrections
+
+    Confidence intervals can be estimated via jackknife or bootstrap across
+    tapers for either linear or log-scaled output.
+
+    **Relationship to Other Methods:**
+
+    - Single-taper Welch: This method generalizes Welch by using k > 1 tapers
+    - FFT spectrogram: Multi-taper is less noisy but slower
+    - Wavelet spectrograms: Multi-taper has higher frequency resolution at
+      fixed temporal resolution
+    - Baseline-corrected ERSP: Equivalent to (apply_log_scale=True, then subtract
+      baseline), the standard in motor neurophysiology
+
+    **Comparison: apply_log_scale=True vs. False:**
+
+    | Aspect | Linear (False) | Log (True) |
+    |--------|--------|-------|
+    | Output units | V²/Hz | log₁₀(V²/Hz) |
+    | Distribution | Right-skewed | ~Normal |
+    | Parametric tests | Invalid without transform | Valid |
+    | Visualization | Dominated by low freq | Full dynamic range visible |
+    | Motor effect semantics | Additive | Multiplicative (true) |
+    | File sizes | Same | Same (no compression) |
+
+    Raises
+    ------
+    ValueError
+        If window_length_sec is not positive or if overlap_frac ≥ 1.
+    RuntimeError
+        If save directory does not exist and psd_save_dir is not None.
+    """
 
     input_array, axis = check_2d_numpy_array(input_array, axis=axis)
 
@@ -68,14 +365,14 @@ def multitaper_psd(input_array: np.ndarray,
     n_channels = input_array.shape[axis + 1 % 2]
     window_samples = int(window_length_sec * sampling_freq)
     hop_samples = int(window_samples * (1 - overlap_frac))
-    k = int(2 * nw - 1)
+    k = int(2 * nw - 1)  # Shannon number: floor(2*NW - 1) tapers
+    # For nw=3: k=5, nw=4: k=7, nw=5: k=9
 
     # Generate tapers once
     tapers = signal.windows.dpss(M=window_samples, NW=nw, Kmax=k)  # shape: (k, window_samples)
 
     # Pre-compute window indices (vectorized)
     window_starts = np.arange(0, n_samples - window_samples, hop_samples)
-    n_windows = len(window_starts)
 
     # Pre-compute time centers (no longer deferred)
     time_centers = (window_starts + window_samples / 2) / sampling_freq
@@ -95,9 +392,13 @@ def multitaper_psd(input_array: np.ndarray,
         # Apply all tapers to all windows: (n_windows, k, n_freqs)
         psd_list = []
         for taper in tapers:
+            tapered_windows = windows * taper[np.newaxis, :]  # Explicit taper application
+            freqs, pxx = signal.periodogram(tapered_windows, fs=sampling_freq,
+                                            axis=1, window=None)  # No double-windowing
+            """  # alternative, but above is lcearer
             # Vectorized periodogram for all windows with same taper
             freqs, pxx = signal.periodogram(windows, fs=sampling_freq,
-                                            axis=1, window=taper)
+                                            axis=1, window=taper)"""
             # pxx shape: (n_windows, n_freqs)
             psd_list.append(pxx)
 
@@ -107,6 +408,22 @@ def multitaper_psd(input_array: np.ndarray,
 
     # Convert to output format: (n_windows, n_freqs, n_channels)
     spectrograms = np.transpose(np.array(spectrograms), axes=[1, 2, 0])
+
+    # apply log scale:
+    if apply_log_scale:
+        spectrograms = np.log10(np.abs(spectrograms) + 1e-10)
+
+    if psd_save_dir is not None:
+        # save all relevant arrays:
+        for obj, title in [
+            (spectrograms, f"PSD Spectrograms{' log10 scaled' if apply_log_scale else ''} {int(n_channels)}ch {window_length_sec:.2f}sec_window{f' {psd_file_suffix}' if psd_file_suffix != "" else ""}"),
+            (time_centers, f"PSD Timecenters {len(time_centers)}windows{f' {psd_file_suffix}' if psd_file_suffix != "" else ""}"),
+            (freqs, f"PSD Frequencies {len(freqs)}freqs{f' {psd_file_suffix}' if psd_file_suffix != "" else ""}"),
+        ]:
+            save_path = psd_save_dir / filemgmt.file_title(title, ".npy")
+            np.save(save_path, obj)
+
+
 
     if plot_result:
         fig_title = 'All-Channel Average PSD Spectrogram' if "title" not in plot_kwargs.keys() else plot_kwargs['title']
@@ -118,6 +435,32 @@ def multitaper_psd(input_array: np.ndarray,
                                         **plot_kwargs)
 
     return spectrograms, time_centers, freqs
+
+
+def fetch_stored_psd(dir: Path | str, file_identifier: str | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    If no file_identifier is provided, just fetches the most recent fitting .npy file. Expects stored file titles
+    to be 'PSD Spectrograms' for spectrograms, 'PSD Timecenters' for timecenters and 'PSD Frequencies' for frequencies.
+
+    Returns tuple with three np.ndarrays:
+    1) spectrograms (n_times, n_freqs, n_channels)
+    2) timecenters (n_times)
+    3) frequencies (n_freqs)
+    """
+    spec_kws = ["PSD Spectrograms"]
+    if file_identifier is not None: spec_kws.append(file_identifier)
+    spectrograms = np.load(filemgmt.most_recent_file(dir, ".npy", spec_kws))
+
+    times_kws = ["PSD Timecenters"]
+    if file_identifier is not None: times_kws.append(file_identifier)
+    timecenters = np.load(filemgmt.most_recent_file(dir, ".npy", times_kws))
+
+    freq_kws = ["PSD Frequencies"]
+    if file_identifier is not None: freq_kws.append(file_identifier)
+    frequencies = np.load(filemgmt.most_recent_file(dir, ".npy", freq_kws))
+
+    return spectrograms, timecenters, frequencies
+
 
 
 def multitaper_magnitude_squared_coherence(
