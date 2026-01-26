@@ -98,7 +98,7 @@ class BiosignalPreprocessor:
                  n_ica_components: int | None = 25,
                  automatic_ic_labelling: bool = True,
                  laplacian_filter_neighbor_radius: float | None | Literal['auto'] = 'auto',
-                 wavelet_type: Literal['db4', 'sym5', 'coif1'] | None = 'db4',
+                 wavelet_type: Literal['db4', 'sym5', 'coif1'] | None = None,
                  denoising_threshold_mode: Literal['soft', 'hard'] = 'soft',
                  ):
         """
@@ -475,7 +475,7 @@ class BiosignalPreprocessor:
         """
         if self._laplacian_filter_neighbor_radius == 'auto':
             if self.modality == 'eeg': return .05
-            elif self.modality == 'emg': return .015
+            elif self.modality == 'emg': return None
             else: raise ValueError(f"Unknown modality: {self.modality}")
         else:
             return self._laplacian_filter_neighbor_radius
@@ -1335,8 +1335,8 @@ def import_npy_with_config(file_title: str, data_dir: str | Path,
 
     if config_dict is None:  # manually enter important properties
         config_dict = {'sampling_freq': 2048, 'bad_channels': []}
-        assert config_dict['sampling_freq'] == sampling_rate_Hz;
-        "sampling_rate_Hz parameter doesn't match sampling frequency found in config file!"
+        assert config_dict[
+                   'sampling_freq'] == sampling_rate_Hz, "sampling_rate_Hz parameter doesn't match sampling frequency found in config file!"
 
     # remove bad channels: (todo: ponder, set to zero?)
     if bad_channel_treatment == 'Zero':
@@ -1356,223 +1356,3 @@ def import_npy_with_config(file_title: str, data_dir: str | Path,
 
     print("Resulting file shape: ", file.shape, "\n")
     return file, config_dict
-
-
-def fetch_experiment_log(subject_data_dir: Path) -> pd.DataFrame:
-    """
-    Fetch and concatenate the most recent experiment log files from a subject directory.
-
-    Prioritizes "Final Full Save" and concatenates "Working Memory Full Save" files.
-    Falls back to "Interim Save" only if no "Final Full Save" exists. Converts 'Time'
-    to datetime, sorts descending (newest first), and removes duplicates by timestamp.
-
-    Parameters
-    ----------
-    subject_data_dir : Path
-        Path to the subject data directory containing 'experiment_logs' subfolder.
-
-    Returns
-    -------
-    pd.DataFrame
-        Processed experiment log DataFrame, sorted descending by 'Time' (datetime),
-        duplicates removed. Columns include 'Time' as datetime and experiment data.
-
-    Raises
-    ------
-    ValueError
-        If no log files found, incompatible columns, or missing 'Time' column.
-    FileNotFoundError
-        If log directory does not exist.
-
-    Notes
-    -----
-    "Working Memory Full Save" files always concatenated with final save.
-    "Interim Save" used only as fallback if no "Final Full Save" exists.
-    Duplicates dropped keeping first occurrence (earliest load order).
-    'Time' parsed via pd.to_datetime (inferred format).
-    """
-    log_dir = subject_data_dir / 'experiment_logs'
-    if not log_dir.exists():
-        raise FileNotFoundError(f"Log directory not found: {log_dir}")
-
-    # Fetch Working Memory Full Save frames (always concatenate if present)
-    wm_frames = []
-    try:
-        wm_data = filemgmt.most_recent_file(log_dir, ".csv",
-                                            ["Working Memory Full Save"],
-                                            return_type='dict')
-        wm_frame_paths = wm_data['files']
-        wm_frames = [pd.read_csv(path) for path in wm_frame_paths]
-        print(f"Found {len(wm_frames)} Working Memory Full Save logs in {log_dir}.")
-    except ValueError:
-        print(f"No Working Memory Full Save logs found in {log_dir}.")
-
-    # Fetch final frame: Final Full Save or fallback to Interim Save
-    try:
-        final_frame_path = filemgmt.most_recent_file(log_dir, ".csv", ["Final Full Save"])
-    except ValueError:
-        print(f"No 'Final Full Save' in {log_dir}. Using 'Interim Save' as fallback.")
-        try:
-            final_frame_path = filemgmt.most_recent_file(log_dir, ".csv", ["Interim Save"])
-        except ValueError:
-            raise ValueError(f"No log files found in {log_dir}")
-
-    final_frame = pd.read_csv(final_frame_path)
-
-    # Concat if Working Memory frames exist, validate columns
-    frames = wm_frames + [final_frame] if wm_frames else [final_frame]
-    if len(frames) > 1:
-        if not all(frame.shape[1] == frames[0].shape[1] for frame in frames[1:]):
-            raise ValueError("Incompatible columns across frames.")
-        combined = pd.concat(frames, ignore_index=True)
-    else:
-        combined = frames[0]
-
-    # Process: convert Time, sort desc, drop dups
-    return _process_frame(combined)
-
-
-def _process_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """Helper: Convert 'Time' to datetime, sort desc by Time, drop timestamp dups."""
-    if 'Time' not in df.columns:
-        raise ValueError("DataFrame missing 'Time' column.")
-
-    # Parse Time to datetime
-    df['Time'] = pd.to_datetime(df['Time'])
-
-    # Sort descending (newest first), drop duplicates keeping first, reset index
-    df = df.sort_values('Time', ascending=True).drop_duplicates(subset=['Time'], keep='first').reset_index(drop=True)
-
-    return df
-
-
-def fetch_serial_measurements(subject_data_dir: Path, load_only_first_n_seconds: int | None = None) -> pd.DataFrame:
-    """
-    Fetch most recent serial measurements from a subject directory.
-
-    Concatenates "Interim Save WorkMem Full" files in order, then appends
-    the latest "Final Save". Falls back to latest "Redundant Save" if no
-    "Final Save" exists.
-
-    Args:
-        subject_data_dir: Path to subject data directory
-        load_only_first_n_seconds: If provided, stops loading data after first n seconds
-            based on first column's timestamps. Occurs before concatenation, so interim
-            saves may suffice without loading final save.
-
-    Returns:
-        pd.DataFrame: Concatenated serial measurements with datetime-converted timestamp column,
-            sorted by time ascending, duplicates removed
-
-    Raises:
-        ValueError: If no measurement files found matching criteria
-    """
-    measurements_dir = subject_data_dir / 'serial_measurements'
-
-    # Helper function to load CSV, handle index column, and convert first real column to datetime
-    def _load_and_convert_timestamps(path: Path) -> pd.DataFrame:
-        """
-        Load CSV and convert time column to datetime format.
-        Assumes time column is the last 'Unnamed' column before real data.
-        """
-        df = pd.read_csv(path)
-
-        # Find the last Unnamed column (time column)
-        unnamed_cols = [col for col in df.columns if str(col).startswith('Unnamed')]
-        if unnamed_cols:
-            time_col = unnamed_cols[-1]
-            df[time_col] = pd.to_datetime(df[time_col])
-            # Drop other Unnamed columns (index artifacts)
-            df = df.drop(columns=[col for col in unnamed_cols if col != time_col])
-            df.rename(columns={time_col: 'Time'}, inplace=True)
-
-        return df
-
-    # Helper function to filter dataframe by time window
-    def _filter_by_time_window(df: pd.DataFrame, n_seconds: int) -> pd.DataFrame:
-        """Filter dataframe to only include first n seconds from start timestamp."""
-        first_col = df.columns[0]
-        start_time = df[first_col].min()
-        cutoff_time = start_time + pd.Timedelta(seconds=n_seconds)
-        return df[df[first_col] <= cutoff_time]
-
-    # Helper function to sort by time and remove duplicates
-    def _sort_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Sort rows by first (timestamp) column ascending and remove duplicates
-        with equal timestamps, keeping first occurrence.
-        """
-        first_col = df.columns[0]
-        df = df.sort_values(by=first_col, ascending=True)
-        df = df.drop_duplicates(subset=[first_col], keep='first')
-        return df.reset_index(drop=True)
-
-    # Fetch interim saves: concatenate all "Interim Save WorkMem Full" in sorted order
-    try:
-        interim_frame_paths = filemgmt.most_recent_file(
-            measurements_dir,
-            ".csv",
-            ["Interim Save WorkMem Full"],
-            return_type='dict'
-        )['files']
-        interim_frames = [_load_and_convert_timestamps(path) for path in interim_frame_paths]
-        print(
-            f"Found {len(interim_frames)} working-memory-full measurements in {measurements_dir}. Will concatenate with final save.")
-    except ValueError:
-        interim_frames = []  # no interim frames found
-
-    # Apply time window filter to interim frames if specified
-    if load_only_first_n_seconds is not None and len(interim_frames) > 0:
-        interim_frames = [_filter_by_time_window(df, load_only_first_n_seconds) for df in interim_frames]
-
-        # Check if we have sufficient data from interim saves alone
-        total_interim_duration = (interim_frames[-1][interim_frames[-1].columns[0]].max() -
-                                  interim_frames[0][interim_frames[0].columns[0]].min()).total_seconds()
-        if total_interim_duration >= load_only_first_n_seconds:
-            print(
-                f"Interim saves cover {total_interim_duration:.1f}s (requested: {load_only_first_n_seconds}s). Skipping final save.")
-            final_frame = pd.DataFrame()  # empty frame to skip final save loading
-        else:
-            final_frame = None  # signal to load final save
-    else:
-        final_frame = None
-
-    # Fetch final frame only if needed
-    if final_frame is None:
-        try:
-            final_frame_path = filemgmt.most_recent_file(
-                measurements_dir,
-                ".csv",
-                ["Final Save"]
-            )
-            final_frame = _load_and_convert_timestamps(final_frame_path)
-
-            # Apply time window filter to final frame if specified
-            if load_only_first_n_seconds is not None:
-                final_frame = _filter_by_time_window(final_frame, load_only_first_n_seconds)
-
-        except ValueError:  # if "Final Save" not found, use latest "Redundant Save"
-            print(
-                f"No 'Final Save' measurement file found in {measurements_dir}\nWill utilize last 'Redundant Save', leading to potential data loss...")
-            final_frame_path = filemgmt.most_recent_file(
-                measurements_dir,
-                ".csv",
-                ["Redundant Save"]
-            )
-            final_frame = _load_and_convert_timestamps(final_frame_path)
-
-            # Apply time window filter to fallback frame if specified
-            if load_only_first_n_seconds is not None:
-                final_frame = _filter_by_time_window(final_frame, load_only_first_n_seconds)
-
-    # Concatenate interim frames with final frame
-    frames_to_concat = interim_frames + ([final_frame] if len(final_frame) > 0 else [])
-
-    if len(frames_to_concat) > 0:
-        result = pd.concat(frames_to_concat, ignore_index=True)
-        # Sort by timestamp ascending and remove duplicates
-        result = _sort_and_deduplicate(result)
-    else:
-        raise ValueError("No data loaded after applying filters!")
-
-    return result
