@@ -6,11 +6,12 @@ import matplotlib.pyplot as plt
 from typing import Callable, Literal, Tuple
 
 from pandas import DatetimeIndex
+from torch.backends.mkl import verbose
 
 import src.pipeline.signal_features as features
 import src.pipeline.preprocessing as preprocessing
 import src.pipeline.visualizations as visualizations
-import src.pipeline.data_analysis as data_analysis
+import src.pipeline.data_integration as data_integration
 import src.utils.file_management as filemgmt
 
 from src.pipeline.preprocessing import BiosignalPreprocessor
@@ -37,14 +38,14 @@ if __name__=="__main__":
     ################## IMPORT ##################
     ### Import:
     # load experiment files:
-    log_frame = preprocessing.fetch_experiment_log(subject_experiment_data)
-    data_analysis.get_qtc_measurement_start_end(log_frame, verbose=True)
+    log_frame = data_integration.fetch_experiment_log(subject_experiment_data)
+    data_integration.get_qtc_measurement_start_end(log_frame, verbose=True)
     # log columns: ['Time', 'Music', 'Event', 'Questionnaire']
-    serial_frame = preprocessing.fetch_serial_measurements(subject_experiment_data).set_index('Time')
+    serial_frame = data_integration.fetch_serial_measurements(subject_experiment_data)
     # serial columns: ['Time', 'fsr', 'ecg', 'gsr']
 
     # enrich log frame columns based on 'Event' and 'Questionnaire' data:
-    enriched_log_frame = data_analysis.prepare_log_frame(log_frame, set_time_index=True)
+    enriched_log_frame = data_integration.prepare_log_frame(log_frame, set_time_index=True)
 
 
 
@@ -54,48 +55,48 @@ if __name__=="__main__":
 
 
     elif subject_ind == 1:
-        log_frame = data_analysis.remove_song_entries(
+        log_frame = data_integration.remove_song_entries(
             enriched_log_frame, log_frame,
             song_title_artist_id_tuples=[("Ain't No Sunshine", "Bill Withers", 17),
                                          ("Merry-Go-Round of Life - from 'Howl's Moving Castle'", "Joe Hisaishi", 21),
                                          ("As", "George Michael", 24),
                                          ("Dancing In the Dark", "Bruce Springsteen", 28)
                                          ])
-        enriched_log_frame = data_analysis.prepare_log_frame(log_frame, set_time_index=True)
-        enriched_log_frame = data_analysis.annotate_trial(enriched_log_frame,
+        enriched_log_frame = data_integration.prepare_log_frame(log_frame, set_time_index=True)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
                                                           "Talking and frustration because of briefly stuck measurement",
                                                           True, trial_id=11)
 
-        enriched_log_frame = data_analysis.annotate_trial(enriched_log_frame,
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
                                                           "Talking and frustration because of briefly stuck measurement",
                                                           True, trial_id=15)
 
 
     elif subject_ind == 2:
-        log_frame = data_analysis.remove_song_entries(enriched_log_frame, log_frame,
+        log_frame = data_integration.remove_song_entries(enriched_log_frame, log_frame,
                                                       [("I Say a Little Prayer", "Aretha Franklin", 0),
                                                        ("Celebration", "Kool & The Gang", 1),
                                                        ("Uptown Funk (feat. Bruno Mars)", "Mark Ronson", 2)])
-        #log_frame = data_analysis.remove_silence_trial(enriched_log_frame, log_frame, silence_ids=[0, 1, 2])
-        enriched_log_frame = data_analysis.prepare_log_frame(log_frame, set_time_index=True)
+        #log_frame = data_integration.remove_silence_trial(enriched_log_frame, log_frame, silence_ids=[0, 1, 2])
+        enriched_log_frame = data_integration.prepare_log_frame(log_frame, set_time_index=True)
 
         # mark some trials:
-        enriched_log_frame = data_analysis.annotate_trial(enriched_log_frame,
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
                                                           "Flawed Dynamometer Measurement and Corresponding Talking",
                                                           True, trial_id=0)
-        enriched_log_frame = data_analysis.annotate_trial(enriched_log_frame,
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
                                                           "Flawed Dynamometer Measurement and Corresponding Talking",
                                                           True,
                                                           trial_id=1)
-        enriched_log_frame = data_analysis.annotate_trial(enriched_log_frame,
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
                                                           "Flawed Dynamometer Measurement and Corresponding Talking",
                                                           True,
                                                           trial_id=2)
-        enriched_log_frame = data_analysis.annotate_trial(enriched_log_frame,
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
                                                           "Flawed Dynamometer Measurement and Corresponding Talking",
                                                           True,
                                                           trial_id=4)
-        enriched_log_frame = data_analysis.annotate_trial(enriched_log_frame,
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
                                                           "Flawed Dynamometer Measurement and Corresponding Talking",
                                                           True,
                                                           trial_id=5)
@@ -104,27 +105,36 @@ if __name__=="__main__":
         enriched_log_frame.loc[pd.Timestamp("2026-01-17 21:05:20"):, 'Phase'] = 'Idle State'
 
 
+        # mark delayed EEG/EMG recordings start: "Actual Start Trigger" after 20 minutes (since before was much talking, also within task)
+        qtc_start, _ = data_integration.get_qtc_measurement_start_end(log_frame)
+
+        first_idx = enriched_log_frame.loc[qtc_start + pd.Timedelta(minutes=15):].index[0]
+        enriched_log_frame.loc[first_idx, 'Event'] = 'Actual Start Trigger'
+
+        data_integration.get_qtc_measurement_start_end(enriched_log_frame, verbose=True)
+
+
     elif subject_ind == 3:
-        log_frame = data_analysis.remove_song_entries(enriched_log_frame, log_frame,
+        log_frame = data_integration.remove_song_entries(enriched_log_frame, log_frame,
                                                       [("Merry-Go-Round of Life - from 'Howl's Moving Castle'",
                                                         "Joe Hisaishi", 2),
                                                        ("Never Too Much", "Luther Vandross", 14)])
-        log_frame = data_analysis.remove_single_row_by_timestamp(log_frame, timestamp = '2026-01-22 18:59:30.676946')
-        enriched_log_frame = data_analysis.prepare_log_frame(log_frame, set_time_index=True)
+        log_frame = data_integration.remove_single_row_by_timestamp(log_frame, timestamp = '2026-01-22 18:59:30.676946')
+        enriched_log_frame = data_integration.prepare_log_frame(log_frame, set_time_index=True)
 
         # mark idle state recording:
         enriched_log_frame.loc[pd.Timestamp("2026-01-22 19:08:00"):, 'Phase'] = 'Idle State'
 
 
     elif subject_ind == 4:
-        log_frame = data_analysis.remove_song_entries(
+        log_frame = data_integration.remove_song_entries(
             enriched_log_frame, log_frame,
             song_title_artist_id_tuples=[("Can't Get Enough! - Vocal Club Mix", "Soulsearcher", 8),])
-        enriched_log_frame = data_analysis.prepare_log_frame(log_frame, set_time_index=True)
+        enriched_log_frame = data_integration.prepare_log_frame(log_frame, set_time_index=True)
 
-        enriched_log_frame = data_analysis.annotate_trial(enriched_log_frame, "Talking", False, song_id=8)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame, "Talking", False, song_id=8)
         # dont exclude the above, since we do not have THAT many measurements and it was only a brief comment
-        enriched_log_frame = data_analysis.annotate_trial(enriched_log_frame, "Talking and then was repeated anyways", True, silence_id=1)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame, "Talking and then was repeated anyways", True, silence_id=1)
 
         # mark idle state recording:
         enriched_log_frame.loc[pd.Timestamp("2026-01-23 17:56:00"):, 'Phase'] = 'Idle State'
@@ -137,17 +147,17 @@ if __name__=="__main__":
     print("-" * 80)
     print("Song Data Validation")
     print("-" * 80)
-    song_data_consistency_report = data_analysis.validate_song_indices(enriched_log_frame, subject_experiment_data,
+    song_data_consistency_report = data_integration.validate_song_indices(enriched_log_frame, subject_experiment_data,
                                                                        verbose=True)
 
     print("\n\n")
     print("-" * 80)
     print("Questionnaire Data Validation")
     print("-" * 80)
-    questionnaire_data_consistency_report = data_analysis.validate_trial_questionnaires(enriched_log_frame,
+    questionnaire_data_consistency_report = data_integration.validate_trial_questionnaires(enriched_log_frame,
                                                                                         subject_experiment_data,
                                                                                         verbose=True)
-    data_analysis.repair_trial_questionnaire_mismatches(enriched_log_frame, questionnaire_data_consistency_report)
+    data_integration.repair_trial_questionnaire_mismatches(enriched_log_frame, questionnaire_data_consistency_report)
 
 
 
@@ -157,7 +167,7 @@ if __name__=="__main__":
     print("-" * 80)
     print("Dynamometer Data Validation")
     print("-" * 80)
-    data_analysis.validate_force_measurements(enriched_log_frame, serial_frame)
+    data_integration.validate_force_measurements(enriched_log_frame, serial_frame)
 
     print("\n\n")
     print("-" * 80)
@@ -166,7 +176,7 @@ if __name__=="__main__":
     for trial_id in enriched_log_frame['Trial ID'].unique():
         if np.isnan(trial_id): continue
 
-        rmse = enriched_log_frame.loc[enriched_log_frame['Trial ID'] == trial_id]['Task Avg. RMSE'].astype(float).mean()
+        rmse = enriched_log_frame.loc[enriched_log_frame['Trial ID'] == trial_id]['Task RMSE'].astype(float).mean()
         print(f"Trial {int(trial_id)} RMSE: {rmse:.2f}")
 
 
