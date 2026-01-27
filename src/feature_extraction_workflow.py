@@ -35,22 +35,24 @@ if __name__=="__main__":
 
     ### WORKFLOW CONTROL
     # select subject:
-    subject_ind: int = 4
+    subject_ind: int = 5
 
     # EEG / EMG import behaviour:
     load_only_first_n_seconds: int | None = None  # if None, loads full data
     # select eeg subset (otherwise set to empty list):
-    eeg_channel_subset = []  # EEG_CHANNELS_BY_AREA['Fronto-Central'] + EEG_CHANNELS_BY_AREA['Central'] + EEG_CHANNELS_BY_AREA['Centro-Parietal'] + EEG_CHANNELS_BY_AREA['Temporal']
+
     bad_channel_treatment: Literal['None', 'Zero'] = 'Zero'  # leads to setting to zero
 
     # PSD computation:
-    do_compute_psd: bool = True
+    do_compute_psd: bool = False
     psd_window_size_sec: float = .25  # -> 4 Hz resolution
     save_psd: bool = True
 
     # CMC computation:
-    do_compute_cmc: bool = False
-    cmc_window_size_sec: float = 2.0
+    # todo: improve CMC computation
+    cmc_eeg_channel_subset = EEG_CHANNELS_BY_AREA['Fronto-Central'] + EEG_CHANNELS_BY_AREA['Central'] + EEG_CHANNELS_BY_AREA['Centro-Parietal'] + EEG_CHANNELS_BY_AREA['Temporal']
+    do_compute_cmc: bool = True
+    cmc_window_size_sec: float = 1.0
     save_cmc: bool = True
 
     # Heart Rate and HRV computation:
@@ -73,11 +75,7 @@ if __name__=="__main__":
     subject_plot_dir = STUDY_PLOTS / f"subject_{subject_ind:02}"; filemgmt.assert_dir(subject_plot_dir)
     subject_experiment_data = EXPERIMENT_DATA / f"subject_{subject_ind:02}"  # should have folders experiment_logs/, serial_measurements/, song_000/, ...
 
-    # eeg channel subset indices for slicing:
-    if len(eeg_channel_subset) > 0:
-        eeg_channel_subset_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in eeg_channel_subset]
-        print(f"Reducing EEG dataset to {len(eeg_channel_subset)} channels: {eeg_channel_subset}\n")
-    else: eeg_channel_subset_inds = None
+
 
 
 
@@ -109,8 +107,7 @@ if __name__=="__main__":
 
     # load qtc files:
     eeg_array, eeg_config = preprocessing.import_npy_with_config(f"sub_{subject_ind:02}_eeg", subject_qtc_data_dir,
-                                                                 load_only_first_n_seconds=load_only_first_n_seconds,
-                                                                 channel_subset_inds=eeg_channel_subset_inds)
+                                                                 load_only_first_n_seconds=load_only_first_n_seconds)
     emg_flexor_array, emg_flexor_config = preprocessing.import_npy_with_config(f"sub_{subject_ind:02}_emg_1_flexor",
                                                                                subject_qtc_data_dir,
                                                                                load_only_first_n_seconds=load_only_first_n_seconds)
@@ -149,7 +146,6 @@ if __name__=="__main__":
                                                                         psd_save_dir=subject_cmc_save_dir,
                                                                         psd_file_suffix="eeg")
         visualizations.plot_spectrogram(np.mean(eeg_psd, axis=2), eeg_psd_times, eeg_psd_freqs,
-                                        channels=eeg_channel_subset,
                                         log_scale=False,
                                         frequency_range=(0, 100), phase_series=phase_series,
                                         save_dir=subject_plot_dir,
@@ -199,23 +195,45 @@ if __name__=="__main__":
 
     ### CMC computation:
     if do_compute_cmc:
+        # eeg channel subset indices for slicing:
+        if len(cmc_eeg_channel_subset) > 0:
+            # prepare chnanel inds:
+            cmc_eeg_channel_subset_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in cmc_eeg_channel_subset]
+            print(
+                f"Reducing EEG channels for CMC computation to {len(cmc_eeg_channel_subset)} channels: {cmc_eeg_channel_subset}\n")
+
+            # slice EEG array by channel subset:
+            eeg_array = eeg_array[:, cmc_eeg_channel_subset_inds]
+
+
+
         # returns
         #       cmc_values (n_times, n_freqs, n_eeg_channels, n_emg_channels)
         #       time_centers (n_times, )
         #       frequencies (n_freqs, )
-        # FLEXOR
+        ## FLEXOR
         flexor_cmc_values, flexor_time_centers, flexor_freqs = features.multitaper_magnitude_squared_coherence(
             eeg_array, emg_flexor_array, sampling_freq=eeg_config['sampling_freq'], verbose=True,
             window_length_sec=cmc_window_size_sec,  # consider increasing
             overlap_frac=0.5,
             )
+
+        # max over EMG channels:
+        print("Maxing CMC values over EMG channels...")
+        flexor_cmc_values = np.max(flexor_cmc_values, axis=3)
+
+        # save:
+        features.save_spectrograms(flexor_cmc_values, flexor_time_centers, flexor_freqs,
+                                   save_dir=subject_cmc_save_dir, modality='Flexor CMC',
+                                   identifier_suffix="Magnitude Squared"
+                                   )
+
         # max. within frequency band:
         flexor_cmc_aggregates_per_band = features.aggregate_spectrogram_over_frequency_band(
-            flexor_cmc_values, flexor_freqs, behaviour='max', frequency_axis=1,
-            pre_aggregate_axis=(3, 'max'),  # further max. over EMG channels (index 3)
+            flexor_cmc_values, flexor_freqs, behaviour='max', frequency_axis=1,  # further max. over EMG channels (index 3)
         )
         visualizations.plot_spectrogram(flexor_cmc_aggregates_per_band['beta'],
-                                        flexor_time_centers, channels=eeg_channel_subset,
+                                        flexor_time_centers, channels=cmc_eeg_channel_subset,
                                         plot_type='time-channel',
                                         phase_series=phase_series,
                                         save_dir=subject_plot_dir,
@@ -223,19 +241,31 @@ if __name__=="__main__":
                                         cbar_label="Magnitude Squared Coherence"
                                         )
 
-        # EXTENSOR
+
+
+        ## EXTENSOR
         extensor_cmc_values, extensor_time_centers, extensor_freqs = features.multitaper_magnitude_squared_coherence(
             eeg_array, emg_extensor_array, sampling_freq=eeg_config['sampling_freq'], verbose=True,
             window_length_sec=cmc_window_size_sec,  # consider increasing
             overlap_frac=0.5,
         )
+        # max over EMG channels:
+        print("Maxing CMC values over EMG channels...")
+        extensor_cmc_values = np.max(extensor_cmc_values, axis=3)
+
+        # save:
+        features.save_spectrograms(extensor_cmc_values, extensor_time_centers, extensor_freqs,
+                                   save_dir=subject_cmc_save_dir, modality='Extensor CMC',
+                                   identifier_suffix="Magnitude Squared"
+                                   )
+
+
         # max. within frequency band:
         extensor_cmc_aggregates_per_band = features.aggregate_spectrogram_over_frequency_band(
             extensor_cmc_values, extensor_freqs, behaviour='max', frequency_axis=1,
-            pre_aggregate_axis=(3, 'max'),  # further max. over EMG channels (index 3)
         )
         visualizations.plot_spectrogram(extensor_cmc_aggregates_per_band['beta'],
-                                        extensor_time_centers, channels=eeg_channel_subset,
+                                        extensor_time_centers, channels=cmc_eeg_channel_subset,
                                         plot_type='time-channel',
                                         phase_series=phase_series,
                                         save_dir=subject_plot_dir,

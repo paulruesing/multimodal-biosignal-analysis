@@ -415,13 +415,7 @@ def multitaper_psd(input_array: np.ndarray,
 
     if psd_save_dir is not None:
         # save all relevant arrays:
-        for obj, title in [
-            (spectrograms, f"PSD Spectrograms{' log10 scaled' if apply_log_scale else ''} {int(n_channels)}ch {window_length_sec:.2f}sec_window{f' {psd_file_suffix}' if psd_file_suffix != "" else ""}"),
-            (time_centers, f"PSD Timecenters {len(time_centers)}windows{f' {psd_file_suffix}' if psd_file_suffix != "" else ""}"),
-            (freqs, f"PSD Frequencies {len(freqs)}freqs{f' {psd_file_suffix}' if psd_file_suffix != "" else ""}"),
-        ]:
-            save_path = psd_save_dir / filemgmt.file_title(title, ".npy")
-            np.save(save_path, obj)
+        save_spectrograms(spectrograms, time_centers, freqs, "PSD", save_dir=psd_save_dir, identifier_suffix=psd_file_suffix)
 
 
 
@@ -437,7 +431,25 @@ def multitaper_psd(input_array: np.ndarray,
     return spectrograms, time_centers, freqs
 
 
-def fetch_stored_psd(dir: Path | str, file_identifier: str | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def save_spectrograms(spectrograms: np.ndarray, time_centers: np.ndarray, frequencies: np.ndarray, modality: str,
+                      save_dir: str | Path, identifier_suffix: str = ""):
+    print(f"Saving {modality} spectrograms of shape {spectrograms.shape} alongside time-centers and frequencies to:\n\t{save_dir}")
+    window_length_sec = time_centers[1] - time_centers[0]
+    for obj, title in [
+        (spectrograms,
+         f"{modality} Spectrograms {spectrograms.shape[2]}ch {window_length_sec:.2f}sec_window{f' {identifier_suffix}' if identifier_suffix != "" else ""}"),
+        (time_centers,
+         f"{modality} Timecenters {len(time_centers)}windows{f' {identifier_suffix}' if identifier_suffix != "" else ""}"),
+        (frequencies, f"{modality} Frequencies {len(frequencies)}freqs{f' {identifier_suffix}' if identifier_suffix != "" else ""}"),
+    ]:
+        save_path = save_dir / filemgmt.file_title(title, ".npy")
+        np.save(save_path, obj)
+
+
+
+def fetch_stored_spectrograms(dir: Path | str,
+                              modality: str,
+                              file_identifier: str | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     If no file_identifier is provided, just fetches the most recent fitting .npy file. Expects stored file titles
     to be 'PSD Spectrograms' for spectrograms, 'PSD Timecenters' for timecenters and 'PSD Frequencies' for frequencies.
@@ -447,15 +459,15 @@ def fetch_stored_psd(dir: Path | str, file_identifier: str | None = None) -> tup
     2) timecenters (n_times)
     3) frequencies (n_freqs)
     """
-    spec_kws = ["PSD Spectrograms"]
+    spec_kws = [f"{modality} Spectrograms"]
     if file_identifier is not None: spec_kws.append(file_identifier)
     spectrograms = np.load(filemgmt.most_recent_file(dir, ".npy", spec_kws))
 
-    times_kws = ["PSD Timecenters"]
+    times_kws = [f"{modality} Timecenters"]
     if file_identifier is not None: times_kws.append(file_identifier)
     timecenters = np.load(filemgmt.most_recent_file(dir, ".npy", times_kws))
 
-    freq_kws = ["PSD Frequencies"]
+    freq_kws = [f"{modality} Frequencies"]
     if file_identifier is not None: freq_kws.append(file_identifier)
     frequencies = np.load(filemgmt.most_recent_file(dir, ".npy", freq_kws))
 
@@ -530,7 +542,7 @@ def multitaper_magnitude_squared_coherence(
         print(f"Output array shape: {coherences.shape}, dtype: {coherences.dtype}")
 
     # Slide window across signal
-    for win_idx in tqdm(range(n_windows), disable=not verbose):
+    for win_idx in tqdm(range(n_windows), disable=not verbose, desc="Time window"):
         start_idx = win_idx * hop_samples
         end_idx = start_idx + window_samples
 
