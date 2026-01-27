@@ -10,7 +10,7 @@ Serial Sampling Rate --- 1000
 
 # mvc settings:
 Use Initial MVC --- True
-Initial MVC --- 32
+Initial MVC --- 27
 MVC Maximum Time --- 30
 
 # sampling smoothing settings:

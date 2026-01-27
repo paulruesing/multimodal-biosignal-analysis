@@ -157,7 +157,8 @@ def prepare_log_frame(log_frame: pd.DataFrame, set_time_index: bool = True) -> p
 
 
     ############### Extract Values and Extend ###############
-    def add_task_freqs_and_average_rmse(df: pd.DataFrame) -> pd.DataFrame:
+    # todo: pull task end 3s ahead, since there is on average a slight delay -> window closing, RMSE computation, RMSE documentation
+    def add_task_freqs_and_average_rmse(df: pd.DataFrame, avg_end_delay_seconds: float = 3.0) -> pd.DataFrame:
         """ Based on Questionnaire (given) """
         # Step 1: Extract frequency and RMSE values
         df['Task Frequency'] = df['Questionnaire'].str.extract(
@@ -195,13 +196,27 @@ def prepare_log_frame(log_frame: pd.DataFrame, set_time_index: bool = True) -> p
 
         # Step 5: Create mask to clear frequency values AFTER the RMSE row
         is_end = df['Questionnaire'].str.contains('Achieved RMSE', na=False)
+
+        # adjust is_end by some seconds to account for RMSE computation delay:
+        end_times = df.loc[is_end, 'Time'].values  # find the times of end markers
+        adjusted_is_end = pd.Series(False, index=df.index)  # this will hold the adjusted values
+        for end_time in end_times:  # find the closest row where Time <= (end_time - avg_end_delay_seconds) for each
+            target_time = end_time - pd.Timedelta(seconds=avg_end_delay_seconds)
+            task_of_end = df.loc[is_end & (df['Time'] == end_time), 'task_id'].iloc[0]
+
+            # Find rows in this task with Time <= target_time, get the last one
+            mask = (df['task_id'] == task_of_end) & (df['Time'] <= target_time)
+            if mask.any():
+                adjusted_is_end.iloc[df[mask].index[-1]] = True
+
         # rows_after_end computation:
-        # 1) shift is_end row by 1 (default) and fill first with false
+        # 1) shift is_end row by 1 (default) and fill first with False
         # 2) groupby -> within a task ID, cum_sum (= forward fill) the is_end marker (somehow ffill() doesn't work correctly here)
         # 3) select the rows after end (the forward filled ones) by > 0
-        rows_after_end = is_end.shift(fill_value=False).groupby(df['task_id']).cumsum() > 0
+        rows_after_end = adjusted_is_end.shift(fill_value=False).groupby(df['task_id']).cumsum() > 0
         # set those frequencies (when task is over) to np.nan
         df.loc[rows_after_end, 'Task Frequency'] = np.nan
+        df.loc[rows_after_end, 'Task RMSE'] = np.nan
 
         # Step 6: Clean up helper columns
         df = df.drop(columns=['is_start', 'task_id'])
@@ -419,6 +434,20 @@ def prepare_log_frame(log_frame: pd.DataFrame, set_time_index: bool = True) -> p
     log_frame = add_questionnaire_results(log_frame)
 
 
+    def add_perceived_category(log_df: pd.DataFrame) -> pd.DataFrame:
+        log_df = log_df.copy()
+
+        # extract category after "Familliar"
+        log_df['Perceived Category'] = log_df['Music Category'].str.extract(r'[Ff]amiliar\s+(\w+)', expand=False)
+
+        # overwrite by other category (if not nan and if specified)
+        log_df.loc[(~log_df['Other category'].isna()) & (log_df['Other category'] != 'None of them'), ['Perceived Category']] = log_df['Other category']
+
+        return log_df
+
+    log_frame = add_perceived_category(log_frame)
+
+
 
     ############## Add placeholder columns ##############
     log_frame['Trial Comment'] = [""] * len(log_frame)
@@ -543,7 +572,7 @@ def get_task_start_end(df: pd.DataFrame,
 
 
 def get_all_task_start_ends(enriched_log_df: pd.DataFrame,
-                            output_type: Literal['dict', 'list'] = 'dict'
+                            output_type: Literal['dict', 'list'] = 'dict',
                             ) -> dict[int, tuple[pd.Timestamp, pd.Timestamp]] | list[tuple[pd.Timestamp, pd.Timestamp]]:
     if output_type == 'dict': trial_start_end_dict: dict[int, tuple[pd.Timestamp, pd.Timestamp]] = {}
     else: start_end_list: list[tuple[pd.Timestamp, pd.Timestamp]] = []

@@ -26,7 +26,7 @@ if __name__=="__main__":
     EXPERIMENT_DATA = ROOT / "data" / "experiment_results"
 
     ### WORKFLOW CONTROL
-    subject_ind = 4
+    subject_ind = 5
     save_result: bool = True  # only set to True if manual adjustments finalized
 
     # experiment results import behaviour:
@@ -140,6 +140,40 @@ if __name__=="__main__":
         enriched_log_frame.loc[pd.Timestamp("2026-01-23 17:56:00"):, 'Phase'] = 'Idle State'
 
 
+    elif subject_ind == 5:
+
+        # song start wasn't immediately registered:
+        log_frame = data_integration.remove_single_row_by_timestamp(log_frame, "2026-01-27 16:22:35.172122")
+
+        log_frame = data_integration.remove_song_entries(
+            enriched_log_frame, log_frame,
+            song_title_artist_id_tuples=[
+                ("Comptine d\'un autre été, l\'après-midi", "Yann Tiersen", 4),  # jumped somehow...
+                ("Guilty - 2001 Remastered Version", "George Shearing", 6),  # because previous wrong song ends too early
+                ("For You - Original Radio Edit", "The Disco Boys", 12),
+                ("Crying at the Discoteque - Radio Edit", "Alcazar", 15),
+                ("Mas Que Nada", "Sérgio Mendes", 19),
+                ("Can\'t Get You out of My Head", "Kylie Minogue", 22)
+            ])
+
+        enriched_log_frame = data_integration.prepare_log_frame(log_frame,)
+
+        # mark some trials: (dynamometer jumped somehow)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=1)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=2)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Wrong Song Playing",
+                                                             False,  # maybe still keep
+                                                             trial_id=5)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=11)
+
+
 
 
     ################## FINAL SONG + QUESTIONNAIRE VALIDATION ##################
@@ -175,9 +209,9 @@ if __name__=="__main__":
     print("-" * 80)
     for trial_id in enriched_log_frame['Trial ID'].unique():
         if np.isnan(trial_id): continue
-
+        excluded = enriched_log_frame.loc[enriched_log_frame['Trial ID'] == trial_id]['Trial Exclusion Bool'].any()
         rmse = enriched_log_frame.loc[enriched_log_frame['Trial ID'] == trial_id]['Task RMSE'].astype(float).mean()
-        print(f"Trial {int(trial_id)} RMSE: {rmse:.2f}")
+        print(f"Trial {int(trial_id)} RMSE: {rmse:.2f}{' (Excluded!)' if excluded else ''}")
 
 
 
