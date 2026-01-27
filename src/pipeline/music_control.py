@@ -808,6 +808,7 @@ if __name__ == '__main__':
 
     # single songs to add to existing look up table:
     # below structure [(filepath, Artist, Title, Category, Genre, Spotify URL, Start After), ...]:
+    # todo: add L\'autre valse d\'Amélie by Yann Tiersen
     single_files_to_add: list[tuple[str, str, str, str, str, str, float]] = [
 
     ]
@@ -818,7 +819,7 @@ if __name__ == '__main__':
 
 
     music_controller = SpotifyController(AUDIO_CONFIG)
-    music_controller.play_track('https://open.spotify.com/intl-de/track/13qX3v31O0UBg59v3BC6fU?si=e13034bae8fa4959')
+    music_controller.play_track('https://open.spotify.com/intl-de/track/6jbglMwIqyg1G1N96COAsD?si=be32fce3bea847f6')
     track_info = music_controller.get_current_track(output_type='dict')
 
 

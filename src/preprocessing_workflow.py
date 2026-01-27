@@ -18,7 +18,7 @@ if __name__=="__main__":
 
     ### WORKFLOW CONTROL
     # change these to select subject and trial:
-    for subject_ind in [0, 1, 3, 4]:
+    for subject_ind in [5]:
         print("\n" + "-"*100)
         print(f"Processing subject {subject_ind}")
         print("-" * 100)
@@ -39,7 +39,6 @@ if __name__=="__main__":
         save_new_config: bool = False
         save_result: bool = True
 
-        # todo: add less conservative configuration, to judge whether this one foregoes too much information
 
         ### ITERATE OVER ALL CHANNEL SUBSETS
         for channel_set in [
