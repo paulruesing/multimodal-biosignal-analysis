@@ -4,14 +4,16 @@ import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-import matplotlib.gridspec as gridspec
+from typing import Optional, Union, Tuple, List, Callable
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from matplotlib.gridspec import GridSpec
 from matplotlib.colors import to_rgba
 import matplotlib.patches as patches
 from matplotlib.collections import PatchCollection
 from matplotlib.widgets import Button, Slider
 import matplotlib.animation as animation
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from typing import Callable, Literal, Tuple
 import multiprocessing
 import os
 from scipy.stats import gaussian_kde
@@ -39,7 +41,7 @@ mpl.use('Qt5Agg')
 
 ##############  CONSTANT PARAMETERS ##############
 ### EEG:
-EEG_CHANNELS = ['Fp1', 'Fpz', 'Fp1',
+EEG_CHANNELS = ['Fp1', 'Fpz', 'Fp2',
                 'AF7', 'AF3', 'AFz', 'AF4', 'AF8',
                 'F9', 'F7', 'F3', 'F1', 'Fz', 'F2', 'F4', 'F8', 'F10',
                 'FT9', 'FT7',
@@ -47,16 +49,17 @@ EEG_CHANNELS = ['Fp1', 'Fpz', 'Fp1',
                 'FT8', 'FT10',
                 'T9', 'T7',
                 'C5', 'C3', 'C1', 'Cz', 'C2', 'C4', 'C6',
-                'T8', 'T10'
+                'T8', 'T10',
                 'TP9', 'TP7',
                 'CP5', 'CP3', 'CP1', 'CPz', 'CP2', 'CP4', 'CP6',
                 'TP8', 'TP10',
-                'P9', 'P7', 'P3', 'P1', 'Pz', 'P2', 'P4', 'P8', 'P10'
+                'P9', 'P7', 'P3', 'P1', 'Pz', 'P2', 'P4', 'P8', 'P10',
                 'PO7', 'POz', 'PO8',
                 'O1', 'O2',
                 ]  # according to printout of quattrocento
 EEG_CHANNELS_BY_AREA = {
-    area_label: [ch for ch in EEG_CHANNELS if (ch[:len(area_abbr)] == area_abbr) and (ch[len(area_abbr):].isdigit())] for area_label, area_abbr in [
+    area_label: [ch for ch in EEG_CHANNELS if (ch[:len(area_abbr)] == area_abbr) and (
+                (ch[len(area_abbr):].isnumeric()) or ch[len(area_abbr):] == 'z')] for area_label, area_abbr in [
         ('Frontal Pole', 'Fp'), ('Anterior Frontal', 'AF'), ('Fronto-Central', 'FC'), ('Frontal', 'F'),
         ('Fronto-Temporal', 'FT'), ('Temporal', 'T'), ('Central', 'C'), ('Temporo-Parietal', 'TP'),
         ('Centro-Parietal', 'CP'), ('Parietal', 'P'), ('Parieto-Occipital', 'PO'), ('Occipital', 'O')]}
@@ -71,7 +74,7 @@ EEG_POSITIONS = {'Fpz': (0.0, 0.602),
                  'AF4': (0.15400000000000003, 0.44799999999999995),
                  'AF8': (0.30800000000000005, 0.48999999999999994),
                  'F9': (-0.5060000000000001, 0.45499999999999996),
-                 'F7': (-0.42900000000000005, 0.385),
+                 'F7': (-0.4100000000000005, 0.385),
                  #'F5': (-0.33, 0.32899999999999996),
                  'F3': (-0.22000000000000003, 0.294),
                  'F1': (-0.11000000000000001, 0.26599999999999996),
@@ -79,7 +82,7 @@ EEG_POSITIONS = {'Fpz': (0.0, 0.602),
                  'F2': (0.11000000000000001, 0.26599999999999996),
                  'F4': (0.22000000000000003, 0.294),
                  #'F6': (0.33, 0.32899999999999996),
-                 'F8': (0.42900000000000005, 0.385),
+                 'F8': (0.4100000000000005, 0.385),
                  'F10': (0.5060000000000001, 0.45499999999999996),
                  'FT9': (-0.5940000000000001, 0.238),
                  'FT7': (-0.48400000000000004, 0.196),
@@ -92,8 +95,8 @@ EEG_POSITIONS = {'Fpz': (0.0, 0.602),
                  'FC6': (0.36850000000000005, 0.16799999999999998),
                  'FT8': (0.48400000000000004, 0.196),
                  'FT10': (0.5940000000000001, 0.238),
-                 'T9': (-0.5940000000000001, 0.0),  # maybe slightly off
-                 'T7': (-0.55, 0.0),
+                 'T9': (-0.640000000000001, 0.0),  # maybe slightly off
+                 'T7': (-0.53, 0.0),
                  'C5': (-0.41250000000000003, 0.0),
                  'C3': (-0.275, 0.0),
                  'C1': (-0.1375, 0.0),
@@ -101,9 +104,9 @@ EEG_POSITIONS = {'Fpz': (0.0, 0.602),
                  'C2': (0.1375, 0.0),
                  'C4': (0.275, 0.0),
                  'C6': (0.41250000000000003, 0.0),
-                 'T8': (0.55, 0.0),
-                 'T10': (0.5940000000000001, 0.0),  # maybe slightly off
-                 'TP9': (-0.53, -.21),  # maybe slightly off
+                 'T8': (0.53, 0.0),
+                 'T10': (0.640000000000001, 0.0),  # maybe slightly off
+                 'TP9': (-0.6, -.24),  # maybe slightly off
                  'TP7': (-0.48400000000000004, -0.196),
                  'CP5': (-0.36850000000000005, -0.16799999999999998),
                  'CP3': (-0.25300000000000006, -0.147),
@@ -113,9 +116,9 @@ EEG_POSITIONS = {'Fpz': (0.0, 0.602),
                  'CP4': (0.25300000000000006, -0.147),
                  'CP6': (0.36850000000000005, -0.16799999999999998),
                  'TP8': (0.48400000000000004, -0.196),
-                 'TP9': (0.53, -.21),  # maybe slightly off
+                 'TP10': (0.6, -.24),  # maybe slightly off
                  'P9': (-0.47, -0.42),  # maybe slightly off
-                 'P7': (-0.42900000000000005, -0.385),
+                 'P7': (-0.370000000000005, -0.355),
                  #'P5': (-0.33, -0.32899999999999996),
                  'P3': (-0.22000000000000003, -0.294),
                  'P1': (-0.11000000000000001, -0.26599999999999996),
@@ -123,7 +126,7 @@ EEG_POSITIONS = {'Fpz': (0.0, 0.602),
                  'P2': (0.11000000000000001, -0.26599999999999996),
                  'P4': (0.22000000000000003, -0.294),
                  # 'P6': (0.33, -0.32899999999999996),
-                 'P8': (0.42900000000000005, -0.385),
+                 'P8': (0.3700000000000005, -0.355),
                  'P10': (0.47, -0.42),  # maybe slightly off
                  'PO7': (-0.30800000000000005, -0.48999999999999994),
                  #'PO3': (-0.15400000000000003, -0.44799999999999995),
@@ -430,7 +433,8 @@ def plot_spectrogram(
         cmap: str = 'viridis',
         frequency_range: tuple[float, float] | None = None,
         channel_range: tuple[int, int] | None = None,
-        log_scale: bool = False,
+        apply_log_scale: bool = False,
+        is_log_scale: bool = True,
         vmin: float | None = None,
         vmax: float | None = None,
         title: str = 'Spectrogram',
@@ -470,7 +474,7 @@ def plot_spectrogram(
     channel_range : tuple, optional
         (ch_min, ch_max) to restrict displayed channel range (time-channel only).
         Default: None
-    log_scale : bool, optional
+    apply_log_scale : bool, optional
         Apply log10 scaling to data. Recommended for PSD with high variance.
         Default: True
     vmin, vmax : float, optional
@@ -577,8 +581,10 @@ def plot_spectrogram(
             feature_labels = [feature_labels[i] for i in range(len(feature_labels)) if feat_mask[i]]
 
     # Apply log scaling if requested
-    if log_scale:
+    if apply_log_scale:
         spec = np.log10(np.abs(spec) + 1e-10)
+        log_suffix = ' (log10)'
+    elif is_log_scale:
         log_suffix = ' (log10)'
     else:
         log_suffix = ''
@@ -997,3 +1003,699 @@ def plot_psd_avg_with_std(
     plt.tight_layout()
 
     return fig, ax
+
+
+def plot_array_with_ci(
+        data: np.ndarray,
+        time_axis: int = 0,
+        hue_axis: Optional[int] = None,
+        hue_name: Optional[str] = None,
+        hue_labels: Optional[List[str]] = None,
+        input_lower_ci: Optional[np.ndarray] = None,
+        input_upper_ci: Optional[np.ndarray] = None,
+        sampling_freq: Optional[float] = None,
+        figsize: tuple = (14, 7),
+        linewidth: float = 2.5,
+        ci_alpha: float = 0.25,
+        colors: Optional[Union[dict, list, str]] = None,
+        title: str = 'Data Plot',
+        xlabel: str = 'Time',
+        ylabel: str = 'Value',
+        legend: bool = True,
+        legend_kws: Optional[dict] = None,
+        phase_series: Optional[pd.Series] = None,
+        phase_cmap: str = 'tab10'
+) -> Tuple[Figure, Axes]:
+    """
+    Plot n-dimensional array with optional confidence intervals, hue-based line grouping, and phase annotations.
+
+    Generalizes the original `plot_psd_avg_with_std` to work with arbitrary numpy arrays,
+    allowing flexible specification of time and hue dimensions, plus explicit confidence
+    interval arrays instead of std-based shading. Optionally includes a phase subplot
+    showing temporal phase annotations.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input data array. Shape is arbitrary; time_axis and hue_axis specify which
+        dimensions correspond to time and hue (line grouping).
+    time_axis : int, optional
+        Axis index representing time samples. Default is 0.
+    hue_axis : Optional[int], optional
+        Axis index for grouping into multiple lines (e.g., channels, conditions).
+        If None, plots single line from aggregated data. Default is None.
+    hue_name : Optional[str], optional
+        Name for hue dimension (used in legend if hue_axis provided).
+        E.g., 'Channel', 'Condition'. Default is None.
+    hue_labels : Optional[List[str]], optional
+        Custom labels for each hue level (e.g., channel names).
+        Must match data.shape[hue_axis] length if provided. Default is None.
+    input_lower_ci : Optional[np.ndarray], optional
+        Lower confidence interval bounds. Must match data.shape. If None, no CI shading.
+        Default is None.
+    input_upper_ci : Optional[np.ndarray], optional
+        Upper confidence interval bounds. Must match data.shape. If None, no CI shading.
+        Default is None.
+    sampling_freq : Optional[float], optional
+        Sampling frequency in Hz. If provided, time axis is converted to seconds.
+        If None, time axis is integer indices. Default is None.
+    figsize : tuple, optional
+        Figure size as (width, height). Default is (14, 7).
+    linewidth : float, optional
+        Line width for traces. Default is 2.5.
+    ci_alpha : float, optional
+        Transparency of shaded CI regions (0-1). Default is 0.25.
+    colors : Optional[Union[dict, list, str]], optional
+        Color specification. Can be:
+        - dict: mapping hue indices/names to colors {0: '#1f77b4', 1: '#ff7f0e', ...}
+        - list: sequence of colors to cycle through
+        - str: single color for all lines
+        - None: uses default matplotlib palette
+        Default is None.
+    title : str, optional
+        Plot title. Default is 'Data Plot'.
+    xlabel : str, optional
+        X-axis label. Default is 'Time'.
+    ylabel : str, optional
+        Y-axis label. Default is 'Value'.
+    legend : bool, optional
+        Whether to show legend. Default is True.
+    legend_kws : Optional[dict], optional
+        Additional keyword arguments passed to ax.legend(). Default is None.
+    phase_series : Optional[pd.Series], optional
+        Time-indexed Series with string phase labels. NaN values are ignored.
+        Adds a phase subplot below main plot. Default is None.
+    phase_cmap : str, optional
+        Colormap for phase regions. Default is 'tab10'.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure object.
+    ax : matplotlib.axes.Axes
+        The main axes object (data plot).
+
+    Raises
+    ------
+    ValueError
+        If time_axis or hue_axis out of bounds, if CI array shapes don't match data,
+        or if hue_labels length doesn't match hue_axis dimension.
+
+    Examples
+    --------
+    Plot 2D array (time x channels) with multiple lines per channel:
+
+    >>> data = np.random.randn(100, 5)  # 100 time points, 5 channels
+    >>> fig, ax = plot_array_with_ci(data, time_axis=0, hue_axis=1,
+    ...                               hue_name='Channel', sampling_freq=100)
+
+    Plot with confidence intervals and custom channel labels:
+
+    >>> lower_ci = data - 0.1
+    >>> upper_ci = data + 0.1
+    >>> channel_names = ['C3', 'C4', 'Cz', 'FC3', 'FC4']
+    >>> fig, ax = plot_array_with_ci(data, time_axis=0, hue_axis=1,
+    ...                               input_lower_ci=lower_ci,
+    ...                               input_upper_ci=upper_ci,
+    ...                               hue_labels=channel_names)
+
+    Plot with phase annotations:
+
+    >>> phase_series = pd.Series(['Rest', 'Task', 'Rest', 'Task'],
+    ...                          index=pd.date_range('2024-01-01', periods=100, freq='10ms'))
+    >>> fig, ax = plot_array_with_ci(data, phase_series=phase_series)
+    """
+
+    # Input validation
+    _validate_inputs(data, time_axis, hue_axis, input_lower_ci, input_upper_ci, hue_labels)
+
+    # Build time axis
+    n_time_samples = data.shape[time_axis]
+    time = _build_time_axis(n_time_samples, sampling_freq)
+
+    # Prepare color mapping
+    color_map = _prepare_colors(colors, hue_axis, data)
+
+    # Create figure with optional phase subplot
+    has_phases = phase_series is not None
+    if has_phases:
+        # GridSpec for flexible layout: 80% main plot, 20% phase subplot
+        fig = plt.figure(figsize=figsize)
+        gs = GridSpec(2, 1, figure=fig, height_ratios=[4, 1], hspace=0.3)
+        ax = fig.add_subplot(gs[0])
+        ax_phase = fig.add_subplot(gs[1], sharex=ax)
+    else:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax_phase = None
+
+    # Plot data by hue groups
+    if hue_axis is None:
+        # Single line: aggregate along all non-time axes
+        mean_signal = _aggregate_non_time_axes(data, time_axis)
+        lower = upper = None
+
+        if input_lower_ci is not None:
+            lower = _aggregate_non_time_axes(input_lower_ci, time_axis)
+        if input_upper_ci is not None:
+            upper = _aggregate_non_time_axes(input_upper_ci, time_axis)
+
+        color = color_map.get(0, 'C0') if isinstance(color_map, dict) else color_map
+        _plot_line_with_ci(ax, time, mean_signal, lower, upper, color,
+                           label=None, linewidth=linewidth, ci_alpha=ci_alpha)
+
+    else:
+        # Multiple lines: iterate over hue dimension
+        hue_size = data.shape[hue_axis]
+
+        for hue_idx in range(hue_size):
+            # Extract data slice for this hue level
+            mean_signal = _extract_hue_slice(data, hue_axis, hue_idx, time_axis)
+            lower = upper = None
+
+            if input_lower_ci is not None:
+                lower = _extract_hue_slice(input_lower_ci, hue_axis, hue_idx, time_axis)
+            if input_upper_ci is not None:
+                upper = _extract_hue_slice(input_upper_ci, hue_axis, hue_idx, time_axis)
+
+            # Determine label and color
+            label = _get_line_label(hue_idx, hue_name, hue_labels, color_map)
+            color = _get_line_color(hue_idx, color_map)
+
+            _plot_line_with_ci(ax, time, mean_signal, lower, upper, color,
+                               label=label, linewidth=linewidth, ci_alpha=ci_alpha)
+
+    # Customize main plot appearance
+    ax.set_xlabel(xlabel, fontsize=12, fontweight='bold')
+    ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3, linestyle='--')
+
+    if legend and (hue_axis is not None or any(h is not None for h in
+                                               _get_all_labels(hue_axis, color_map))):
+        legend_params = {'loc': 'best', 'fontsize': 11}
+        if legend_kws:
+            legend_params.update(legend_kws)
+        ax.legend(**legend_params)
+
+    # Add phase subplot if provided
+    if has_phases and ax_phase is not None:
+        time_extent = (time[0], time[-1])
+        _plot_phase_subplot(
+            ax_phase=ax_phase,
+            phase_series=phase_series,
+            timestamps=time,
+            time_extent=time_extent,
+            phase_cmap=phase_cmap
+        )
+        # Remove x-label from main plot to avoid duplication
+        ax.set_xticklabels([])
+        ax_phase.set_xlabel(xlabel, fontsize=12, fontweight='bold')
+
+    plt.tight_layout()
+
+    return fig, ax
+
+
+def old_plot_array_with_ci(
+        data: np.ndarray,
+        time_axis: int = 0,
+        hue_axis: Optional[int] = None,
+        hue_name: Optional[str] = None,
+        hue_labels: Optional[List[str]] = None,
+        input_lower_ci: Optional[np.ndarray] = None,
+        input_upper_ci: Optional[np.ndarray] = None,
+        sampling_freq: Optional[float] = None,
+        figsize: tuple = (14, 7),
+        linewidth: float = 2.5,
+        ci_alpha: float = 0.25,
+        colors: Optional[Union[dict, list, str]] = None,
+        title: str = 'Data Plot',
+        xlabel: str = 'Time',
+        ylabel: str = 'Value',
+        legend: bool = True,
+        legend_kws: Optional[dict] = None
+) -> Tuple[Figure, Axes]:
+    """
+    Plot n-dimensional array with optional confidence intervals and hue-based line grouping.
+
+    Generalizes the original `plot_psd_avg_with_std` to work with arbitrary numpy arrays,
+    allowing flexible specification of time and hue dimensions, plus explicit confidence
+    interval arrays instead of std-based shading.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input data array. Shape is arbitrary; time_axis and hue_axis specify which
+        dimensions correspond to time and hue (line grouping).
+    time_axis : int, optional
+        Axis index representing time samples. Default is 0.
+    hue_axis : Optional[int], optional
+        Axis index for grouping into multiple lines (e.g., channels, conditions).
+        If None, plots single line from aggregated data. Default is None.
+    hue_name : Optional[str], optional
+        Name for hue dimension (used in legend if hue_axis provided).
+        E.g., 'Channel', 'Condition'. Default is None.
+    hue_labels : Optional[List[str]], optional
+        Custom labels for each hue level (e.g., channel names).
+        Must match data.shape[hue_axis] length if provided. Default is None.
+    input_lower_ci : Optional[np.ndarray], optional
+        Lower confidence interval bounds. Must match data.shape. If None, no CI shading.
+        Default is None.
+    input_upper_ci : Optional[np.ndarray], optional
+        Upper confidence interval bounds. Must match data.shape. If None, no CI shading.
+        Default is None.
+    sampling_freq : Optional[float], optional
+        Sampling frequency in Hz. If provided, time axis is converted to seconds.
+        If None, time axis is integer indices. Default is None.
+    figsize : tuple, optional
+        Figure size as (width, height). Default is (14, 7).
+    linewidth : float, optional
+        Line width for traces. Default is 2.5.
+    ci_alpha : float, optional
+        Transparency of shaded CI regions (0-1). Default is 0.25.
+    colors : Optional[Union[dict, list, str]], optional
+        Color specification. Can be:
+        - dict: mapping hue indices/names to colors {0: '#1f77b4', 1: '#ff7f0e', ...}
+        - list: sequence of colors to cycle through
+        - str: single color for all lines
+        - None: uses default matplotlib palette
+        Default is None.
+    title : str, optional
+        Plot title. Default is 'Data Plot'.
+    xlabel : str, optional
+        X-axis label. Default is 'Time'.
+    ylabel : str, optional
+        Y-axis label. Default is 'Value'.
+    legend : bool, optional
+        Whether to show legend. Default is True.
+    legend_kws : Optional[dict], optional
+        Additional keyword arguments passed to ax.legend(). Default is None.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure object.
+    ax : matplotlib.axes.Axes
+        The axes object.
+
+    Raises
+    ------
+    ValueError
+        If time_axis or hue_axis out of bounds, if CI array shapes don't match data,
+        or if hue_labels length doesn't match hue_axis dimension.
+
+    Examples
+    --------
+    Plot 2D array (time x channels) with multiple lines per channel:
+
+    >>> data = np.random.randn(100, 5)  # 100 time points, 5 channels
+    >>> fig, ax = plot_array_with_ci(data, time_axis=0, hue_axis=1,
+    ...                               hue_name='Channel', sampling_freq=100)
+
+    Plot with confidence intervals and custom channel labels:
+
+    >>> lower_ci = data - 0.1
+    >>> upper_ci = data + 0.1
+    >>> channel_names = ['C3', 'C4', 'Cz', 'FC3', 'FC4']
+    >>> fig, ax = plot_array_with_ci(data, time_axis=0, hue_axis=1,
+    ...                               input_lower_ci=lower_ci,
+    ...                               input_upper_ci=upper_ci,
+    ...                               hue_labels=channel_names)
+
+    Plot single 1D array with explicit colors:
+
+    >>> data_1d = np.random.randn(100)
+    >>> fig, ax = plot_array_with_ci(data_1d, colors='steelblue')
+    """
+
+    # Input validation
+    _validate_inputs(data, time_axis, hue_axis, input_lower_ci, input_upper_ci, hue_labels)
+
+    # Build time axis
+    n_time_samples = data.shape[time_axis]
+    time = _build_time_axis(n_time_samples, sampling_freq)
+
+    # Prepare color mapping
+    color_map = _prepare_colors(colors, hue_axis, data)
+
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Plot data by hue groups
+    if hue_axis is None:
+        # Single line: aggregate along all non-time axes
+        mean_signal = _aggregate_non_time_axes(data, time_axis)
+        lower = upper = None
+
+        if input_lower_ci is not None:
+            lower = _aggregate_non_time_axes(input_lower_ci, time_axis)
+        if input_upper_ci is not None:
+            upper = _aggregate_non_time_axes(input_upper_ci, time_axis)
+
+        color = color_map.get(0, 'C0') if isinstance(color_map, dict) else color_map
+        _plot_line_with_ci(ax, time, mean_signal, lower, upper, color,
+                           label=None, linewidth=linewidth, ci_alpha=ci_alpha)
+
+    else:
+        # Multiple lines: iterate over hue dimension
+        hue_size = data.shape[hue_axis]
+
+        for hue_idx in range(hue_size):
+            # Extract data slice for this hue level
+            mean_signal = _extract_hue_slice(data, hue_axis, hue_idx, time_axis)
+            lower = upper = None
+
+            if input_lower_ci is not None:
+                lower = _extract_hue_slice(input_lower_ci, hue_axis, hue_idx, time_axis)
+            if input_upper_ci is not None:
+                upper = _extract_hue_slice(input_upper_ci, hue_axis, hue_idx, time_axis)
+
+            # Determine label and color
+            label = _get_line_label(hue_idx, hue_name, hue_labels, color_map)
+            color = _get_line_color(hue_idx, color_map)
+
+            _plot_line_with_ci(ax, time, mean_signal, lower, upper, color,
+                               label=label, linewidth=linewidth, ci_alpha=ci_alpha)
+
+    # Customize plot appearance
+    ax.set_xlabel(xlabel, fontsize=12, fontweight='bold')
+    ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3, linestyle='--')
+
+    if legend and (hue_axis is not None or any(h is not None for h in
+                                               _get_all_labels(hue_axis, color_map))):
+        legend_params = {'loc': 'best', 'fontsize': 11}
+        if legend_kws:
+            legend_params.update(legend_kws)
+        ax.legend(**legend_params)
+
+    plt.tight_layout()
+
+    return fig, ax
+
+
+# ============================================================================
+# Private Helper Functions
+# ============================================================================
+
+def _validate_inputs(
+        data: np.ndarray,
+        time_axis: int,
+        hue_axis: Optional[int],
+        input_lower_ci: Optional[np.ndarray],
+        input_upper_ci: Optional[np.ndarray],
+        hue_labels: Optional[List[str]]
+) -> None:
+    """
+    Validate all input parameters for consistency and validity.
+
+    Raises ValueError if:
+    - Axes are out of bounds
+    - Axes are identical
+    - CI array shapes don't match data shape
+    - hue_labels length doesn't match hue_axis dimension
+    """
+    ndim = data.ndim
+
+    if not (0 <= time_axis < ndim):
+        raise ValueError(f"time_axis={time_axis} out of bounds for data.ndim={ndim}")
+
+    if hue_axis is not None:
+        if not (0 <= hue_axis < ndim):
+            raise ValueError(f"hue_axis={hue_axis} out of bounds for data.ndim={ndim}")
+        if time_axis == hue_axis:
+            raise ValueError(f"time_axis and hue_axis cannot be identical (both={time_axis})")
+
+    if input_lower_ci is not None:
+        if input_lower_ci.shape != data.shape:
+            raise ValueError(
+                f"input_lower_ci shape {input_lower_ci.shape} != data shape {data.shape}"
+            )
+
+    if input_upper_ci is not None:
+        if input_upper_ci.shape != data.shape:
+            raise ValueError(
+                f"input_upper_ci shape {input_upper_ci.shape} != data shape {data.shape}"
+            )
+
+    if hue_labels is not None:
+        if hue_axis is None:
+            raise ValueError("hue_labels provided but hue_axis is None")
+        if len(hue_labels) != data.shape[hue_axis]:
+            raise ValueError(
+                f"hue_labels length {len(hue_labels)} != data.shape[{hue_axis}]={data.shape[hue_axis]}"
+            )
+
+
+def _build_time_axis(n_samples: int, sampling_freq: Optional[float]) -> np.ndarray:
+    """
+    Build time axis array.
+
+    Parameters
+    ----------
+    n_samples : int
+        Number of time samples.
+    sampling_freq : Optional[float]
+        Sampling frequency in Hz. If provided, time in seconds; else integer indices.
+
+    Returns
+    -------
+    np.ndarray
+        Time axis values.
+    """
+    if sampling_freq is not None:
+        return np.arange(n_samples) / sampling_freq
+    return np.arange(n_samples)
+
+
+def _aggregate_non_time_axes(
+        data: np.ndarray,
+        time_axis: int
+) -> np.ndarray:
+    """
+    Aggregate data along all axes except time_axis via mean.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input data.
+    time_axis : int
+        Index of time axis (to preserve).
+
+    Returns
+    -------
+    np.ndarray
+        1D array of shape (n_time_samples,).
+    """
+    # Move time axis to position 0, then mean over remaining axes
+    data_moved = np.moveaxis(data, time_axis, 0)
+    return data_moved.reshape(data_moved.shape[0], -1).mean(axis=1)
+
+
+def _extract_hue_slice(
+        data: np.ndarray,
+        hue_axis: int,
+        hue_idx: int,
+        time_axis: int
+) -> np.ndarray:
+    """
+    Extract 1D time series for a specific hue level, aggregating other dimensions.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input data.
+    hue_axis : int
+        Index of hue axis.
+    hue_idx : int
+        Index along hue axis to extract.
+    time_axis : int
+        Index of time axis.
+
+    Returns
+    -------
+    np.ndarray
+        1D array of shape (n_time_samples,).
+    """
+    # Index along hue axis
+    slices = [slice(None)] * data.ndim
+    slices[hue_axis] = hue_idx
+    sliced = data[tuple(slices)]
+
+    # Move time axis to position 0
+    sliced_moved = np.moveaxis(sliced, time_axis, 0)
+
+    # Aggregate remaining dimensions
+    return sliced_moved.reshape(sliced_moved.shape[0], -1).mean(axis=1)
+
+
+def _prepare_colors(
+        colors: Optional[Union[dict, list, str]],
+        hue_axis: Optional[int],
+        data: np.ndarray
+) -> Union[dict, list, str]:
+    """
+    Normalize color specification into usable format.
+
+    Parameters
+    ----------
+    colors : Optional[Union[dict, list, str]]
+        User-provided colors.
+    hue_axis : Optional[int]
+        If provided, number of hue levels determines default palette size.
+    data : np.ndarray
+        Data array (for shape info if needed).
+
+    Returns
+    -------
+    Union[dict, list, str]
+        Normalized colors.
+    """
+    if colors is not None:
+        return colors
+
+    # Default palette
+    default_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                       '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+
+    if hue_axis is not None:
+        hue_size = data.shape[hue_axis]
+        return {i: default_palette[i % len(default_palette)] for i in range(hue_size)}
+
+    return 'C0'
+
+
+def _get_line_label(
+        hue_idx: int,
+        hue_name: Optional[str],
+        hue_labels: Optional[List[str]],
+        color_map: Union[dict, list, str]
+) -> Optional[str]:
+    """
+    Generate label for a line based on hue index, hue_name, and hue_labels.
+
+    Parameters
+    ----------
+    hue_idx : int
+        Index along hue axis.
+    hue_name : Optional[str]
+        Name of hue dimension.
+    hue_labels : Optional[List[str]]
+        Custom labels for each hue level.
+    color_map : Union[dict, list, str]
+        Color mapping (used to infer if labels expected).
+
+    Returns
+    -------
+    Optional[str]
+        Label string or None.
+    """
+    # Priority: custom hue_labels > hue_name + index
+    if hue_labels is not None:
+        return hue_labels[hue_idx]
+
+    if hue_name is None and not isinstance(color_map, dict):
+        return None
+
+    if hue_name:
+        return f"{hue_name} {hue_idx}"
+
+    return str(hue_idx)
+
+
+def _get_line_color(
+        hue_idx: int,
+        color_map: Union[dict, list, str]
+) -> str:
+    """
+    Get color for a specific hue index.
+
+    Parameters
+    ----------
+    hue_idx : int
+        Index along hue axis.
+    color_map : Union[dict, list, str]
+        Color mapping.
+
+    Returns
+    -------
+    str
+        Color specification.
+    """
+    if isinstance(color_map, dict):
+        return color_map.get(hue_idx, 'C0')
+    elif isinstance(color_map, list):
+        return color_map[hue_idx % len(color_map)]
+    else:
+        return color_map
+
+
+def _get_all_labels(hue_axis: Optional[int], color_map: Union[dict, list, str]) -> list:
+    """
+    Check if any labels will be generated (for legend decision).
+
+    Parameters
+    ----------
+    hue_axis : Optional[int]
+        Hue axis specification.
+    color_map : Union[dict, list, str]
+        Color mapping.
+
+    Returns
+    -------
+    list
+        Placeholder for label check.
+    """
+    if hue_axis is None:
+        return [None]
+    return [None]  # Simplified; actual labels generated in plot loop
+
+
+def _plot_line_with_ci(
+        ax: Axes,
+        time: np.ndarray,
+        signal: np.ndarray,
+        lower_ci: Optional[np.ndarray],
+        upper_ci: Optional[np.ndarray],
+        color: str,
+        label: Optional[str],
+        linewidth: float,
+        ci_alpha: float
+) -> None:
+    """
+    Plot a single line with optional confidence interval shading.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes to plot on.
+    time : np.ndarray
+        Time axis values.
+    signal : np.ndarray
+        1D signal to plot.
+    lower_ci : Optional[np.ndarray]
+        Lower CI bound (1D, same length as signal).
+    upper_ci : Optional[np.ndarray]
+        Upper CI bound (1D, same length as signal).
+    color : str
+        Line color.
+    label : Optional[str]
+        Line label for legend.
+    linewidth : float
+        Line width.
+    ci_alpha : float
+        Transparency of CI shading.
+    """
+    # Plot mean line
+    ax.plot(time, signal, label=label, linewidth=linewidth, color=color)
+
+    # Plot CI shading if both bounds provided
+    if lower_ci is not None and upper_ci is not None:
+        ax.fill_between(time, lower_ci, upper_ci, alpha=ci_alpha, color=color)
+
+
+
+if __name__ == '__main__':
+    initialise_electrode_heatmap(values=[0]*64,
+                                 positios=EEG_POSITIONS, add_head_shape=True)
