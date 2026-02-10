@@ -18,7 +18,7 @@ if __name__=="__main__":
 
     ### WORKFLOW CONTROL
     # change these to select subject and trial:
-    for subject_ind in [5]:
+    for subject_ind in [7]:
         print("\n" + "-"*100)
         print(f"Processing subject {subject_ind}")
         print("-" * 100)
