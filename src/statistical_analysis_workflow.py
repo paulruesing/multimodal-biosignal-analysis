@@ -13,12 +13,144 @@ from src.pipeline.visualizations import EEG_CHANNEL_IND_DICT, EEG_CHANNELS_BY_AR
 import src.utils.file_management as filemgmt
 
 
+def aggregate_psd_spectrogram(
+        psd_spectrograms: np.ndarray,
+        psd_freqs: np.ndarray = None,
+        normalize_mvc: bool = False,
+        is_log_scaled: bool = False,
+        freq_slice: tuple[float, float] | str = None,
+        channel_indices: list[int] = None,
+        aggregation_ops: list[tuple[str, int]] = None,
+) -> np.ndarray:
+    """
+    Aggregate PSD spectrograms through multiple stages: normalization, slicing, and axis reduction.
+
+    Processing order:
+    1. MVC normalization (if requested)
+    2. Frequency slicing (if freq_slice provided)
+    3. Channel slicing (if channel_indices provided)
+    4. Sequential aggregation operations in specified order
+
+    Parameters
+    ----------
+    psd_spectrograms : np.ndarray
+        PSD data with shape (n_times, n_frequencies, n_channels).
+    psd_freqs : np.ndarray, optional
+        Frequency values corresponding to the frequency axis. Required if freq_slice is used.
+    normalize_mvc : bool, default=False
+        Whether to apply MVC (Maximum Voluntary Contraction) normalization.
+        Computes max over time and frequency per channel, then normalizes to percentage.
+    is_log_scaled : bool, default=False
+        Whether the data is already log-scaled. If True, skips MVC normalization.
+    freq_slice : tuple[float, float] | str, optional
+        Frequency range to slice. Can be:
+        - Tuple (low, high): Custom frequency range in Hz
+        - String: Predefined band name ('slow', 'fast', 'delta', 'theta', 'alpha', 'beta', 'gamma')
+        Requires psd_freqs to be provided.
+    channel_indices : list[int], optional
+        List of channel indices to select. If None, uses all channels.
+    aggregation_ops : list[tuple[str, int]], optional
+        List of (operator, axis) tuples to apply sequentially.
+        Operator can be 'mean' or 'max'.
+        Axis refers to the current array shape after slicing.
+        Example: [('mean', 1), ('max', 2)] means average axis 1 first, then max over axis 2.
+
+    Returns
+    -------
+    np.ndarray
+        Aggregated PSD array with reduced dimensions based on specified operations.
+
+    Examples
+    --------
+    # EMG: Slice frequencies, mean over frequencies, then max over channels
+    result = aggregate_psd_spectrogram(
+        psd_spectrograms, psd_freqs,
+        normalize_mvc=True, is_log_scaled=False,
+        freq_slice='slow',
+        aggregation_ops=[('mean', 1), ('max', 2)],  # mean freq axis, max channel axis
+    )  # Output shape: (n_times,)
+
+    # EEG: Select channels, mean over channels first, then frequencies
+    result = aggregate_psd_spectrogram(
+        psd_spectrograms, psd_freqs,
+        channel_indices=[0, 1, 2, 5],
+        freq_slice='alpha',
+        aggregation_ops=[('mean', 2), ('mean', 1)],  # mean channels, then mean frequencies
+    )  # Output shape: (n_times,)
+
+    # Complex example: max over time, mean over channels, then max over frequencies
+    result = aggregate_psd_spectrogram(
+        psd_spectrograms, psd_freqs,
+        aggregation_ops=[('max', 0), ('mean', 2), ('max', 1)],
+    )  # Output shape: scalar
+    """
+    # Predefined frequency bands in Hz
+    FREQUENCY_BANDS = {
+        'all': (0, 250),
+        'slow': (0, 40),
+        'fast': (60, 250),
+        'delta': (0.5, 4),
+        'theta': (4, 8),
+        'alpha': (8, 12),
+        'beta': (13, 30),
+        'gamma': (30, 100),
+    }
+
+    # Create working copy
+    result = psd_spectrograms.copy()
+
+    # Stage 1: MVC Normalization
+    if normalize_mvc and not is_log_scaled:
+        # Maximum over time (axis 0) and frequencies (axis 1) per channel
+        mvc = np.max(np.max(result, axis=0, keepdims=True), axis=1, keepdims=True)
+        result = result / mvc * 100  # Convert to percentage
+
+    # Stage 2: Frequency Slicing
+    if freq_slice is not None:
+        if psd_freqs is None:
+            raise ValueError("psd_freqs must be provided when using freq_slice")
+
+        # Convert string band name to tuple if needed
+        if isinstance(freq_slice, str):
+            if freq_slice not in FREQUENCY_BANDS:
+                available_bands = ', '.join(FREQUENCY_BANDS.keys())
+                raise ValueError(
+                    f"Unknown frequency band '{freq_slice}'. "
+                    f"Available bands: {available_bands}"
+                )
+            low_freq, high_freq = FREQUENCY_BANDS[freq_slice]
+        else:
+            low_freq, high_freq = freq_slice
+
+        freq_mask = (psd_freqs >= low_freq) & (psd_freqs <= high_freq)
+        result = result[:, freq_mask, :]
+
+    # Stage 3: Channel Slicing
+    if channel_indices is not None:
+        result = result[:, :, channel_indices]
+
+    # Stage 4: Sequential Aggregation Operations
+    if aggregation_ops is not None:
+        for operator, axis in aggregation_ops:
+            if operator == 'mean':
+                result = np.nanmean(result, axis=axis)
+            elif operator == 'max':
+                result = np.nanmax(result, axis=axis)
+            else:
+                raise ValueError(
+                    f"Unknown operator '{operator}'. Supported operators: 'mean', 'max'"
+                )
+
+    return result
+
+
 def fit_linear_regression_model(
         df: pd.DataFrame,
         response_var: str,
         condition_vars: dict,
         explanatory_vars: list,
-        n_windows_per_trial: int = 9
+        n_windows_per_trial: int = 9,
+        show_diagnostic_plots: bool = False
 ) -> dict:
     """
     Fit an OLS linear regression model with flexible condition and explanatory variables.
@@ -38,6 +170,8 @@ def fit_linear_regression_model(
         List of additional explanatory variables (e.g., ['Force Level'])
     n_windows_per_trial : int
         Number of windows per trial for autocorrelation adjustment
+    show_diagnostic_plots : bool, default=True
+        Whether to display Q-Q plot and residual distribution plot
     reference_level : str, optional
         Reference level for categorical variables (default: first alphabetical)
 
@@ -136,19 +270,20 @@ def fit_linear_regression_model(
     # ============ DIAGNOSTICS ============
     residuals = model.resid
 
-    # Q-Q plot
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    # Q-Q plot and residual distribution (optional)
+    if show_diagnostic_plots:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    stats.probplot(residuals, dist="norm", plot=axes[0])
-    axes[0].set_title("Q-Q Plot (Residuals)")
-    axes[0].grid(True, alpha=0.3)
+        stats.probplot(residuals, dist="norm", plot=axes[0])
+        axes[0].set_title("Q-Q Plot (Residuals)")
+        axes[0].grid(True, alpha=0.3)
 
-    axes[1].hist(residuals, bins=30, edgecolor='black', density=True)
-    axes[1].axvline(0, color='r', linestyle='--', label='Mean')
-    axes[1].set_title("Residual Distribution")
-    axes[1].legend()
-    plt.tight_layout()
-    plt.show()
+        axes[1].hist(residuals, bins=30, edgecolor='black', density=True)
+        axes[1].axvline(0, color='r', linestyle='--', label='Mean')
+        axes[1].set_title("Residual Distribution")
+        axes[1].legend()
+        plt.tight_layout()
+        plt.show()
 
     # Shapiro-Wilk test
     shapiro_stat, shapiro_p = stats.shapiro(residuals)
@@ -224,6 +359,7 @@ def fit_linear_regression_model(
     }
 
 
+
 def fit_mixed_effects_model(
         df: pd.DataFrame,
         response_var: str,
@@ -231,6 +367,7 @@ def fit_mixed_effects_model(
         explanatory_vars: list,
         grouping_var: str = 'Subject ID',
         n_windows_per_trial: int = 9,
+        show_diagnostic_plots: bool = False
 ) -> dict:
     """
     Fit a Linear Mixed-Effects Model with flexible condition and explanatory variables.
@@ -360,18 +497,19 @@ def fit_mixed_effects_model(
     residuals = result.resid
 
     # Q-Q plot
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    if show_diagnostic_plots:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    stats.probplot(residuals, dist="norm", plot=axes[0])
-    axes[0].set_title("Q-Q Plot (Residuals)")
-    axes[0].grid(True, alpha=0.3)
+        stats.probplot(residuals, dist="norm", plot=axes[0])
+        axes[0].set_title("Q-Q Plot (Residuals)")
+        axes[0].grid(True, alpha=0.3)
 
-    axes[1].hist(residuals, bins=30, edgecolor='black', density=True)
-    axes[1].axvline(0, color='r', linestyle='--', label='Mean')
-    axes[1].set_title("Residual Distribution")
-    axes[1].legend()
-    plt.tight_layout()
-    plt.show()
+        axes[1].hist(residuals, bins=30, edgecolor='black', density=True)
+        axes[1].axvline(0, color='r', linestyle='--', label='Mean')
+        axes[1].set_title("Residual Distribution")
+        axes[1].legend()
+        plt.tight_layout()
+        plt.show()
 
     # Shapiro-Wilk test
     shapiro_stat, shapiro_p = stats.shapiro(residuals)
@@ -476,6 +614,7 @@ def fit_mixed_effects_model(
     }
 
 
+
 if __name__ == '__main__':
     ######## PREPARATION #########
     ROOT = Path().resolve().parent
@@ -487,20 +626,29 @@ if __name__ == '__main__':
     FEATURE_OUTPUT_DATA = DATA / "precomputed_features"
 
 
-    ################################################
-    ################ PSD MODELLING #################
-    ################################################
+    #####################################################
+    ################ FEATURE EXTRACTION #################
+    #####################################################
 
-    all_subject_data_frame = pd.read_csv(FEATURE_OUTPUT_DATA / "statistics_temp_eeg_alpha.csv")  # set to None to run computation
+    all_subject_data_frame = pd.read_csv(filemgmt.most_recent_file(FEATURE_OUTPUT_DATA, ".csv", ["Combined Statistics 15seg"]))  # pd.read_csv(FEATURE_OUTPUT_DATA / "statistics_temp_eeg_alpha.csv")  # set to None to run computation
 
-    # todo: add pre-trial and trial comparison
+    # add pre-trial and trial comparison? -> forego for now, since pre-trial isn't as strictly recorded as within
     if all_subject_data_frame is None:
-        ### PARAMETERS
-        modality: Literal['eeg', 'emg_1_flexor', 'emg_2_extensor'] = 'eeg'
-        is_log_scaled: bool = True  # define whether PSD was log scaled during feature extraction
-        n_within_trial_segments: int = 9  # 45s trials
-        print(f"Will split 45sec trial into {n_within_trial_segments} segments (each ~{45/n_within_trial_segments:.1f}sec)")
-
+        ### PSD PARAMETERS
+        # average over below bands and channels (region should label channel group):
+        modality_region_channels_band_psd_list: list[tuple[str, str, list[str], str]] = [
+            # MODALITY, REGION_LABEL, REGION_CHANNELS, BAND
+            ('eeg', 'FC_CP_T',
+             EEG_CHANNELS_BY_AREA['Fronto-Central'] + EEG_CHANNELS_BY_AREA['Centro-Parietal'] + EEG_CHANNELS_BY_AREA['Temporal'],
+            'theta'),  # H2
+            ('eeg', 'F_C',
+             EEG_CHANNELS_BY_AREA['Frontal'] + EEG_CHANNELS_BY_AREA['Central'], 'beta'),  # H3
+            ('eeg', 'P_PO',
+             EEG_CHANNELS_BY_AREA['Parietal'] + EEG_CHANNELS_BY_AREA['Parieto-Occipital'], 'alpha'),  # H4
+            ('eeg', 'Global', None, 'gamma'),
+            ('emg_1_flexor', 'Global', None, 'all'),
+            ('emg_2_extensor', 'Global', None, 'all')
+        ]
         # select target band from freq_band_psd_per_segment_dict from
         #   - EMG   -> 'slow', 'fast'
         #   - EEG
@@ -509,32 +657,71 @@ if __name__ == '__main__':
         #       -> 'alpha' (auditory attention)
         #       -> 'beta' (motor control)
         #       -> 'gamma'
-        freq_band = 'slow' if 'emg' in modality else 'theta'
-        eeg_channel_subset = EEG_CHANNELS_BY_AREA['Fronto-Central'] + EEG_CHANNELS_BY_AREA['Central'] + \
-                             EEG_CHANNELS_BY_AREA['Centro-Parietal'] + EEG_CHANNELS_BY_AREA['Temporal'] + \
-                             EEG_CHANNELS_BY_AREA['Temporo-Parietal'] + EEG_CHANNELS_BY_AREA['Parietal']
-
-        # the below needs to match feature_extraction_workflow.py
-        cmc_eeg_channel_subset = EEG_CHANNELS_BY_AREA['Fronto-Central'] + EEG_CHANNELS_BY_AREA['Central'] + \
-                             EEG_CHANNELS_BY_AREA['Centro-Parietal'] + EEG_CHANNELS_BY_AREA['Temporal']
+            
+        # window lenghts:
+        psd_time_window_size_sec = .25
+        psd_is_log_scaled: bool = True  # define whether PSD was log scaled during feature extraction
 
 
 
 
+        ### CMC PARAMETERS
+        muscle_operator_band_cmc_list: list[tuple[str, str, str]] = [
+            # MUSCLE, OPERATOR (max / mean / median), BAND
+            ('Flexor', 'max', 'beta'),
+            ('Flexor', 'max', 'gamma'),
+            ('Flexor', 'mean', 'beta'),
+            ('Flexor', 'mean', 'gamma'),
+            ('Extensor', 'max', 'beta'),
+            ('Extensor', 'max', 'gamma'),
+            ('Extensor', 'mean', 'beta'),
+            ('Extensor', 'mean', 'gamma'),
+        ]
+        # select target band from freq_band_psd_per_segment_dict from
+        #   - EMG   -> 'slow', 'fast'
+        #   - EEG
+        #       -> 'delta' (not sufficient frequencies)
+        #       -> 'theta' (beat perception, entrainment)
+        #       -> 'alpha' (auditory attention)
+        #       -> 'beta' (motor control)
+        #       -> 'gamma'
+
+        # window lengths:
+        cmc_time_window_size_sec = 2.0
+        
 
 
-        ### ITERATE OVER ALL PARTICIPANTS
-        all_subject_data_frame = pd.DataFrame(columns=['Subject ID', 'Music Listening', 'Force Level', 'PSD'])
-        for subject_ind in range(6):
+
+
+        ### DATA AGGREGATION PARAMETERS
+        # how many segments:
+        n_within_trial_segments: int = 1  # slices per 15s trial
+        print(f"Will split 45sec trial into {n_within_trial_segments} segments (each ~{45/n_within_trial_segments:.1f}sec)")
+        # standardization?
+        modalities_to_standardize: list[str] = []  #['PSD', 'Force']
+        music_features_to_fetch = ('BPM_manual', 'Spectral Flux Mean', 'Spectral Centroid Mean', 'IOI Variance Coeff',
+                                   'Syncopation Ratio')
+
+
+
+
+
+
+
+        ########### ITERATE OVER ALL PARTICIPANTS ###########
+        all_subject_data_frame = pd.DataFrame(columns=['Subject ID'])
+        for subject_ind in range(8):
             print("\n")
             print("-" * 100)
-            print(f"------------     Aggregating\t\t{modality:<20} data for subject\t\t{subject_ind:02}     ------------- ")
+            print(f"------------     Aggregating data for subject\t\t{subject_ind:02}     ------------- ")
             print("-" * 100)
-
 
             # dependent directories:
             subject_psd_save_dir = FEATURE_OUTPUT_DATA / f"subject_{subject_ind:02}"
+            subject_cmc_save_dir = FEATURE_OUTPUT_DATA / f"subject_{subject_ind:02}"
             subject_experiment_data_dir = EXPERIMENT_DATA / f"subject_{subject_ind:02}"
+
+
 
 
 
@@ -543,7 +730,7 @@ if __name__ == '__main__':
 
             ### IMPORT LOG AND SERIAL DATAFRAMES
             log_df = data_integration.fetch_enriched_log_frame(subject_experiment_data_dir)
-            serial_df = data_integration.fetch_serial_measurements(subject_experiment_data_dir)
+            serial_df = data_integration.fetch_enriched_serial_frame(subject_experiment_data_dir)
             # make time-zone aware:
             log_df.index = data_analysis.make_timezone_aware(log_df.index)
             serial_df.index = data_analysis.make_timezone_aware(serial_df.index)
@@ -558,19 +745,6 @@ if __name__ == '__main__':
 
 
 
-            ### IMPORT PSD
-            psd_spectrograms, psd_times, psd_freqs = features.fetch_stored_spectrograms(subject_psd_save_dir,
-                                                                                        modality='PSD',
-                                                                                        file_identifier=modality)
-            #   -> shape: (n_times, n_freqs, n_channels), (n_times), (n_freqs)
-            # convert PSD second time-centers into timestamps:
-            psd_time_window_size_sec = (psd_times[1] - psd_times[0])
-            psd_timestamps = data_analysis.add_time_index(
-                start_timestamp=qtc_start + pd.Timedelta(seconds=psd_time_window_size_sec / 2),
-                end_timestamp=qtc_end - pd.Timedelta(seconds=psd_time_window_size_sec / 2),
-                n_timesteps=len(psd_times)
-            )
-            psd_timestamps = data_analysis.make_timezone_aware(psd_timestamps)
 
 
 
@@ -591,68 +765,109 @@ if __name__ == '__main__':
 
 
 
-            ### MODALITY-DEPENDENT PSD AGGREGATION
-            if 'emg' in modality:
-                # 1) MVC Normalization per Channel if not log-scaled!
-                if not is_log_scaled:
-                    mvc = np.max(np.max(psd_spectrograms, axis=0, keepdims=True), axis=1, keepdims=True)  # maximum over time and frequencies
-                    psd_spectrograms = psd_spectrograms / mvc * 100  # * 100 for [%]
 
-                # 2) Average over a: all frequencies (broad band) OR b: frequency bands
-                freq_band_spec_dict: dict[str, np.ndarray] = features.aggregate_spectrogram_over_frequency_band(
-                    psd_spectrograms, psd_freqs, 'mean',
-                    frequency_bands={'slow': (0, 40), 'fast': (60, 250)},  # slow and fast twitching, deliberately omitting overlap zone (40-60)
-                )  # value shape: (n_times, n_channels)
+            ### PREPARE DATAFRAME
+            single_subject_data_frame = pd.DataFrame(index=range(len(seg_starts)))
 
-                # 3) Average over time (per trial)
-                freq_band_psd_per_segment_dict: dict[str, np.ndarray] = {}
-                for band, psd_arr in freq_band_spec_dict.items():
-                    # compute psd per segment:
-                    psd_per_segment = data_analysis.apply_window_operator(
+
+
+
+
+
+
+            ### IMPORT AND AGGREGATE PSD DATA PER HYPOTHESIS (modality_region_channels_band_psd_list)
+            # loop over configurations:
+            for modality, region_label, channels, band in modality_region_channels_band_psd_list:
+                # import PSD:
+                psd_spectrograms, psd_times, psd_freqs = features.fetch_stored_spectrograms(
+                    subject_psd_save_dir, modality='PSD', file_identifier=modality)
+                #   -> shape: (n_windows, n_freqs, n_channels), (n_windows), (n_freqs)
+                # convert PSD second time-centers into timestamps:
+                psd_timestamps = data_analysis.add_time_index(
+                    start_timestamp=qtc_start + pd.Timedelta(seconds=psd_time_window_size_sec / 2),
+                    end_timestamp=qtc_end - pd.Timedelta(seconds=psd_time_window_size_sec / 2),
+                    n_timesteps=len(psd_times)
+                )
+                psd_timestamps = data_analysis.make_timezone_aware(psd_timestamps)
+
+                # takes shapes (n_windows, n_freqs, n_channels)
+                psd_aggregated = aggregate_psd_spectrogram(psd_spectrograms, psd_freqs, normalize_mvc=False,
+                                                           channel_indices=[EEG_CHANNEL_IND_DICT[ch] for ch in channels] if channels is not None else None,
+                                                           is_log_scaled=psd_is_log_scaled, freq_slice=band,
+                                                           aggregation_ops=[('mean', 1),   # mean within freq band
+                                                                            # mean over EEG channels, max over EMG ones:
+                                                                            ('mean' if 'eeg' in modality else 'max', 1),
+                                                                            ],)
+                # returns shape (n_windows, )
+
+                # split per segment:
+                psd_per_segment = data_analysis.apply_window_operator(
+                    window_timestamps=seg_starts,
+                    window_timestamps_ends=seg_ends,
+
+                    target_array=psd_aggregated,
+                    target_timestamps=psd_timestamps,
+
+                    operation='mean',
+                    axis=0,  # time axis
+                )  # (n_trials, )
+
+                # save to dataframe:
+                single_subject_data_frame[f"PSD_{modality}_{region_label}_{band}"] = psd_per_segment
+
+
+
+
+
+
+
+
+                ### IMPORT AND AGGREGATE CMC DATA PER HYPOTHESIS (muscle_operator_band_cmc_list)
+                # loop over configurations:
+                for muscle, operator, band in muscle_operator_band_cmc_list:
+                    # import CMC:
+                    cmc_spectrograms, cmc_times, cmc_freqs = features.fetch_stored_spectrograms(
+                        subject_cmc_save_dir, modality='CMC', file_identifier=muscle)
+                    #   -> shape: (n_windows, n_freqs, n_channels), (n_windows), (n_freqs)
+                    # convert CMC second time-centers into timestamps:
+                    cmc_timestamps = data_analysis.add_time_index(
+                        start_timestamp=qtc_start + pd.Timedelta(seconds=cmc_time_window_size_sec / 2),
+                        end_timestamp=qtc_end - pd.Timedelta(seconds=cmc_time_window_size_sec / 2),
+                        n_timesteps=len(cmc_times)
+                    )
+                    cmc_timestamps = data_analysis.make_timezone_aware(cmc_timestamps)
+
+                    # takes shapes (n_windows, n_freqs, n_channels)
+                    cmc_aggregated = aggregate_psd_spectrogram(cmc_spectrograms, cmc_freqs, normalize_mvc=False,
+                                                               is_log_scaled=False, freq_slice=band,
+                                                               aggregation_ops=[('max', 1),  # mean within freq band
+                                                                                # either take peak or average over channels
+                                                                                (operator, 1),
+                                                                                ]
+                                                               )
+                    # returns shape (n_windows, )
+
+                    # split per segment:
+                    cmc_per_segment = data_analysis.apply_window_operator(
                         window_timestamps=seg_starts,
                         window_timestamps_ends=seg_ends,
 
-                        target_array=psd_arr,
-                        target_timestamps=psd_timestamps,
+                        target_array=cmc_aggregated,
+                        target_timestamps=cmc_timestamps,
 
                         operation='mean',
                         axis=0,  # time axis
-                    )  # (n_trials, n_channels)
+                    )  # (n_trials, )
 
-                    # 4) Max-Pool over Channels
-                    psd_per_segment = np.nanmax(psd_per_segment, axis=1)
-
-                    # 5) Save:
-                    freq_band_psd_per_segment_dict[band] = psd_per_segment
+                    # save to dataframe:
+                    single_subject_data_frame[f"CMC_{muscle}_{operator}_{band}"] = cmc_per_segment
 
 
-            elif 'eeg' in modality:
-                # 1) Average over Region-of-Interest (RoI)
-                eeg_channel_subset_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in eeg_channel_subset]
-                psd_subset = psd_spectrograms[:, :, eeg_channel_subset_inds]
-                psd_roi_avg = np.nanmean(psd_subset, axis=2)
-                # shape: (n_times, n_frequencies)
 
-                # 2) Average over Frequency Bands
-                freq_band_spec_dict: dict[str, np.ndarray] = features.aggregate_spectrogram_over_frequency_band(
-                    psd_roi_avg, psd_freqs, 'mean', frequency_axis=1,
-                )  # value shape: (n_times)
 
-                # 3) Average over time (per trial)
-                freq_band_psd_per_segment_dict: dict[str, np.ndarray] = {}
-                for band, psd_arr in freq_band_spec_dict.items():
-                    # compute psd per segment:
-                    psd_per_segment = data_analysis.apply_window_operator(
-                        window_timestamps=seg_starts,
-                        window_timestamps_ends=seg_ends,
 
-                        target_array=psd_arr,
-                        target_timestamps=psd_timestamps,
 
-                        operation='mean',
-                        axis=0,  # time axis
-                    )  # (n_trials)
-                    freq_band_psd_per_segment_dict[band] = psd_per_segment
+
 
 
 
@@ -662,7 +877,7 @@ if __name__ == '__main__':
             force_level_per_segment = data_analysis.apply_window_operator(
                 window_timestamps=seg_starts,
                 window_timestamps_ends=seg_ends,
-                target_array=sliced_serial_df['fsr'],
+                target_array=sliced_serial_df['Task-wise Scaled Force'],
                 operation='median',
                 axis=0,  # time axis
             )
@@ -684,6 +899,21 @@ if __name__ == '__main__':
             )
             is_music_trial = [not pd.isna(song_id) and pd.isna(silence_id) for song_id, silence_id in zip(song_id_per_segment, silence_id_per_segment)]
 
+            # trial ID:
+            trial_id_per_segment = data_analysis.apply_window_operator(
+                window_timestamps=seg_starts,
+                window_timestamps_ends=seg_ends,
+                target_array=log_df['Trial ID'],
+                operation='mode', axis=0,
+            )
+
+            # musical features:
+            music_feature_tuples = [
+                data_integration.fetch_music_features(log_df, trial_id=trial_id,
+                                                      features_to_return=music_features_to_fetch) for trial_id in trial_id_per_segment
+            ]
+
+
             # song category:
             song_category_per_segment = data_analysis.apply_window_operator(
                 window_timestamps=seg_starts,
@@ -697,30 +927,97 @@ if __name__ == '__main__':
                 target_array=log_df['Familiarity'],
                 operation='mode', axis=0,
             )
+            emotional_state_per_segment = data_analysis.apply_window_operator(
+                window_timestamps=seg_starts,
+                window_timestamps_ends=seg_ends,
+                target_array=log_df['Emotional State'],
+                operation='mode', axis=0,
+            )
+
+            song_liking_per_segment = data_analysis.apply_window_operator(
+                window_timestamps=seg_starts,
+                window_timestamps_ends=seg_ends,
+                target_array=log_df['Liking'],
+                operation='mode', axis=0,
+            )
+
+            task_frequency_per_segment = data_analysis.apply_window_operator(
+                window_timestamps=seg_starts,
+                window_timestamps_ends=seg_ends,
+                target_array=log_df['Task Frequency'],
+                operation='mode', axis=0,
+            )
+
+            # heart rate::
+            bpm_per_segment = data_analysis.apply_window_operator(
+                window_timestamps=seg_starts,
+                window_timestamps_ends=seg_ends,
+                target_array=sliced_serial_df['bpm'],
+                operation='median',
+                axis=0,  # time axis
+            )
+
+            # heart rate variability:
+            hrv_per_segment = data_analysis.apply_window_operator(
+                window_timestamps=seg_starts,
+                window_timestamps_ends=seg_ends,
+                target_array=sliced_serial_df['hrv'],
+                operation='median',
+                axis=0,  # time axis
+            )
+
+            # galvanic skin response:
+            gsr_per_segment = data_analysis.apply_window_operator(
+                window_timestamps=seg_starts,
+                window_timestamps_ends=seg_ends,
+                target_array=sliced_serial_df['gsr'],
+                operation='median',
+                axis=0,
+            )
 
 
 
-
-            ### PREPARE PER SUBJECT DATAFRAME
-            # single subject df:
-            single_subject_data_frame = pd.DataFrame(data={
-                'Subject ID': [subject_ind] * len(seg_starts),
-                'Music Listening': is_music_trial,
-                'Force Level': force_level_per_segment,
-                'PSD': freq_band_psd_per_segment_dict[freq_band],
-                'Category': song_category_per_segment,
-                'Familiarity': song_familiarity_per_segment,
-            })
+            ### APPEND TO PER SUBJECT DATAFRAME
+            # append to subject df:
+            for column_name, data in [('Subject ID', [subject_ind] * len(seg_starts)),
+                                      ('Trial ID', trial_id_per_segment),
+                                      ('Music Listening', is_music_trial),
+                                      ('Median Force Level [0-1]', force_level_per_segment),
+                                      ('Task Frequency', task_frequency_per_segment),
+                                      ('Emotional State [0-7]', emotional_state_per_segment),
+                                      ('Median Heart Rate [bpm]', bpm_per_segment),
+                                      ('Median HRV [sec]', hrv_per_segment),
+                                      ('Galvanic Skin Response [0-3.3]', gsr_per_segment),
+                                      # music features:
+                                      ('Perceived Category', song_category_per_segment),
+                                      ('Liking [0-7]', song_liking_per_segment),
+                                      ('Familiarity [0-7]', song_familiarity_per_segment),
+                                      (list(music_features_to_fetch), music_feature_tuples),
+                                      ]:
+                single_subject_data_frame[column_name] = data
 
             # standardize:
-            single_subject_data_frame['PSD'] = single_subject_data_frame['PSD'].transform(lambda x: (x - x.mean()) / x.std())
-            single_subject_data_frame['Force Level'] = single_subject_data_frame['Force Level'].transform(
-                lambda x: (x - x.mean()) / x.std())
+            for modality in modalities_to_standardize:
+                for column in [c for c in single_subject_data_frame.columns if modality in c]:
+                    # columns to standardize:
+                    print("Standardizing statistics for: ", column)
+                    single_subject_data_frame[column] = single_subject_data_frame[column].transform(lambda x: (x - x.mean()) / x.std())
 
+
+
+
+
+
+            ### CONCAT WITH ALL SUBJECT DATAFRAME
             all_subject_data_frame = pd.concat([all_subject_data_frame, single_subject_data_frame], axis=0)
 
 
-        all_subject_data_frame.to_csv(FEATURE_OUTPUT_DATA / f"statistics_temp_{modality}_{freq_band}.csv", index=False)
+
+
+
+
+        ######### SAVE COMBINED STATISTICS #########
+        all_subject_data_frame.to_csv(FEATURE_OUTPUT_DATA / filemgmt.file_title(f"Combined Statistics {int(n_within_trial_segments)}seg", ".csv"), index=False)
 
 
 
@@ -729,320 +1026,520 @@ if __name__ == '__main__':
 
 
     ######## MODEL 1: MUSIC VS. SILENCE #########
-    print("\n")
-    print("-" * 100)
-    print(f"-------------------------     Comparison Level 1 (Music vs. Silence)     --------------------------- ")
-    print("-" * 100, "\n")
-    fit_linear_regression_model(all_subject_data_frame, 'PSD',
-                                condition_vars={'Music Listening': 'categorical',},
-                                explanatory_vars=['Force Level'])
-    """fit_mixed_effects_model(
-        df=all_subject_data_frame,
-        response_var='PSD',
-        condition_vars={'Music Listening': 'categorical'},
-        explanatory_vars=['Force Level'],
-        grouping_var='Subject ID'
-    )"""
-
-    print("\n"*3)
-    print("-" * 100)
-    print(f"-------------------------     Comparison Level 2 (Music vs. Silence)     --------------------------- ")
-    print("-" * 100, "\n")
-    # only on music listening subset
-    fit_linear_regression_model(all_subject_data_frame.loc[all_subject_data_frame['Music Listening']], 'PSD',
-                                condition_vars={'Category': 'categorical',
-                                                'Familiarity': 'ordinal',},
-                                explanatory_vars=['Force Level'])
-    quit()
-    # Create condition variable from boolean 'Music Listening'
-    all_subject_data_frame['condition'] = all_subject_data_frame['Music Listening'].apply(
-        lambda x: 'music' if x else 'silence'
-    )
-
-    ### DATA CHECK
-    print("Data Summary:")
-    print(f"Total observations: {len(all_subject_data_frame)}")
-    print(f"Unique participants: {all_subject_data_frame['Subject ID'].nunique()}")
-    print(
-        f"Observations per participant: {len(all_subject_data_frame) / all_subject_data_frame['Subject ID'].nunique():.1f}")
-    print(f"\nCondition breakdown:")
-    print(all_subject_data_frame['condition'].value_counts())
-    print(f"\nPSD range: [{all_subject_data_frame['PSD'].min():.2f}, {all_subject_data_frame['PSD'].max():.2f}]")
-    print(
-        f"Force Level range: [{all_subject_data_frame['Force Level'].min():.2f}, {all_subject_data_frame['Force Level'].max():.2f}]")
-
-
-    ### LINEAR REGRESSION
-    print("\n"*3 + "=" * 80)
-    print("Linear Regression Model (OLS)")
-    print("=" * 80)
-
-    model1 = smf.ols(
-        "PSD ~ C(condition, Treatment('silence')) + Q('Force Level')",
-        data=all_subject_data_frame
-    ).fit()
-    print(model1.summary())
-
-    # ============ DIAGNOSTICS ============
-    residuals1 = model1.resid
-
-    # Q-Q plot
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-    stats.probplot(residuals1, dist="norm", plot=axes[0])
-    axes[0].set_title("Q-Q Plot (Residuals)")
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].hist(residuals1, bins=30, edgecolor='black', density=True)
-    axes[1].axvline(0, color='r', linestyle='--', label='Mean')
-    axes[1].set_title("Residual Distribution")
-    axes[1].legend()
-    plt.tight_layout()
-    plt.show()
-
-    # Shapiro-Wilk test
-    shapiro_stat, shapiro_p = stats.shapiro(residuals1)
-    print(f"\nShapiro-Wilk p-value: {shapiro_p:.4f}")
-    if shapiro_p < 0.05:
-        print("  → Residuals significantly deviate from normality")
-    else:
-        print("  → Residuals approximately normal ✓")
-
-    # ============ AUTOCORRELATION CHECK ============
-    print("\n" + "=" * 80)
-    print("AUTOCORRELATION CHECK (within segments per trial)")
-    print("=" * 80)
-
-    lag1_autocorr = np.corrcoef(residuals1[:-1], residuals1[1:])[0, 1]
-    if np.isnan(lag1_autocorr):
-        print("Warning: Autocorrelation is NaN")
-        lag1_autocorr = 0.0
-
-    n_windows_per_trial = 9
-    design_effect = 1 + (n_windows_per_trial - 1) * lag1_autocorr
-    se_inflation = np.sqrt(design_effect)
-
-    print(f"Lag-1 autocorrelation (ρ): {lag1_autocorr:.3f}")
-    print(f"Design effect: {design_effect:.2f}")
-    print(f"SE inflation factor: {se_inflation:.2f}×")
-
-    # Adjust SEs for autocorrelation
-    result1_adjusted_se = model1.bse * se_inflation
-    result1_adjusted_z = model1.params / result1_adjusted_se
-    result1_adjusted_p = 2 * (1 - stats.norm.cdf(np.abs(result1_adjusted_z)))
-
-    # Convert to Series for proper indexing
-    if not isinstance(result1_adjusted_p, pd.Series):
-        result1_adjusted_p = pd.Series(result1_adjusted_p, index=model1.params.index)
-
-    print("\n" + "-" * 80)
-    print("ADJUSTED RESULTS (corrected for autocorrelation):")
-    print("-" * 80)
-    print(f"{'Parameter':<50s} {'β':>10s} {'SE (adj)':>12s} {'p (adj)':>10s}")
-    print("-" * 80)
-    for param in model1.params.index:
-        adj_se = result1_adjusted_se[param]
-        adj_p = result1_adjusted_p[param]
-        print(f"{param:<50s} {model1.params[param]:>10.4f} {adj_se:>12.4f} {adj_p:>10.4f}")
-
-
-
-
-
-
-    ######## MODEL 2: CATEGORY TESTING #########
-    print("\n")
-    print("-" * 100)
-    print(
-        f"-------------------------     Comparison Level 1 (Category vs. Familiarity)     --------------------------- ")
-    print("-" * 100, "\n")
-    # Create condition variable from categorical 'Category' and ordinal 'Familiarity' (0-7)
-    all_subject_data_frame['condition'] = all_subject_data_frame['Category'].astype(str) + '_Fam' + \
-                                          all_subject_data_frame['Familiarity'].astype(str)
-
-    ### DATA CHECK
-    print("Data Summary:")
-    print(f"Total observations: {len(all_subject_data_frame)}")
-    print(f"Unique participants: {all_subject_data_frame['Subject ID'].nunique()}")
-    print(
-        f"Observations per participant: {len(all_subject_data_frame) / all_subject_data_frame['Subject ID'].nunique():.1f}")
-    print(f"\nCondition breakdown:")
-    print(all_subject_data_frame['condition'].value_counts())
-    print(f"\nPSD range: [{all_subject_data_frame['PSD'].min():.2f}, {all_subject_data_frame['PSD'].max():.2f}]")
-    print(
-        f"Force Level range: [{all_subject_data_frame['Force Level'].min():.2f}, {all_subject_data_frame['Force Level'].max():.2f}]")
-    print(
-        f"\nFamiliarity range: [{all_subject_data_frame['Familiarity'].min()}, {all_subject_data_frame['Familiarity'].max()}]")
-
-    ### LINEAR REGRESSION
-    print("\n" * 3 + "=" * 80)
-    print("Linear Regression Model (OLS)")
-    print("=" * 80)
-
-    model1 = smf.ols(
-        "PSD ~ C(Category) + Familiarity + Q('Force Level')",
-        data=all_subject_data_frame
-    ).fit()
-    print(model1.summary())
-
-    # ============ DIAGNOSTICS ============
-    residuals1 = model1.resid
-
-    # Q-Q plot
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-    stats.probplot(residuals1, dist="norm", plot=axes[0])
-    axes[0].set_title("Q-Q Plot (Residuals)")
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].hist(residuals1, bins=30, edgecolor='black', density=True)
-    axes[1].axvline(0, color='r', linestyle='--', label='Mean')
-    axes[1].set_title("Residual Distribution")
-    axes[1].legend()
-    plt.tight_layout()
-    plt.show()
-
-    # Shapiro-Wilk test
-    shapiro_stat, shapiro_p = stats.shapiro(residuals1)
-    print(f"\nShapiro-Wilk p-value: {shapiro_p:.4f}")
-    if shapiro_p < 0.05:
-        print("  → Residuals significantly deviate from normality")
-    else:
-        print("  → Residuals approximately normal ✓")
-
-    # ============ AUTOCORRELATION CHECK ============
-    print("\n" + "=" * 80)
-    print("AUTOCORRELATION CHECK (within segments per trial)")
-    print("=" * 80)
-
-    lag1_autocorr = np.corrcoef(residuals1[:-1], residuals1[1:])[0, 1]
-    if np.isnan(lag1_autocorr):
-        print("Warning: Autocorrelation is NaN")
-        lag1_autocorr = 0.0
-
-    n_windows_per_trial = 9
-    design_effect = 1 + (n_windows_per_trial - 1) * lag1_autocorr
-    se_inflation = np.sqrt(design_effect)
-
-    print(f"Lag-1 autocorrelation (ρ): {lag1_autocorr:.3f}")
-    print(f"Design effect: {design_effect:.2f}")
-    print(f"SE inflation factor: {se_inflation:.2f}×")
-
-    # Adjust SEs for autocorrelation
-    result1_adjusted_se = model1.bse * se_inflation
-    result1_adjusted_z = model1.params / result1_adjusted_se
-    result1_adjusted_p = 2 * (1 - stats.norm.cdf(np.abs(result1_adjusted_z)))
-
-    # Convert to Series for proper indexing
-    if not isinstance(result1_adjusted_p, pd.Series):
-        result1_adjusted_p = pd.Series(result1_adjusted_p, index=model1.params.index)
-
-    print("\n" + "-" * 80)
-    print("ADJUSTED RESULTS (corrected for autocorrelation):")
-    print("-" * 80)
-    print(f"{'Parameter':<50s} {'β':>10s} {'SE (adj)':>12s} {'p (adj)':>10s}")
-    print("-" * 80)
-    for param in model1.params.index:
-        adj_se = result1_adjusted_se[param]
-        adj_p = result1_adjusted_p[param]
-        print(f"{param:<50s} {model1.params[param]:>10.4f} {adj_se:>12.4f} {adj_p:>10.4f}")
-
-
-
-
-
-
-
-
-
-
-
-
-
-    quit()
-    ### LINEAR MIXED-EFFECTS MODEL
-    print("\n"*3 + "=" * 80)
-    print("LME Model")
-    print("=" * 80)
-
-    # LME model definition:
-    model1 = smf.mixedlm(
-        "PSD ~ C(condition, Treatment('silence')) + Q('Force Level')",
-        data=all_subject_data_frame,
-        groups=all_subject_data_frame['Subject ID']
-    )
-    result1 = model1.fit()
-    print(result1.summary())
-
-    # ============ DIAGNOSTICS: MODEL 1 ============
-    print("\n" + "=" * 80)
-    print("DIAGNOSTICS: Residual Normality (Model 1)")
-    print("=" * 80)
-
-    residuals1 = result1.resid
-
-    # Q-Q plot
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-    stats.probplot(residuals1, dist="norm", plot=axes[0])
-    axes[0].set_title("Q-Q Plot (Residuals)")
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].hist(residuals1, bins=30, edgecolor='black', density=True)
-    axes[1].axvline(0, color='r', linestyle='--', label='Mean')
-    axes[1].set_title("Residual Distribution")
-    axes[1].legend()
-    plt.tight_layout()
-    plt.show()
-
-    # Shapiro-Wilk test
-    shapiro_stat, shapiro_p = stats.shapiro(residuals1)
-    print(f"Shapiro-Wilk p-value: {shapiro_p:.4f}")
-    if shapiro_p < 0.05:
-        print("  → Residuals significantly deviate from normality (consider transformation)")
-    else:
-        print("  → Residuals approximately normal ✓")
-
-    # ============ AUTOCORRELATION CHECK ============
-    print("\n" + "=" * 80)
-    print("AUTOCORRELATION CHECK (within 5-sec segments per trial)")
-    print("=" * 80)
-
-    # Estimate lag-1 autocorrelation
-    lag1_autocorr = np.corrcoef(residuals1[:-1], residuals1[1:])[0, 1]
-    if np.isnan(lag1_autocorr):
-        print("Warning: Autocorrelation is NaN (constant residuals?)")
-        lag1_autocorr = 0.0
-    n_windows_per_trial = 9  # 45 sec / 5 sec
-
-    design_effect = 1 + (n_windows_per_trial - 1) * lag1_autocorr
-    se_inflation = np.sqrt(design_effect)
-
-    print(f"Lag-1 autocorrelation (ρ): {lag1_autocorr:.3f}")
-    print(f"Design effect: {design_effect:.2f}")
-    print(f"SE inflation factor: {se_inflation:.2f}×")
-    print(f"→ True SEs are ~{se_inflation:.2f}× larger than reported")
-
-    # Adjust SEs and p-values (ONLY for fixed effects, not random effects)
-    result1_adjusted_se = result1.bse.loc[result1.fe_params.index] * se_inflation
-    result1_adjusted_z = result1.fe_params / result1_adjusted_se
-    result1_adjusted_p = 2 * (1 - stats.norm.cdf(np.abs(result1_adjusted_z)))
-
-    # Ensure it's a Series
-    if not isinstance(result1_adjusted_p, pd.Series):
-        result1_adjusted_p = pd.Series(result1_adjusted_p, index=result1.fe_params.index)
-
-    print("\n" + "-" * 80)
-    print("ADJUSTED FIXED EFFECTS (corrected for autocorrelation):")
-    print("-" * 80)
-    print(f"{'Parameter':<50s} {'β':>10s} {'SE (orig)':>12s} {'SE (adj)':>12s} {'p (orig)':>10s} {'p (adj)':>10s}")
-    print("-" * 80)
-    for param in result1.fe_params.index:
-        orig_se = result1.bse[param]
-        adj_se = result1_adjusted_se[param]
-        orig_p = result1.pvalues[param]
-        adj_p = result1_adjusted_p[param]
+    
+    # Store all results for summary tables
+    all_model_results = []
+    
+    for hypothesis, dependent_variable in [('H1: Flexor Beta Peak CMC Increases with Music', "CMC_Flexor_max_beta"),
+                                           ('H1: Flexor Beta Avg. CMC Increases with Music', "CMC_Flexor_mean_beta"),
+                                           ('H1: Flexor Gamma Peak CMC Increases with Music', "CMC_Flexor_max_gamma"),
+                                           ('H1: Flexor Gamma Avg. CMC Increases with Music', "CMC_Flexor_mean_gamma"),
+                                           ('H1: Extensor Beta Peak CMC Increases with Music', "CMC_Extensor_max_beta"),
+                                           ('H1: Extensor Beta Avg. CMC Increases with Music', "CMC_Extensor_mean_beta"),
+                                           ('H1: Extensor Gamma Peak CMC Increases with Music', "CMC_Extensor_max_gamma"),
+                                           ('H1: Extensor Gamma Avg. CMC Increases with Music', "CMC_Extensor_mean_gamma"),
+
+                                           ('H2: Temporal Prediction PSD Increases with Music', 'PSD_eeg_FC_CP_T_theta'),
+                                           ('H3: Vigilance PSD Increases with Music', 'PSD_eeg_F_C_beta'),
+                                           ('H4: Internal vs. External Attention PSD changes with Music', 'PSD_eeg_P_PO_alpha'),
+                                           ('H5: Long Range Interactions PSD Increases with Music', 'PSD_eeg_Global_gamma'),
+                                           ('VALIDATION: EMG Flexor PSD Increases with Force', 'PSD_emg_1_flexor_Global_all'),
+                                           ('VALIDATION: EMG Extensor PSD Increases with Force', 'PSD_emg_2_extensor_Global_all'),]:
+        print("\n")
+        print("=" * 100)
+        print("=" * 100)
+        print(f"HYPOTHESIS:\t\t{hypothesis} ")
+        print(f"DEPENDENT VARIABLE:\t{dependent_variable}")
+        print("=" * 100)
+        print("=" * 100, "\n"*3)
+
+        print("\n")
+        print("-" * 100)
+        print(f"-------------------------     Comparison Level 1 (Music + Force Lvl + Trial ID)     --------------------------- ")
+        print("-" * 100, "\n")
+        
+        # OLS Model - Level 1
+        ols_level1_results = fit_linear_regression_model(
+            all_subject_data_frame,
+            response_var=dependent_variable,
+            condition_vars={'Music Listening': 'categorical',},
+            explanatory_vars=['Median Force Level [0-1]', 'Trial ID']
+        )
+        
+        # Store results
+        for _, row in ols_level1_results['results_df'].iterrows():
+            all_model_results.append({
+                'Hypothesis': hypothesis,
+                'Dependent_Variable': dependent_variable,
+                'Model_Type': 'OLS',
+                'Comparison_Level': 'Level 1 (Music + Force + Trial ID)',
+                'Parameter': row['Parameter'],
+                'Coefficient': row['Coefficient'],
+                'p_value': row['p-value (adjusted)'],
+                'SE': row['SE (adjusted)']
+            })
+        
+        # Mixed Effects Model - Level 1
+        lme_level1_results = fit_mixed_effects_model(
+            df=all_subject_data_frame,
+            response_var=dependent_variable,
+            condition_vars={'Music Listening': 'categorical'},
+            explanatory_vars=['Median Force Level [0-1]', 'Trial ID'],
+            grouping_var='Subject ID'
+        )
+        
+        # Store results
+        for _, row in lme_level1_results['results_df'].iterrows():
+            all_model_results.append({
+                'Hypothesis': hypothesis,
+                'Dependent_Variable': dependent_variable,
+                'Model_Type': 'LME',
+                'Comparison_Level': 'Level 1 (Music + Force + Trial ID)',
+                'Parameter': row['Parameter'],
+                'Coefficient': row['Coefficient'],
+                'p_value': row['p-value (adjusted)'],
+                'SE': row['SE (adjusted)']
+            })
+
+        print("\n"*3)
+        print("-" * 100)
+        print(f"-------------------------     Comparison Level 2 (Category + Familiarity + Liking + Force Lvl + Trial ID)     --------------------------- ")
+        print("-" * 100, "\n")
+        
+        # OLS Model - Level 2 (only music trials)
+        ols_level2_results = fit_linear_regression_model(
+            all_subject_data_frame.loc[all_subject_data_frame['Music Listening']],
+            response_var=dependent_variable,
+            condition_vars={'Perceived Category': 'categorical',
+                            'Familiarity [0-7]': 'ordinal'},
+            explanatory_vars=['Median Force Level [0-1]', 'Liking [0-7]', 'Trial ID']
+        )
+        
+        # Store results
+        for _, row in ols_level2_results['results_df'].iterrows():
+            all_model_results.append({
+                'Hypothesis': hypothesis,
+                'Dependent_Variable': dependent_variable,
+                'Model_Type': 'OLS',
+                'Comparison_Level': 'Level 2 (Subjective Music Features)',
+                'Parameter': row['Parameter'],
+                'Coefficient': row['Coefficient'],
+                'p_value': row['p-value (adjusted)'],
+                'SE': row['SE (adjusted)']
+            })
+
+        # Mixed Effects Model - Level 2
+        lme_level2_results = fit_mixed_effects_model(
+            df=all_subject_data_frame.loc[all_subject_data_frame['Music Listening']],
+            response_var=dependent_variable,
+            condition_vars={'Perceived Category': 'categorical',
+                            'Familiarity [0-7]': 'ordinal'},
+            explanatory_vars=['Median Force Level [0-1]', 'Liking [0-7]', 'Trial ID'],
+            grouping_var='Subject ID'
+        )
+
+        # Store results
+        for _, row in lme_level2_results['results_df'].iterrows():
+            all_model_results.append({
+                'Hypothesis': hypothesis,
+                'Dependent_Variable': dependent_variable,
+                'Model_Type': 'LME',
+                'Comparison_Level': 'Level 2 (Subjective Music Features)',
+                'Parameter': row['Parameter'],
+                'Coefficient': row['Coefficient'],
+                'p_value': row['p-value (adjusted)'],
+                'SE': row['SE (adjusted)']
+            })
+
+        """
+        print("\n" * 3)
+        print("-" * 100)
         print(
-            f"{param:<50s} {result1.fe_params[param]:>10.4f} {orig_se:>12.4f} {adj_se:>12.4f} {orig_p:>10.4f} {adj_p:>10.4f}")
+            f"-------------------------     Comparison Level 3 (Category + Familiarity + Liking + Force Lvl))     --------------------------- ")
+        print("-" * 100, "\n")
 
-    print("\n" + "=" * 80)
+        # OLS Model - Level 2 (only music trials)
+        ols_level2_results = fit_linear_regression_model(
+            all_subject_data_frame.loc[all_subject_data_frame['Music Listening']],
+            response_var=dependent_variable,
+            condition_vars={'Perceived Category': 'categorical',
+                            'Familiarity [0-7]': 'ordinal'},
+            explanatory_vars=['Median Force Level [0-1]', 'Liking [0-7]']
+        )
+
+        # Store results
+        for _, row in ols_level2_results['results_df'].iterrows():
+            all_model_results.append({
+                'Hypothesis': hypothesis,
+                'Dependent_Variable': dependent_variable,
+                'Model_Type': 'OLS',
+                'Comparison_Level': 'Level 2 (Subjective Music Features)',
+                'Parameter': row['Parameter'],
+                'Coefficient': row['Coefficient'],
+                'p_value': row['p-value (adjusted)'],
+                'SE': row['SE (adjusted)']
+            })
+
+        # Mixed Effects Model - Level 2
+        lme_level2_results = fit_mixed_effects_model(
+            df=all_subject_data_frame.loc[all_subject_data_frame['Music Listening']],
+            response_var=dependent_variable,
+            condition_vars={'Perceived Category': 'categorical',
+                            'Familiarity [0-7]': 'ordinal'},
+            explanatory_vars=['Median Force Level [0-1]', 'Liking [0-7]'],
+            grouping_var='Subject ID'
+        )
+
+        # Store results
+        for _, row in lme_level2_results['results_df'].iterrows():
+            all_model_results.append({
+                'Hypothesis': hypothesis,
+                'Dependent_Variable': dependent_variable,
+                'Model_Type': 'LME',
+                'Comparison_Level': 'Level 2 (Subjective Music Features)',
+                'Parameter': row['Parameter'],
+                'Coefficient': row['Coefficient'],
+                'p_value': row['p-value (adjusted)'],
+                'SE': row['SE (adjusted)']
+            })"""
+    
+    
+    # ============================================================================
+    # CREATE COMPREHENSIVE SUMMARY TABLES
+    # ============================================================================
+    
+    print("\n" * 3)
+    print("="*120)
+    print("="*120)
+    print("COMPREHENSIVE STATISTICAL SUMMARY")
+    print("="*120)
+    print("="*120)
+    
+    # Convert all results to DataFrame
+    results_df = pd.DataFrame(all_model_results)
+    
+    # ============================================================================
+    # TABLE 1: Music Listening Effect (All Hypotheses)
+    # ============================================================================
+    print("\n" + "="*120)
+    print("TABLE 1: MUSIC LISTENING EFFECT ACROSS ALL HYPOTHESES (Level 1 Models)")
+    print("="*120 + "\n")
+    
+    music_effects = results_df[
+        (results_df['Comparison_Level'] == 'Level 1 (Music + Force)') &
+        (results_df['Parameter'].str.contains('Music', case=False, na=False))
+    ].copy()
+    
+    # Create pivot table
+    music_summary = music_effects.pivot_table(
+        index=['Hypothesis', 'Dependent_Variable'],
+        columns='Model_Type',
+        values=['Coefficient', 'p_value'],
+        aggfunc='first'
+    )
+    
+    # Flatten column names
+    music_summary.columns = ['_'.join(col).strip() for col in music_summary.columns.values]
+    music_summary = music_summary.reset_index()
+    
+    # Add significance markers
+    if 'p_value_OLS' in music_summary.columns:
+        music_summary['Sig_OLS'] = music_summary['p_value_OLS'].apply(
+            lambda p: '***' if p < 0.001 else ('**' if p < 0.01 else ('*' if p < 0.05 else 'ns'))
+        )
+    if 'p_value_LME' in music_summary.columns:
+        music_summary['Sig_LME'] = music_summary['p_value_LME'].apply(
+            lambda p: '***' if p < 0.001 else ('**' if p < 0.01 else ('*' if p < 0.05 else 'ns'))
+        )
+    
+    print(music_summary.to_string(index=False))
+    
+    # Save to CSV
+    music_summary.to_csv(FEATURE_OUTPUT_DATA / "summary_music_effects.csv", index=False)
+    print(f"\n✓ Saved to: {FEATURE_OUTPUT_DATA / 'summary_music_effects.csv'}")
+    
+    # Also save a simplified version for quick reference
+    music_summary_simple = music_effects[['Hypothesis', 'Dependent_Variable', 'Model_Type', 'Coefficient', 'p_value']].copy()
+    music_summary_simple['Significance'] = music_summary_simple['p_value'].apply(
+        lambda p: '***' if p < 0.001 else ('**' if p < 0.01 else ('*' if p < 0.05 else 'ns'))
+    )
+    music_summary_simple.to_csv(FEATURE_OUTPUT_DATA / "summary_music_effects_simple.csv", index=False)
+    
+    
+    # ============================================================================
+    # TABLE 2: Force Level Effect (All Hypotheses, Both Levels)
+    # ============================================================================
+    print("\n" + "="*120)
+    print("TABLE 2: FORCE LEVEL EFFECT ACROSS ALL HYPOTHESES")
+    print("="*120 + "\n")
+    
+    force_effects = results_df[
+        results_df['Parameter'].str.contains('Force', case=False, na=False)
+    ].copy()
+    
+    # Create summary table
+    force_summary = force_effects.pivot_table(
+        index=['Hypothesis', 'Dependent_Variable', 'Comparison_Level'],
+        columns='Model_Type',
+        values=['Coefficient', 'p_value'],
+        aggfunc='first'
+    )
+    
+    force_summary.columns = ['_'.join(col).strip() for col in force_summary.columns.values]
+    force_summary = force_summary.reset_index()
+    
+    # Add significance markers
+    if 'p_value_OLS' in force_summary.columns:
+        force_summary['Sig_OLS'] = force_summary['p_value_OLS'].apply(
+            lambda p: '***' if p < 0.001 else ('**' if p < 0.01 else ('*' if p < 0.05 else 'ns'))
+        )
+    if 'p_value_LME' in force_summary.columns:
+        force_summary['Sig_LME'] = force_summary['p_value_LME'].apply(
+            lambda p: '***' if p < 0.001 else ('**' if p < 0.01 else ('*' if p < 0.05 else 'ns'))
+        )
+    
+    print(force_summary.to_string(index=False))
+    
+    # Save to CSV
+    force_summary.to_csv(FEATURE_OUTPUT_DATA / "summary_force_effects.csv", index=False)
+    print(f"\n✓ Saved to: {FEATURE_OUTPUT_DATA / 'summary_force_effects.csv'}")
+    
+    # Also save a simplified version
+    force_summary_simple = force_effects[['Hypothesis', 'Dependent_Variable', 'Model_Type', 'Comparison_Level', 'Coefficient', 'p_value']].copy()
+    force_summary_simple['Significance'] = force_summary_simple['p_value'].apply(
+        lambda p: '***' if p < 0.001 else ('**' if p < 0.01 else ('*' if p < 0.05 else 'ns'))
+    )
+    force_summary_simple.to_csv(FEATURE_OUTPUT_DATA / "summary_force_effects_simple.csv", index=False)
+    
+    
+    # ============================================================================
+    # TABLE 3: Music Features (Category, Familiarity, Liking) - Level 2 Only
+    # ============================================================================
+    print("\n" + "="*120)
+    print("TABLE 3: MUSIC FEATURE EFFECTS (Level 2 Models - Music Trials Only)")
+    print("="*120 + "\n")
+    
+    music_features = results_df[
+        (results_df['Comparison_Level'] == 'Level 2 (Music Features)') &
+        (~results_df['Parameter'].str.contains('Intercept', case=False, na=False)) &
+        (~results_df['Parameter'].str.contains('Force', case=False, na=False))
+    ].copy()
+    
+    # Group by hypothesis and parameter type
+    for hypothesis_name in music_features['Hypothesis'].unique():
+        print(f"\n{'-'*120}")
+        print(f"{hypothesis_name}")
+        print(f"{'-'*120}")
+        
+        hyp_data = music_features[music_features['Hypothesis'] == hypothesis_name]
+        
+        # Display each parameter
+        for param in hyp_data['Parameter'].unique():
+            param_data = hyp_data[hyp_data['Parameter'] == param]
+            
+            for _, row in param_data.iterrows():
+                sig = '***' if row['p_value'] < 0.001 else ('**' if row['p_value'] < 0.01 else ('*' if row['p_value'] < 0.05 else 'ns'))
+                print(f"  {row['Parameter']:<50s}  β={row['Coefficient']:>8.4f}  p={row['p_value']:>8.4f} {sig:>4s}")
+    
+    # Save detailed table
+    music_features_pivot = music_features.pivot_table(
+        index=['Hypothesis', 'Parameter'],
+        columns='Model_Type',
+        values=['Coefficient', 'p_value'],
+        aggfunc='first'
+    )
+    music_features_pivot.columns = ['_'.join(col).strip() for col in music_features_pivot.columns.values]
+    music_features_pivot = music_features_pivot.reset_index()
+    
+    music_features_pivot.to_csv(FEATURE_OUTPUT_DATA / "summary_music_features.csv", index=False)
+    print(f"\n✓ Saved to: {FEATURE_OUTPUT_DATA / 'summary_music_features.csv'}")
+    
+    
+    # ============================================================================
+    # TABLE 4: Master Summary - All Effects by Parameter Type
+    # ============================================================================
+    print("\n" + "="*120)
+    print("TABLE 4: COMPLETE RESULTS MASTER TABLE - ALL EFFECTS")
+    print("="*120 + "\n")
+    
+    # Save complete results
+    results_df_formatted = results_df.copy()
+    results_df_formatted['Significance'] = results_df_formatted['p_value'].apply(
+        lambda p: '***' if p < 0.001 else ('**' if p < 0.01 else ('*' if p < 0.05 else 'ns'))
+    )
+    
+    results_df_formatted.to_csv(FEATURE_OUTPUT_DATA / "summary_all_results_master.csv", index=False)
+    print(f"✓ Saved complete results to: {FEATURE_OUTPUT_DATA / 'summary_all_results_master.csv'}")
+    
+    # ============================================================================
+    # Display organized by parameter type
+    # ============================================================================
+    
+    # Group parameters by type
+    parameter_groups = {
+        'Intercept': results_df_formatted[results_df_formatted['Parameter'].str.contains('Intercept', case=False, na=False)],
+        'Music Listening': results_df_formatted[results_df_formatted['Parameter'].str.contains('Music Listening', case=False, na=False)],
+        'Perceived Category': results_df_formatted[results_df_formatted['Parameter'].str.contains('Perceived Category', case=False, na=False)],
+        'Familiarity': results_df_formatted[results_df_formatted['Parameter'].str.contains('Familiarity', case=False, na=False)],
+        'Liking': results_df_formatted[results_df_formatted['Parameter'].str.contains('Liking', case=False, na=False)],
+        'Force Level': results_df_formatted[results_df_formatted['Parameter'].str.contains('Force', case=False, na=False)],
+    }
+    
+    # Display each parameter group
+    for group_name, group_data in parameter_groups.items():
+        if len(group_data) > 0:
+            print(f"\n{'='*120}")
+            print(f"{group_name.upper()} - {len(group_data)} effects")
+            print(f"{'='*120}")
+            
+            # Create pivot table for this group
+            pivot = group_data.pivot_table(
+                index=['Hypothesis', 'Parameter'],
+                columns=['Model_Type', 'Comparison_Level'],
+                values=['Coefficient', 'p_value'],
+                aggfunc='first'
+            )
+            
+            # Display in readable format
+            for hypothesis in group_data['Hypothesis'].unique():
+                hyp_data = group_data[group_data['Hypothesis'] == hypothesis]
+                print(f"\n{hypothesis}")
+                print("-" * 120)
+                
+                for param in hyp_data['Parameter'].unique():
+                    param_data = hyp_data[hyp_data['Parameter'] == param]
+                    print(f"\n  {param}:")
+                    
+                    for _, row in param_data.iterrows():
+                        sig = row['Significance']
+                        print(f"    {row['Model_Type']:>5s} | {row['Comparison_Level']:<30s} | β={row['Coefficient']:>8.4f} | SE={row['SE']:>8.4f} | p={row['p_value']:>8.4f} {sig:>4s}")
+    
+    # ============================================================================
+    # Summary statistics
+    # ============================================================================
+    print(f"\n\n{'='*120}")
+    print("SUMMARY STATISTICS")
+    print(f"{'='*120}\n")
+    
+    total_effects = len(results_df_formatted)
+    sig_001 = len(results_df_formatted[results_df_formatted['p_value'] < 0.001])
+    sig_01 = len(results_df_formatted[results_df_formatted['p_value'] < 0.01])
+    sig_05 = len(results_df_formatted[results_df_formatted['p_value'] < 0.05])
+    
+    print(f"Total effects tested:              {total_effects}")
+    print(f"Significant at p < 0.001 (***):    {sig_001} ({sig_001/total_effects*100:.1f}%)")
+    print(f"Significant at p < 0.01 (**):      {sig_01} ({sig_01/total_effects*100:.1f}%)")
+    print(f"Significant at p < 0.05 (*):       {sig_05} ({sig_05/total_effects*100:.1f}%)")
+    print(f"Non-significant (ns):              {total_effects - sig_05} ({(total_effects-sig_05)/total_effects*100:.1f}%)")
+    
+    # Breakdown by model type
+    print(f"\n{'Breakdown by Model Type:':-<60}")
+    for model_type in results_df_formatted['Model_Type'].unique():
+        model_data = results_df_formatted[results_df_formatted['Model_Type'] == model_type]
+        model_sig = len(model_data[model_data['p_value'] < 0.05])
+        print(f"  {model_type:>5s}: {len(model_data)} effects, {model_sig} significant ({model_sig/len(model_data)*100:.1f}%)")
+    
+    # Breakdown by comparison level
+    print(f"\n{'Breakdown by Comparison Level:':-<60}")
+    for level in results_df_formatted['Comparison_Level'].unique():
+        level_data = results_df_formatted[results_df_formatted['Comparison_Level'] == level]
+        level_sig = len(level_data[level_data['p_value'] < 0.05])
+        print(f"  {level}: {len(level_data)} effects, {level_sig} significant ({level_sig/len(level_data)*100:.1f}%)")
+    
+    # List all significant effects
+    significant_results = results_df_formatted[results_df_formatted['p_value'] < 0.05]
+    if len(significant_results) > 0:
+        print(f"\n\n{'='*120}")
+        print(f"ALL SIGNIFICANT EFFECTS (p < 0.05): {len(significant_results)} effects")
+        print(f"{'='*120}\n")
+        
+        # Sort by p-value
+        significant_results_sorted = significant_results.sort_values('p_value')
+        
+        for _, row in significant_results_sorted.iterrows():
+            print(f"{row['Parameter']:<45s} | {row['Model_Type']:<5s} | {row['Hypothesis'][:55]:<55s} | β={row['Coefficient']:>7.4f} | p={row['p_value']:>7.4f} {row['Significance']:>4s}")
+    else:
+        print("\n\nNo significant effects found at p < 0.05")
+    
+    print("\n" + "="*120)
+    print("SUMMARY TABLES COMPLETE")
+    print("="*120 + "\n")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### MODALITY-DEPENDENT PSD AGGREGATION
+"""if 'emg' in psd_modality:
+    # 1) MVC Normalization per Channel if not log-scaled!
+    if not psd_is_log_scaled:
+        mvc = np.max(np.max(psd_spectrograms, axis=0, keepdims=True), axis=1, keepdims=True)  # maximum over time and frequencies
+        psd_spectrograms = psd_spectrograms / mvc * 100  # * 100 for [%]
+
+    # 2) Average over a: all frequencies (broad band) OR b: frequency bands
+    freq_band_spec_dict: dict[str, np.ndarray] = features.aggregate_spectrogram_over_frequency_band(
+        psd_spectrograms, psd_freqs, 'mean',
+        frequency_bands={'slow': (0, 40), 'fast': (60, 250)},  # slow and fast twitching, deliberately omitting overlap zone (40-60)
+    )  # value shape: (n_times, n_channels)
+
+    # 3) Average over time (per trial)
+    freq_band_psd_per_segment_dict: dict[str, np.ndarray] = {}
+    for band, psd_arr in freq_band_spec_dict.items():
+        # compute psd per segment:
+        psd_per_segment = data_analysis.apply_window_operator(
+            window_timestamps=seg_starts,
+            window_timestamps_ends=seg_ends,
+
+            target_array=psd_arr,
+            target_timestamps=psd_timestamps,
+
+            operation='mean',
+            axis=0,  # time axis
+        )  # (n_trials, n_channels)
+
+        # 4) Max-Pool over Channels
+        psd_per_segment = np.nanmax(psd_per_segment, axis=1)
+
+        # 5) Save:
+        freq_band_psd_per_segment_dict[band] = psd_per_segment
+
+
+elif 'eeg' in psd_modality:
+    # 1) Average over Region-of-Interest (RoI)
+    eeg_channel_subset_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in eeg_channel_subset]
+    psd_subset = psd_spectrograms[:, :, eeg_channel_subset_inds]
+    psd_roi_avg = np.nanmean(psd_subset, axis=2)
+    # shape: (n_times, n_frequencies)
+
+    # 2) Average over Frequency Bands
+    freq_band_spec_dict: dict[str, np.ndarray] = features.aggregate_spectrogram_over_frequency_band(
+        psd_roi_avg, psd_freqs, 'mean', frequency_axis=1,
+    )  # value shape: (n_times)
+
+    # 3) Average over time (per trial)
+    freq_band_psd_per_segment_dict: dict[str, np.ndarray] = {}
+    for band, psd_arr in freq_band_spec_dict.items():
+        # compute psd per segment:
+        psd_per_segment = data_analysis.apply_window_operator(
+            window_timestamps=seg_starts,
+            window_timestamps_ends=seg_ends,
+
+            target_array=psd_arr,
+            target_timestamps=psd_timestamps,
+
+            operation='mean',
+            axis=0,  # time axis
+        )  # (n_trials)
+        freq_band_psd_per_segment_dict[band] = psd_per_segment
+
+
+"""
