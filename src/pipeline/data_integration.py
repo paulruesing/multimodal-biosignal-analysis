@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import src.utils.file_management as filemgmt
+from src.pipeline.data_analysis import make_timezone_aware
 
 
 ############################## LOG FRAME HANDLING ##############################
@@ -525,6 +526,7 @@ def get_song_start_end(df: pd.DataFrame,
     return times.min(), times.max()
 
 
+# todo: consider trial exclusion bool!
 def get_task_start_end(df: pd.DataFrame,
                        song_id: int | None = None, song_title: str | None = None,
                        trial_id: int | None = None,
@@ -548,17 +550,28 @@ def get_task_start_end(df: pd.DataFrame,
             if len(unique_song_ids) > 1:  # if matching song title has more than one ID
                 raise ValueError(f"Song title appeared multiple times with Song IDs: {unique_song_ids.tolist()}\nChoose one and call this method with song_id!")
 
+        # check for trial exclusion or skipping:
         if (subset_df['Song Skipped']).any():
             print(f"[INFO] Song {int(song_id)} got skipped, no corresponding task was executed.")
+        if subset_df['Trial Exclusion Bool'].any():
+            print(f"[INFO] Song {int(song_id)} marked for exclusion!")
 
         # reduce to task time (where Task Frequency is not na):
         subset_df = subset_df.loc[~subset_df['Task Frequency'].isna()]
 
     else:
         subset_df = df.loc[df['Silence ID'] == silence_id]
+        # check for trial exclusion:
+        if subset_df['Trial Exclusion Bool'].any():
+            print(f"[INFO] Silence trial {int(silence_id)} marked for exclusion!")
 
+
+    # raise value errors for task omission (skipped or excluded)
     if len(subset_df) == 0:
         raise ValueError("Specific task not found!")
+    if subset_df['Trial Exclusion Bool'].any():
+        raise ValueError("Trial marked for exclusion!")
+
 
     # retrieve timestamps:
     if isinstance(subset_df.index, pd.DatetimeIndex):
@@ -571,6 +584,7 @@ def get_task_start_end(df: pd.DataFrame,
     return times.min(), times.max()
 
 
+# todo: consider Trial Exclusion Bool
 def get_all_task_start_ends(enriched_log_df: pd.DataFrame,
                             output_type: Literal['dict', 'list'] = 'dict',
                             ) -> dict[int, tuple[pd.Timestamp, pd.Timestamp]] | list[tuple[pd.Timestamp, pd.Timestamp]]:
@@ -581,6 +595,8 @@ def get_all_task_start_ends(enriched_log_df: pd.DataFrame,
         if pd.isna(trial): continue
         try:
             start, end = get_task_start_end(enriched_log_df, trial_id=trial)
+            start = make_timezone_aware(start)
+            end = make_timezone_aware(end)
         except ValueError:
             continue
 
@@ -819,7 +835,7 @@ def validate_song_indices(df: pd.DataFrame,
             print(report['duplicate_entries'], "\n")
         if len(report['missing_metadata']) > 0:
             print(
-                f"[WARNING] Couldn't find matching directories for {len(report['missing_metadata'])} songs:")
+                f"[WARNING] Couldn't find metadata (directories) for {len(report['missing_metadata'])} songs:")
             print(report['missing_metadata'], "\n")
         if len(report['mismatches']) > 0:
             print(
@@ -1460,6 +1476,24 @@ def fetch_skipped_trials(enriched_log_df: pd.DataFrame) -> list[int]:
     return skipped_trials
 
 
+def fetch_enriched_serial_frame(experiment_data_dir: str | Path, set_time_index: bool = True,
+                                #verbose: bool = True,
+                                ) -> pd.DataFrame:
+    serial_dir = experiment_data_dir / "serial_measurements"
+
+    try:
+        serial_path = filemgmt.most_recent_file(serial_dir, ".csv", ["Enriched Serial Frame"])
+        serial_frame = pd.read_csv(serial_path)
+        if set_time_index:
+            serial_frame['Time'] = pd.to_datetime(serial_frame['Time'], format='ISO8601')
+            serial_frame = serial_frame.set_index("Time")
+    except ValueError:
+        raise ValueError(
+            f"Couldn't find enriched (integrated) serial frame with signature 'Enriched Serial Frame' in file title within {serial_dir}...\nPlease ensure to run feature_extraction_workflow.py on subject data beforehand.")
+
+    return serial_frame
+
+
 def fetch_enriched_log_frame(experiment_data_dir: str | Path, set_time_index: bool = True,
                              verbose: bool = True) -> pd.DataFrame:
     log_dir = experiment_data_dir / "experiment_logs"
@@ -1508,3 +1542,41 @@ def fetch_enriched_log_frame(experiment_data_dir: str | Path, set_time_index: bo
 
 
     return log_frame
+
+
+def fetch_music_features(log_df: pd.DataFrame, music_lookup_table_path: str | Path | None = None,
+                         song_id: int | None = None, trial_id: int | None = None,
+                         features_to_return: tuple[str, ...] = ('BPM_manual', 'Spectral Flux Mean',
+                                                          'Spectral Centroid Mean', 'IOI Variance Coeff',
+                                                           'Syncopation Ratio'),
+                         ) -> list[float]:
+    if music_lookup_table_path is None:  # use hardcoded definition if not provided
+        music_lookup_dir = Path().resolve().parent / "data" / "song_characteristics"
+        music_lookup_table_path = filemgmt.most_recent_file(music_lookup_dir, ".csv", ["Lookup Table"])
+
+    # read lookup frame:
+    lookup_frame = pd.read_csv(music_lookup_table_path)
+
+    # fetch song id:
+    if song_id is None and trial_id is None: raise ValueError("Must provide either song or trial ID")
+    elif song_id is None:
+        song_id, silence_id = turn_trial_id_into_song_or_silence_id(log_df, trial_id)
+    # if Song ID is None still, it's no music trial -> return nans
+    if song_id is None: return [np.nan] * len(features_to_return)
+
+    # fetch song data: (Song Title and Song Artist)
+    subset_log_df = log_df.loc[log_df['Song ID'] == song_id, ['Song Title', 'Song Artist']]
+    if len(subset_log_df) == 0: raise ValueError(f"Couldn't find song_id {song_id} in log_frame table...")
+    title = subset_log_df['Song Title'].iloc[0]
+    artist = subset_log_df['Song Artist'].iloc[0]
+
+    # fetch features from lookup table:
+    song_row = lookup_frame.loc[(lookup_frame['Artist'] == artist) & (lookup_frame['Title'] == title), :]
+    if len(song_row) == 0: raise ValueError(f"Song {title} not found in lookup table")
+    elif len(song_row) > 1: raise ValueError(f"Song {title} found multiple times in lookup table. Needs to be unique.")
+
+    # read out and return
+    output_list = []
+    for feature in features_to_return:
+        output_list.append(song_row[feature].item())
+    return output_list
