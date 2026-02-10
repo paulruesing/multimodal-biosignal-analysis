@@ -7,7 +7,7 @@ if __name__ == '__main__':
     QTC_DATA = ROOT / 'data' / 'qtc_data'
     OTB_FILES = QTC_DATA / "otb-files"
 
-    subject_ind = 5
+    subject_ind = 7
 
     for i, title in tqdm(enumerate(
             [f"sub_{subject_ind:02}_eeg", f"sub_{subject_ind:02}_emg_1_flexor", f"sub_{subject_ind:02}_emg_2_extensor"]),
