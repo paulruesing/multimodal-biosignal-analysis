@@ -26,7 +26,7 @@ if __name__=="__main__":
     EXPERIMENT_DATA = ROOT / "data" / "experiment_results"
 
     ### WORKFLOW CONTROL
-    subject_ind = 5
+    subject_ind = 7
     save_result: bool = True  # only set to True if manual adjustments finalized
 
     # experiment results import behaviour:
@@ -173,6 +173,62 @@ if __name__=="__main__":
                                                              "Flawed Dynamometer Measurement and Corresponding Talking",
                                                              True, trial_id=11)
 
+        enriched_log_frame.loc[pd.Timestamp("2026-01-27 16:54:00"):, 'Phase'] = 'Idle State'
+
+
+    elif subject_ind == 6:
+        # log_frame = data_integration.remove_single_row_by_timestamp(log_frame, "2026-01-27 16:22:35.172122")
+
+        log_frame = data_integration.remove_song_entries(
+            enriched_log_frame, log_frame,
+            song_title_artist_id_tuples=[
+                # spotify sometimes skips to the next song, I however catched all occurences and remove them below:
+                ("Merry-Go-Round of Life - from 'Howl's Moving Castle'", "Joe Hisaishi", 0),  # jumped somehow...
+                ("Mas Que Nada", "Sérgio Mendes", 11),
+                #("Lamento (No Morro)", "Sérgio Mendes", 12),
+                ("Can't Get Enough! - Vocal Club Mix", "Soulsearcher", 14),
+                #("Can't Get Enough (Robbie's Filtered Monster Anthem Mix)", "Soulsearcher", 15),
+                ("Something Got Me Started - 2008 Remaster", "Simply Red", 17),
+                #("Thrill Me - Live in Hamburg, 1992", "Simply Red", 18),
+                ("I Was Made For Lovin' You", "KISS", 20),
+                ("Waiting For Godard - Full Mix", "Marco Andrea Pes", 25),
+            ])
+
+        enriched_log_frame = data_integration.prepare_log_frame(log_frame, )
+
+        # some dynamometer freezes and corresponding talking:
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=18)
+
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=28)
+
+        # idle state:
+        enriched_log_frame.loc[pd.Timestamp("2026-01-28 19:35:10"):, 'Phase'] = 'Idle State'
+
+
+    elif subject_ind == 7:
+
+        # song start wasn't immediately registered for
+        log_frame = data_integration.remove_single_row_by_timestamp(log_frame, "2026-02-08 15:10:33.846501")
+        log_frame = data_integration.remove_single_row_by_timestamp(log_frame, "2026-02-08 15:19:42.174379")
+
+        enriched_log_frame = data_integration.prepare_log_frame(log_frame, )
+
+        # mark some trials: (dynamometer jumped somehow)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=10)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=15)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=17)
+
+        enriched_log_frame.loc[pd.Timestamp("2026-02-08 15:50:00"):, 'Phase'] = 'Idle State'
 
 
 
@@ -191,7 +247,7 @@ if __name__=="__main__":
     questionnaire_data_consistency_report = data_integration.validate_trial_questionnaires(enriched_log_frame,
                                                                                         subject_experiment_data,
                                                                                         verbose=True)
-    data_integration.repair_trial_questionnaire_mismatches(enriched_log_frame, questionnaire_data_consistency_report)
+    enriched_log_frame = data_integration.repair_trial_questionnaire_mismatches(enriched_log_frame, questionnaire_data_consistency_report)
 
 
 
