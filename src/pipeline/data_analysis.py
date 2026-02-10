@@ -486,15 +486,15 @@ def interpolate_per_window(
 def add_time_index(
         start_timestamp: pd.Timestamp,
         end_timestamp: pd.Timestamp,
-        target_array: Union[pd.Series, np.ndarray, None] = None,
+        target_array: Union[pd.Series, pd.DataFrame, np.ndarray, None] = None,
         n_timesteps: Union[int, None] = None,
-) -> Union[pd.Series, pd.DatetimeIndex]:
+) -> Union[pd.Series, pd.DataFrame, pd.DatetimeIndex]:
     """
-    Add a time index to an array assuming constant sampling rate.
+    Add a time index to an array or DataFrame assuming constant sampling rate.
 
     Creates a DatetimeIndex spanning from start_timestamp to end_timestamp with
-    evenly-spaced periods. If data is provided, returns a Series indexed by the
-    timestamps. If no data is provided, returns just the DatetimeIndex.
+    evenly-spaced periods. If data is provided, returns a Series or DataFrame
+    indexed by the timestamps. If no data is provided, returns just the DatetimeIndex.
 
     Parameters
     ----------
@@ -504,29 +504,31 @@ def add_time_index(
     end_timestamp : pd.Timestamp
         End time of the time series. Must be timezone-aware if start_timestamp is
         timezone-aware, or both must be timezone-naive.
-    target_array : pd.Series | np.ndarray, optional
-        Data array to which time index will be added. If provided, n_timesteps is
-        ignored and the length of target_array determines the number of timesteps.
-        Only 1-D arrays are supported. If None, n_timesteps must be provided.
+    target_array : pd.Series | pd.DataFrame | np.ndarray, optional
+        Data array or DataFrame to which time index will be added. If provided,
+        n_timesteps is ignored and the length of target_array determines the number
+        of timesteps. For arrays, only 1-D arrays are supported. For DataFrames,
+        the number of rows determines n_timesteps. If None, n_timesteps must be provided.
     n_timesteps : int, optional
         Number of time steps for which to create timestamps. Only used if
         target_array is None. Must be a positive integer.
 
     Returns
     -------
-    pd.Series or pd.DatetimeIndex
-        - If target_array is provided: pd.Series with data indexed by DatetimeIndex
+    pd.Series | pd.DataFrame | pd.DatetimeIndex
+        - If target_array is a Series or ndarray: pd.Series with data indexed by DatetimeIndex
+        - If target_array is a DataFrame: pd.DataFrame with same columns indexed by DatetimeIndex
         - If target_array is None: pd.DatetimeIndex containing timestamps only
 
-        The returned DatetimeIndex (or Series.index) is timezone-aware if input
-        timestamps are timezone-aware, timezone-naive otherwise.
+        The returned DatetimeIndex (or Series.index/DataFrame.index) is timezone-aware
+        if input timestamps are timezone-aware, timezone-naive otherwise.
 
     Raises
     ------
     TypeError
         If start_timestamp or end_timestamp is not a pd.Timestamp.
         If n_timesteps is not an integer when provided.
-        If target_array is not 1-D or of unsupported type.
+        If target_array is not 1-D (for arrays) or of unsupported type.
     ValueError
         If start_timestamp >= end_timestamp.
         If target_array is empty.
@@ -542,6 +544,7 @@ def add_time_index(
     - If target_array is provided, n_timesteps is ignored without warning.
     - This function assumes constant sampling rate; the time intervals between
       consecutive samples are approximately equal.
+    - For DataFrames, all columns and dtypes are preserved; only the index is replaced.
 
     Examples
     --------
@@ -558,6 +561,18 @@ def add_time_index(
     2024-01-01 03:00:00    13.0
     2024-01-01 04:00:00    14.5
     dtype: float64
+
+    Create a DataFrame with time index:
+
+    >>> df = pd.DataFrame({'temp': [20, 21, 22], 'humidity': [45, 50, 48]})
+    >>> start = pd.Timestamp("2024-01-01 00:00:00")
+    >>> end = pd.Timestamp("2024-01-01 02:00:00")
+    >>> df_indexed = add_time_index(start, end, target_array=df)
+    >>> df_indexed
+                         temp  humidity
+    2024-01-01 00:00:00    20        45
+    2024-01-01 01:00:00    21        50
+    2024-01-01 02:00:00    22        48
 
     Create a DatetimeIndex without data:
 
@@ -603,30 +618,54 @@ def add_time_index(
     # ARRAY AND TIMESTEP PROCESSING
     # ============================================================================
 
-    # Determine n_timesteps based on target_array or explicit n_timesteps parameter
+    # Determine n_timesteps and prepare data based on input type
     if target_array is not None:
-        # Extract numpy array from Series if needed and validate type
-        if isinstance(target_array, pd.Series):
+        # Handle DataFrame input
+        if isinstance(target_array, pd.DataFrame):
+            # Validate DataFrame is not empty
+            if len(target_array) == 0:
+                raise ValueError("target_array DataFrame cannot be empty")
+
+            # Use number of rows to determine timesteps
+            n_timesteps = len(target_array)
+            array_data = target_array
+            data_type = 'dataframe'
+
+        # Handle Series input
+        elif isinstance(target_array, pd.Series):
             array_data = target_array.to_numpy()
+            data_type = 'series'
+
+            # Validate Series is not empty
+            if len(array_data) == 0:
+                raise ValueError("target_array Series cannot be empty")
+
+            # Use Series length to determine timesteps
+            n_timesteps = len(array_data)
+
+        # Handle numpy array input
         elif isinstance(target_array, np.ndarray):
             array_data = target_array
+            data_type = 'array'
+
+            # Validate array is 1-D (prevents silent loss of multi-dimensional data)
+            if array_data.ndim != 1:
+                raise ValueError(
+                    f"target_array must be 1-dimensional, got shape {array_data.shape}"
+                )
+
+            # Validate array is not empty
+            if len(array_data) == 0:
+                raise ValueError("target_array array cannot be empty")
+
+            # Use array length to determine number of timesteps
+            n_timesteps = len(array_data)
+
         else:
             raise TypeError(
-                f"target_array must be pd.Series or np.ndarray, got {type(target_array)}"
+                f"target_array must be pd.Series, pd.DataFrame, or np.ndarray, "
+                f"got {type(target_array)}"
             )
-
-        # Validate array is 1-D (prevents silent loss of multi-dimensional data)
-        if array_data.ndim != 1:
-            raise ValueError(
-                f"target_array must be 1-dimensional, got shape {array_data.shape}"
-            )
-
-        # Validate array is not empty
-        if len(array_data) == 0:
-            raise ValueError("target_array cannot be empty")
-
-        # Use array length to determine number of timesteps
-        n_timesteps = len(array_data)
 
     else:
         # target_array is None, so n_timesteps must be provided
@@ -649,28 +688,33 @@ def add_time_index(
                 f"n_timesteps must be a positive integer, got {n_timesteps}"
             )
 
-        # Initialize array_data as None since no data was provided
+        # Initialize variables since no data was provided
         array_data = None
+        data_type = None
 
     # ============================================================================
     # TIME INDEX CREATION AND RETURN
     # ============================================================================
 
     # Create evenly-spaced time index based on number of timesteps
-    # Note: pd.date_range with periods parameter distributes points evenly
-    # across the time span, so actual intervals may not be perfectly equal
     time_index = pd.date_range(
         start=start_timestamp,
         end=end_timestamp,
         periods=n_timesteps,
     )
 
-    # Return type depends on whether data was provided
+    # Return appropriate type based on input data type
     if array_data is not None:
-        # Return Series when data is provided: data indexed by timestamps
-        return pd.Series(array_data, index=time_index)
+        if data_type == 'dataframe':
+            # Return DataFrame with new DatetimeIndex while preserving columns
+            result = array_data.copy()
+            result.index = time_index
+            return result
+        else:
+            # Return Series for both array and series inputs
+            return pd.Series(array_data, index=time_index)
     else:
-        # Return DatetimeIndex when no data provided: just the timestamps
+        # Return DatetimeIndex when no data provided
         return time_index
 
 
@@ -771,9 +815,9 @@ def make_timezone_aware(
             return dt_index
         else:
             # Naive Series: localize index to specified timezone
-            return dt_index.copy()._set_axis(
-                dt_index.index.tz_localize(timezone)
-            )
+            result = dt_index.copy()
+            result.index = result.index.tz_localize(timezone)
+            return result
 
     # Handle Timestamp
     elif isinstance(dt_index, pd.Timestamp):
