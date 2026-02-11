@@ -526,7 +526,6 @@ def get_song_start_end(df: pd.DataFrame,
     return times.min(), times.max()
 
 
-# todo: consider trial exclusion bool!
 def get_task_start_end(df: pd.DataFrame,
                        song_id: int | None = None, song_title: str | None = None,
                        trial_id: int | None = None,
@@ -584,7 +583,6 @@ def get_task_start_end(df: pd.DataFrame,
     return times.min(), times.max()
 
 
-# todo: consider Trial Exclusion Bool
 def get_all_task_start_ends(enriched_log_df: pd.DataFrame,
                             output_type: Literal['dict', 'list'] = 'dict',
                             ) -> dict[int, tuple[pd.Timestamp, pd.Timestamp]] | list[tuple[pd.Timestamp, pd.Timestamp]]:
@@ -639,6 +637,12 @@ def get_qtc_measurement_start_end(df: pd.DataFrame, verbose: bool = True) -> tup
         qtc_start = actual_qtc_start
     except ValueError:
         pass
+
+    # make timezone-aware:
+    if qtc_start.tz is None:
+        qtc_start = qtc_start.tz_localize('UTC')
+    if qtc_end.tz is None:
+        qtc_end = qtc_end.tz_localize('UTC')
 
     if verbose: print(f"EEG and EMG measurements last from {qtc_start} to {qtc_end}!\n")
 
