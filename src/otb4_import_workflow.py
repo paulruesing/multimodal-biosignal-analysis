@@ -9,8 +9,15 @@ if __name__ == '__main__':
 
     subject_ind = 7
 
+    # subject 0 has EXTENSOR at MULTI-IN 1 and FLEXOR at MULTI-IN 2 (-> swap order)
+    # the others are consistent EEG - FLEXOR - EXTENSOR
+    if subject_ind != 0:
+        channel_list = [f"sub_{subject_ind:02}_eeg", f"sub_{subject_ind:02}_emg_1_flexor", f"sub_{subject_ind:02}_emg_2_extensor"]
+    else:
+        channel_list = [f"sub_{subject_ind:02}_eeg", f"sub_{subject_ind:02}_emg_2_extensor", f"sub_{subject_ind:02}_emg_1_flexor"]
+
     for i, title in tqdm(enumerate(
-            [f"sub_{subject_ind:02}_eeg", f"sub_{subject_ind:02}_emg_1_flexor", f"sub_{subject_ind:02}_emg_2_extensor"]),
+            channel_list),
                          desc="Channel Subset Export"):
         try:
             result = import_otb4_to_csv(
