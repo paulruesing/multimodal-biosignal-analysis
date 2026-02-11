@@ -16,6 +16,7 @@ import matplotlib.animation as animation
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import multiprocessing
 import os
+import textwrap
 from scipy.stats import gaussian_kde
 import math
 
@@ -1693,6 +1694,257 @@ def _plot_line_with_ci(
     # Plot CI shading if both bounds provided
     if lower_ci is not None and upper_ci is not None:
         ax.fill_between(time, lower_ci, upper_ci, alpha=ci_alpha, color=color)
+
+
+def draw_forest_plot(ax, effects_frame: pd.DataFrame,
+                     hypothesis_column: str = 'Hypothesis',
+                     param_column: str = 'Parameter',
+                     comparison_lvl_column: str = 'Comparison_Level',
+                     model_type_column: str = 'Model_Type',
+                     coeff_column: str = 'Coefficient',
+                     se_column: str = 'SE',
+                     p_column: str = 'p_value',
+                     CI_z_score: float = 1.96,  # 90%: 1.645, 95%: 1.96, 99%: 2.576
+                     significant_pos_color: str = 'green',
+                     significant_neg_color: str = 'red',
+                     insignificant_color: str = '#AAAAAA',
+                     include_y_labels: bool = True,
+                     title_max_width: int = 40,
+                     show_significance_legend: bool = False,
+                     ):
+    """
+    Creates a beautiful forest plot for statistical effects.
+
+    Takes a subset of the overall results frame with only one hypothesis!
+
+    Parameters:
+    -----------
+    include_y_labels : bool
+        If True, shows y-axis labels (use for first column).
+        If False, hides y-axis labels but keeps ticks (use for subsequent columns).
+    title_max_width : int
+        Maximum character width for title before wrapping (default: 40)
+    show_significance_legend : bool
+        If True, shows significance legend (default: False)
+    significant_pos_color : str
+        Color for significant positive effects (default: 'green')
+    significant_neg_color : str
+        Color for significant negative effects (default: 'red')
+    insignificant_color : str
+        Color for non-significant effects (default: '#AAAAAA')
+    """
+
+    assert len(effects_frame[hypothesis_column].unique()) == 1, \
+        "Please provide a subset of the results frame with only one hypothesis!"
+
+    # Make a copy to avoid modifying original
+    df = effects_frame.copy().reset_index(drop=True)
+
+    # Create enumerated comparison level mapping
+    unique_levels = sorted(df[comparison_lvl_column].unique())
+    level_mapping = {level: f'lvl{i}' for i, level in enumerate(unique_levels)}
+    df['comparison_lvl_enum'] = df[comparison_lvl_column].map(level_mapping)
+
+    # Extract numeric level for sorting
+    df['level_num'] = df['comparison_lvl_enum'].str.extract(r'(\d+)').astype(int)
+
+    # Sort by parameter name, then by level number, then by model type
+    df = df.sort_values(by=[param_column, 'level_num', model_type_column]).reset_index(drop=True)
+
+    # Create y-axis labels combining parameter, enumerated level, and model type
+    df['y_label'] = (df[param_column].astype(str) + ' | ' +
+                     df['comparison_lvl_enum'].astype(str) + ' | ' +
+                     df[model_type_column].astype(str))
+
+    # Calculate confidence intervals
+    df['ci_lower'] = df[coeff_column] - (CI_z_score * df[se_column])
+    df['ci_upper'] = df[coeff_column] + (CI_z_score * df[se_column])
+
+    # Determine significance levels and create labels
+    def get_significance(p):
+        if p < 0.001:
+            return '***'
+        elif p < 0.01:
+            return '**'
+        elif p < 0.05:
+            return '*'
+        else:
+            return ''  # Empty string for non-significant
+
+    df['sig_label'] = df[p_column].apply(get_significance)
+    df['is_significant'] = df[p_column] < 0.05
+
+    # Assign colors based on significance AND effect direction
+    def assign_color(row):
+        if row['is_significant']:
+            if row[coeff_column] > 0:
+                return significant_pos_color
+            else:
+                return significant_neg_color
+        else:
+            return insignificant_color
+
+    df['color'] = df.apply(assign_color, axis=1)
+
+    # Assign y-positions with spacing between parameter groups
+    y_position = 0
+    separator_positions = []
+    current_param = None
+
+    for idx, row in df.iterrows():
+        if current_param is not None and row[param_column] != current_param:
+            # Add separator position BEFORE incrementing y_position
+            separator_positions.append(y_position)
+            # Add spacing between parameter groups
+            y_position += 1
+
+        df.at[idx, 'y_pos'] = y_position
+        current_param = row[param_column]
+        y_position += 1
+
+    # Reverse y-positions so first row is at top
+    max_y = df['y_pos'].max()
+    df['y_pos'] = max_y - df['y_pos']
+    separator_positions = [max_y - pos for pos in separator_positions]
+
+    # Plot confidence interval lines (whiskers)
+    for idx, row in df.iterrows():
+        ax.plot([row['ci_lower'], row['ci_upper']],
+                [row['y_pos'], row['y_pos']],
+                color=row['color'],
+                linewidth=2,
+                alpha=0.8,
+                zorder=1)
+
+    # Plot coefficient points
+    ax.scatter(df[coeff_column], df['y_pos'],
+               c=df['color'],
+               s=100,
+               zorder=2,
+               edgecolors='white',
+               linewidths=1.5,
+               alpha=0.9)
+
+    # Add vertical reference line at zero (null effect / H0)
+    ax.axvline(x=0.0, color='black', linestyle='--', linewidth=1.5,
+               alpha=0.6, zorder=0, label='H₀ (no effect)')
+
+    # Add horizontal separator lines between parameter groups
+    x_min = df['ci_lower'].min()
+    x_max = df['ci_upper'].max()
+    x_range = x_max - x_min
+
+    # Draw separator lines exactly at the empty row positions
+    for sep_pos in separator_positions:
+        ax.axhline(y=sep_pos, color='lightgray', linestyle='--',
+                   linewidth=1, alpha=0.5, zorder=0)
+
+    # Add significance labels on the right
+    text_x = x_max + 0.05 * x_range
+
+    for idx, row in df.iterrows():
+        if row['sig_label']:  # Only show if not empty
+            ax.text(text_x, row['y_pos'], row['sig_label'],
+                    va='center', ha='left', fontsize=10,
+                    fontweight='bold',
+                    color=row['color'])
+
+    # Set y-axis
+    y_positions = df['y_pos'].values
+    ax.set_yticks(y_positions)
+
+    if include_y_labels:
+        # All y-tick labels in black
+        ax.set_yticklabels(df['y_label'], fontsize=9)
+    else:
+        # Hide labels but keep ticks visible
+        ax.set_yticklabels([])
+
+    ax.set_ylim(-0.5, max_y + 0.5)
+
+    # Set x-axis
+    ax.set_xlabel('Effect Size (β coefficient)', fontsize=11, fontweight='bold')
+    ax.tick_params(axis='x', labelsize=10)
+
+    # Add grid for readability
+    ax.grid(axis='x', alpha=0.3, linestyle=':', linewidth=0.8)
+    ax.set_axisbelow(True)
+
+    # Set title from hypothesis with text wrapping
+    hypothesis_name = df[hypothesis_column].iloc[0]
+    wrapped_title = '\n'.join(textwrap.wrap(hypothesis_name, width=title_max_width))
+    ax.set_title(wrapped_title, fontsize=9, fontweight='bold', pad=10)
+
+    # Add a subtle spine styling - always show left spine and ticks
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(1.2)
+    ax.spines['left'].set_visible(True)  # Always visible
+    ax.spines['bottom'].set_linewidth(1.2)
+
+    # Adjust x-limits to accommodate significance labels
+    x_margin = x_range * 0.15
+    ax.set_xlim(x_min - x_margin, text_x + x_margin)
+
+    # Add optional legend for significance markers
+    if show_significance_legend and include_y_labels:
+        sig_text = "* p<0.05  ** p<0.01  *** p<0.001"
+        ax.text(0.02, 0.98, sig_text,
+                transform=ax.transAxes,
+                fontsize=8,
+                va='top',
+                ha='left',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.7, edgecolor='gray'))
+
+    # Return both the axis and the level mapping for reference
+    return ax, level_mapping
+
+
+
+
+def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
+                                  hypotheses: list[str],
+                                  exclude_intercepts: bool = True,
+                                  model_type: str | None  = 'LME',
+                                  output_dir: Path = None,
+                                  file_identifier_suffix: str | None = None,
+                                  hidden: bool = False,
+                                  ):
+    # slice results_frame:
+    results_frame_subset = result_frame.copy()
+    if exclude_intercepts:
+        results_frame_subset = results_frame_subset[results_frame_subset['Parameter'] != 'Intercept']
+    if model_type is not None:
+        results_frame_subset = results_frame_subset[results_frame_subset['Model_Type'] == model_type]
+    # formatting:
+    results_frame_subset['Parameter'] = results_frame_subset['Parameter'].str.replace('C(', '')
+    results_frame_subset['Parameter'] = results_frame_subset['Parameter'].str.replace('Q(', '')
+    results_frame_subset['Parameter'] = results_frame_subset['Parameter'].str.replace("'", "")
+    results_frame_subset['Parameter'] = results_frame_subset['Parameter'].str.replace(")", "")
+
+    # prepare plot mosaic:
+    fig, axs = plt.subplots(1, len(hypotheses), figsize=(15, 10))
+    # plot hypothesis forest plots:
+    for col_ind, hypothesis in enumerate(hypotheses):
+        print(f"Plotting forest plot ({col_ind}) for hypothesis: {hypothesis}")
+
+        axs[col_ind], _ = draw_forest_plot(
+            axs[col_ind],
+            effects_frame=results_frame_subset.loc[results_frame_subset['Hypothesis'] == hypothesis, :],
+            include_y_labels=(col_ind == 0)  # Only True for first column
+        )
+
+    fig_title = f"Effect Size Overview{f' ({model_type} models)' if model_type is not None else ''}{f' ({file_identifier_suffix})' if file_identifier_suffix is not None else ''}"
+    fig.suptitle(fig_title)
+
+    fig.tight_layout()
+
+    if output_dir is not None:
+        save_path = filemgmt.file_title(fig_title, '.pdf')
+        fig.savefig(output_dir / save_path, bbox_inches='tight')
+
+    if not hidden:
+        plt.show()
 
 
 
