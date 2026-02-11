@@ -1442,6 +1442,138 @@ def aggregate_spectrogram_over_frequency_band(
     return freq_aggregated_dict
 
 
+def aggregate_psd_spectrogram(
+        psd_spectrograms: np.ndarray,
+        psd_freqs: np.ndarray = None,
+        normalize_mvc: bool = False,
+        is_log_scaled: bool = False,
+        freq_slice: tuple[float, float] | str = None,
+        channel_indices: list[int] = None,
+        aggregation_ops: list[tuple[str, int]] = None,
+) -> np.ndarray:
+    """
+    Aggregate PSD spectrograms through multiple stages: normalization, slicing, and axis reduction.
+
+    Processing order:
+    1. MVC normalization (if requested)
+    2. Frequency slicing (if freq_slice provided)
+    3. Channel slicing (if channel_indices provided)
+    4. Sequential aggregation operations in specified order
+
+    Parameters
+    ----------
+    psd_spectrograms : np.ndarray
+        PSD data with shape (n_times, n_frequencies, n_channels).
+    psd_freqs : np.ndarray, optional
+        Frequency values corresponding to the frequency axis. Required if freq_slice is used.
+    normalize_mvc : bool, default=False
+        Whether to apply MVC (Maximum Voluntary Contraction) normalization.
+        Computes max over time and frequency per channel, then normalizes to percentage.
+    is_log_scaled : bool, default=False
+        Whether the data is already log-scaled. If True, skips MVC normalization.
+    freq_slice : tuple[float, float] | str, optional
+        Frequency range to slice. Can be:
+        - Tuple (low, high): Custom frequency range in Hz
+        - String: Predefined band name ('slow', 'fast', 'delta', 'theta', 'alpha', 'beta', 'gamma')
+        Requires psd_freqs to be provided.
+    channel_indices : list[int], optional
+        List of channel indices to select. If None, uses all channels.
+    aggregation_ops : list[tuple[str, int]], optional
+        List of (operator, axis) tuples to apply sequentially.
+        Operator can be 'mean' or 'max'.
+        Axis refers to the current array shape after slicing.
+        Example: [('mean', 1), ('max', 2)] means average axis 1 first, then max over axis 2.
+
+    Returns
+    -------
+    np.ndarray
+        Aggregated PSD array with reduced dimensions based on specified operations.
+
+    Examples
+    --------
+    # EMG: Slice frequencies, mean over frequencies, then max over channels
+    result = aggregate_psd_spectrogram(
+        psd_spectrograms, psd_freqs,
+        normalize_mvc=True, is_log_scaled=False,
+        freq_slice='slow',
+        aggregation_ops=[('mean', 1), ('max', 2)],  # mean freq axis, max channel axis
+    )  # Output shape: (n_times,)
+
+    # EEG: Select channels, mean over channels first, then frequencies
+    result = aggregate_psd_spectrogram(
+        psd_spectrograms, psd_freqs,
+        channel_indices=[0, 1, 2, 5],
+        freq_slice='alpha',
+        aggregation_ops=[('mean', 2), ('mean', 1)],  # mean channels, then mean frequencies
+    )  # Output shape: (n_times,)
+
+    # Complex example: max over time, mean over channels, then max over frequencies
+    result = aggregate_psd_spectrogram(
+        psd_spectrograms, psd_freqs,
+        aggregation_ops=[('max', 0), ('mean', 2), ('max', 1)],
+    )  # Output shape: scalar
+    """
+    # Predefined frequency bands in Hz
+    FREQUENCY_BANDS = {
+        'all': (0, 250),
+        'slow': (0, 40),
+        'fast': (60, 250),
+        'delta': (0.5, 4),
+        'theta': (4, 8),
+        'alpha': (8, 12),
+        'beta': (13, 30),
+        'gamma': (30, 100),
+    }
+
+    # Create working copy
+    result = psd_spectrograms.copy()
+
+    # Stage 1: MVC Normalization
+    if normalize_mvc and not is_log_scaled:
+        # Maximum over time (axis 0) and frequencies (axis 1) per channel
+        mvc = np.max(np.max(result, axis=0, keepdims=True), axis=1, keepdims=True)
+        result = result / mvc * 100  # Convert to percentage
+
+    # Stage 2: Frequency Slicing
+    if freq_slice is not None:
+        if psd_freqs is None:
+            raise ValueError("psd_freqs must be provided when using freq_slice")
+
+        # Convert string band name to tuple if needed
+        if isinstance(freq_slice, str):
+            if freq_slice not in FREQUENCY_BANDS:
+                available_bands = ', '.join(FREQUENCY_BANDS.keys())
+                raise ValueError(
+                    f"Unknown frequency band '{freq_slice}'. "
+                    f"Available bands: {available_bands}"
+                )
+            low_freq, high_freq = FREQUENCY_BANDS[freq_slice]
+        else:
+            low_freq, high_freq = freq_slice
+
+        freq_mask = (psd_freqs >= low_freq) & (psd_freqs <= high_freq)
+        result = result[:, freq_mask, :]
+
+    # Stage 3: Channel Slicing
+    if channel_indices is not None:
+        result = result[:, :, channel_indices]
+
+    # Stage 4: Sequential Aggregation Operations
+    if aggregation_ops is not None:
+        for operator, axis in aggregation_ops:
+            if operator == 'mean':
+                result = np.nanmean(result, axis=axis)
+            elif operator == 'max':
+                result = np.nanmax(result, axis=axis)
+            else:
+                raise ValueError(
+                    f"Unknown operator '{operator}'. Supported operators: 'mean', 'max'"
+                )
+
+    return result
+
+
+
 def old_aggregate_spectrogram_over_frequency_band(
         spectrograms: np.ndarray,
         freqs: np.ndarray,
