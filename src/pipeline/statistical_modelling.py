@@ -1,3 +1,13 @@
+from pathlib import Path
+import pandas as pd
+import numpy as np
+from scipy import stats
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+
+import src.utils.file_management as filemgmt
+
+
 def fit_linear_regression_model(
         df: pd.DataFrame,
         response_var: str,
@@ -1227,13 +1237,6 @@ def display_model_diagnostics(diagnostics_df: pd.DataFrame, output_dir: Path) ->
         print(f"{'=' * 140}\n")
     except Exception as e:
         print(f"\n⚠️  Error saving diagnostics: {e}")
-from pathlib import Path
-import pandas as pd
-import numpy as np
-from scipy import stats
-import statsmodels.formula.api as smf
-import matplotlib.pyplot as plt
-import src.utils.file_management as filemgmt
 
 def generate_all_summary_tables(
         results_df: pd.DataFrame,
