@@ -13,6 +13,8 @@ import src.pipeline.preprocessing as preprocessing
 import src.pipeline.visualizations as visualizations
 import src.pipeline.data_integration as data_integration
 import src.utils.file_management as filemgmt
+from src.pipeline.data_analysis import make_timezone_aware
+from src.pipeline.data_integration import fetch_enriched_log_frame
 
 from src.pipeline.preprocessing import BiosignalPreprocessor
 from src.pipeline.visualizations import EEG_CHANNEL_IND_DICT, EEG_CHANNELS_BY_AREA
@@ -26,7 +28,7 @@ if __name__=="__main__":
     EXPERIMENT_DATA = ROOT / "data" / "experiment_results"
 
     ### WORKFLOW CONTROL
-    subject_ind = 7
+    subject_ind = 8
     save_result: bool = True  # only set to True if manual adjustments finalized
 
     # experiment results import behaviour:
@@ -108,6 +110,8 @@ if __name__=="__main__":
         # mark delayed EEG/EMG recordings start: "Actual Start Trigger" after 20 minutes (since before was much talking, also within task)
         qtc_start, _ = data_integration.get_qtc_measurement_start_end(log_frame)
 
+        # make timezone aware:
+        enriched_log_frame.index = make_timezone_aware(enriched_log_frame.index)
         first_idx = enriched_log_frame.loc[qtc_start + pd.Timedelta(minutes=15):].index[0]
         enriched_log_frame.loc[first_idx, 'Event'] = 'Actual Start Trigger'
 
@@ -231,6 +235,31 @@ if __name__=="__main__":
         enriched_log_frame.loc[pd.Timestamp("2026-02-08 15:50:00"):, 'Phase'] = 'Idle State'
 
 
+    elif subject_ind == 8:
+        log_frame = data_integration.remove_song_entries(
+            enriched_log_frame, log_frame,
+            song_title_artist_id_tuples=[('Suzanne', 'Leonard Cohen', 0)])
+
+        log_frame = data_integration.remove_single_row_by_timestamp(log_frame, "2026-02-12 16:33:52.297349")
+
+        enriched_log_frame = data_integration.prepare_log_frame(log_frame, )
+
+        # bad trials:
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Sampling Process Crashed",
+                                                             True, trial_id=10)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=13)
+
+        # idle state:
+        enriched_log_frame.loc[pd.Timestamp("2026-02-12 16:55:00"):, 'Phase'] = 'Idle State'
+
+
+
+    task_start_ends = data_integration.get_all_task_start_ends(enriched_log_frame, 'list')
+    durations = [end - start for start, end in task_start_ends]
+    print("Mean trial duration: ", np.mean(durations))
 
     ################## FINAL SONG + QUESTIONNAIRE VALIDATION ##################
     print("\n\n")
@@ -257,6 +286,8 @@ if __name__=="__main__":
     print("-" * 80)
     print("Dynamometer Data Validation")
     print("-" * 80)
+    serial_frame.index = make_timezone_aware(serial_frame.index)
+    enriched_log_frame.index = make_timezone_aware(enriched_log_frame.index)
     data_integration.validate_force_measurements(enriched_log_frame, serial_frame)
 
     print("\n\n")
