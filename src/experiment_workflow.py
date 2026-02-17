@@ -13,6 +13,7 @@ import time
 import json
 import numpy as np
 import pandas as pd
+import functools
 from torchgen.gen import file_manager_from_dispatch_key
 
 import src.utils.file_management as filemgmt
@@ -24,6 +25,19 @@ from src.pipeline.measurements_and_interactive_visuals import dummy_sampling_pro
     accuracy_sampler, plot_performance_view, plot_offboarding_form
 from src.utils.multiprocessing_tools import save_terminate_process
 
+
+### The below 2 must be added at module level to be picklable (multiprocessing requirement), while during runtime
+### these default arguments will be inserted via functools.partial:
+def mvc_live_force_mapping(v, _shared_dc_offset=None):
+    """Module-level picklable version for MVC calibration (no MVC value)."""
+    return dynamometer_force_mapping(v, mvc_kg=None,
+                                     dc_offset=_shared_dc_offset.value)
+
+
+def live_force_mapping_factory(v, _mvc_kg=None, _shared_dc_offset=None):
+    """Module-level picklable version for regular sampling (with MVC value)."""
+    return dynamometer_force_mapping(v, mvc_kg=_mvc_kg,
+                                     dc_offset=_shared_dc_offset.value)
 
 ### MULTIPROCESSING IMPLEMENTATION:
 def start_experiment_processes(
@@ -74,6 +88,7 @@ def start_experiment_processes(
     serial_port = experiment_config_file.get_as_type("Serial Port", "str") if experiment_config_txt is not None else '/dev/tty.usbmodem143309601'
     measurement_sampling_rate_hz = experiment_config_file.get_as_type("Serial Sampling Rate", "float") if experiment_config_txt is not None else 1000
 
+    initial_dc_offset = experiment_config_file.get_as_type("Initial Force DC Offset", "float") if experiment_config_txt is not None else -12.0
     use_initial_mvc = experiment_config_file.get_as_type("Use Initial MVC", "bool") if experiment_config_txt is not None else False
     initial_mvc = experiment_config_file.get_as_type("Initial MVC", "float") if experiment_config_txt is not None and use_initial_mvc else None
     mvc_max_time = experiment_config_file.get_as_type("MVC Maximum Time", "float") if experiment_config_txt is not None else 30.0
@@ -142,6 +157,9 @@ def start_experiment_processes(
     # song info dict:
     shared_song_info_dict = mp_manager.dict()
     shared_dict_lock = mp_manager.Lock()  # holds for both dicts
+
+    # shared DC offset for dynamometer force mapping (master-adjustable):
+    shared_dc_offset = multiprocessing.Value('d', initial_dc_offset)  # 'd' = double
     
     # accuracy measurement dict:
     shared_force_value_target_dict = mp_manager.dict()
@@ -179,7 +197,8 @@ def start_experiment_processes(
               force_log_saving_event, log_saving_done_event, start_test_motor_task_event),
         kwargs={'music_category_txt': music_category_txt,
                 'control_log_dir': control_log_dir,
-                'title': 'Experiment Master - Close this window to end the experiment.'
+                'title': 'Experiment Master - Close this window to end the experiment.',
+                'shared_dc_offset': shared_dc_offset,  # new for DC offset slider
                 },
         name="MasterDisplayProcess")
 
@@ -188,11 +207,15 @@ def start_experiment_processes(
         # 0) ensure saving dir exists:
         filemgmt.assert_dir(mvc_saving_dir)  # else creates dir
 
+        # reads the live DC offset value on every sample:
+        mvc_force_fn = functools.partial(mvc_live_force_mapping, _shared_dc_offset=shared_dc_offset)
+
         # 1) start sampling only fsr (without defining MVC):
         mvc_sampler = multiprocessing.Process(
             target=sampling_process if serial_connection_intact else dummy_sampling_process,
             args=(shared_measurement_dict, shared_dict_lock, force_serial_save_event, serial_saving_done_event, start_trigger_event, stop_trigger_event,),
-            kwargs={'measurement_definitions': (("fsr", dynamometer_force_mapping, "FSR:",
+            kwargs={'measurement_definitions': (("fsr", mvc_force_fn,  # picklable result of functools.partial
+                                                 "FSR:",
                                                  fsr_smoothing_alpha),),  # smoothing alpha
                     'sampling_rate_hz': measurement_sampling_rate_hz,
                     'save_recordings_path': mvc_saving_dir,
@@ -347,9 +370,14 @@ def start_experiment_processes(
 
 
             if start_sampling_event.is_set():
+                # build a closure that reads the live DC offset on every sample:
+                live_force_fn = functools.partial(live_force_mapping_factory,
+                                                  _mvc_kg=mvc,
+                                                  _shared_dc_offset=shared_dc_offset)
+
                 # define measurement definitions with MVC:
                 measurement_definitions = (("fsr",  # measurement label
-                                            (dynamometer_force_mapping, mvc),  # MVC [kg]
+                                            live_force_fn,  # picklable partial
                                             "FSR:",  # serial connection measurement identifier
                                             fsr_smoothing_alpha),  # smoothing alpha
                                            ("ecg", None, "ECG:", ecg_smoothing_alpha),
@@ -711,7 +739,7 @@ if __name__ == '__main__':
     EXPERIMENT_RESULTS = ROOT / "data" / "experiment_results"
 
     # important: (CHANGE PER SUBJECT)
-    SUBJECT_DIR = EXPERIMENT_RESULTS / "subject_08"
+    SUBJECT_DIR = EXPERIMENT_RESULTS / "subject_09"
 
     SERIAL_MEASUREMENTS = SUBJECT_DIR / "serial_measurements"
     MVC_MEASUREMENTS = SUBJECT_DIR / "mvc_measurements"

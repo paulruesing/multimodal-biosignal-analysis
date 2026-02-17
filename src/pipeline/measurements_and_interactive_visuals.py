@@ -186,10 +186,10 @@ def read_serial_measurements(measurement_definitions: tuple[tuple[str, Callable[
         return {measurement_label: globals()['_last_valid_reading_' + measurement_label] for measurement_label, _, _, _ in measurement_definitions}
 
 
-def force_estimator_fsr(voltage: float,
+"""def force_estimator_fsr(voltage: float,
                         fsr_a: float = 5.0869,
                         fsr_b: float = 1.8544) -> float:
-    """
+    '''
     Estimates force from voltage reading based on a calibration model for an FSR sensor.
 
     Parameters
@@ -205,18 +205,18 @@ def force_estimator_fsr(voltage: float,
     -------
     float
         Estimated force corresponding to the input voltage, based on the power-law relationship.
-    """
+    '''
     force_estimation = fsr_a * voltage ** fsr_b
-    return force_estimation
+    return force_estimation"""
 
 
-def dynamometer_force_mapping(v, mvc_kg: float | None = None):  # here with default params
+def dynamometer_force_mapping(v, mvc_kg: float | None = None, dc_offset: float = -12):  # here with default params
     """
     Fitted but added manual offset (-12) to force closer to 0
     Returns [kg] if global var. _current_mvc_kg is None else [% MVC].
     """
     factor = 1 if mvc_kg is None else 100 / mvc_kg  # consider MVC
-    return (2.2 * (v ** 4.1071) - 7) * factor  # 2.8708 * (v ** 4.1071) - 3 before!
+    return (2.2 * (v ** 4.1071) + dc_offset) * factor
 
 
 def sampling_process(shared_dict,
@@ -365,7 +365,7 @@ def dummy_sampling_process(shared_dict,
                            stop_trigger_event,  # send stop trigger event ('B' via serial connection)
                            measurement_definitions: tuple[tuple[str, Callable[[float], float] | None, str, float]],
                            # measurement_label, processing_callable, serial_input_marker
-                           custom_rand_means: tuple[float] = (10, 1, 1),
+                           custom_rand_means: tuple[float] = (1, 1, 1),
                            custom_rand_stds: tuple[float] = (.2, 1, 1),
                            sampling_rate_hz: int = 1000,
 
@@ -432,7 +432,9 @@ def dummy_sampling_process(shared_dict,
             rand_stds = [1 for _ in range(len(measurement_definitions))] if custom_rand_stds is None else custom_rand_stds
             samples = {measurement_label: rand_min + (-.5 + np.random.rand()) * rand_max for (measurement_label, _, _, _), rand_min, rand_max in zip(measurement_definitions, rand_means, rand_stds)}
             with shared_dict_lock:
-                for measurement_label, _, _, _ in measurement_definitions:
+                for measurement_label, callable, _, _ in measurement_definitions:
+                    if callable is not None:
+                        samples[measurement_label] = callable(samples[measurement_label])
                     shared_dict[measurement_label] = samples[measurement_label]
 
             # imitate data saving:
@@ -1858,6 +1860,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
                             control_log_dir: str | Path | None = None,
                             save_log_working_memory_size: int = 60000,
                             window_title: str = "Master",
+                            shared_dc_offset=None,            # <-- new
                             ):
     """
     Displays a control master view for managing start/stop triggers and monitoring shared biosignal measurement keys.
@@ -1931,6 +1934,29 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
                                color=button_background_color,
                                hovercolor=button_hover_color)
         stop_button.on_clicked(stop_button_click)
+
+        # DC offset adjustment slider (for dynamometer drift compensation):
+        if shared_dc_offset is not None:
+            dc_offset_label = fig.text(0.1, 0.25, "Force DC Offset:", ha='left', va='center', fontsize=10)
+            dc_offset_slider_ax = plt.axes([0.3, 0.25, 0.3, 0.04])
+            dc_offset_slider = Slider(
+                dc_offset_slider_ax,
+                '',
+                -30, 0,
+                valinit=shared_dc_offset.value,
+                valstep=0.5,
+                valfmt='%.1f',
+                color=slider_bar_color,
+                track_color=slider_background_color,
+                initcolor='None',
+                handle_style={'facecolor': 'white', 'edgecolor': 'white', 'size': 10},
+            )
+
+            def on_dc_offset_changed(val):
+                shared_dc_offset.value = val  # atomic write to shared memory
+                print(f"[MASTER] DC offset updated to {val:.1f}")
+
+            dc_offset_slider.on_changed(on_dc_offset_changed)
 
         # experiment phase triggers:
         def click_onboarding_button(event):
@@ -2041,9 +2067,9 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
                 globals()[f'{category}_button'].on_clicked(globals()[f'{category}_button_clicked'])
 
         # status texts:
-        measurement_info_text = fig.text(0.1, 0.25, "", ha='left', va='center', fontsize=10)
-        if include_music: song_info_text = fig.text(0.1, 0.1, "", ha='left', va='center', fontsize=10)
-        rating_result_info_text = fig.text(.1, .175, "", ha='left', va='center', fontsize=10)
+        measurement_info_text = fig.text(0.1, 0.175, "", ha='left', va='center', fontsize=10)
+        if include_music: song_info_text = fig.text(0.1, 0.025, "", ha='left', va='center', fontsize=10)
+        rating_result_info_text = fig.text(.1, .1, "", ha='left', va='center', fontsize=10)
 
         ### animation methods:
         def init():
