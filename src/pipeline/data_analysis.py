@@ -833,3 +833,154 @@ def make_timezone_aware(
             f"dt_index must be pd.DatetimeIndex, pd.Series with DatetimeIndex, "
             f"or pd.Timestamp, got {type(dt_index)}"
         )
+
+
+def create_trial_bins(df, columns_to_bin, n_bins_dict,
+                      subject_col='Subject ID', trial_col='Trial ID'):
+    """
+    Convert continuous values to trial-wise bins based on intra-subject percentiles.
+
+    This function averages continuous variables across time segments within each trial,
+    then creates percentile-based bins separately for each subject. The binning is done
+    intra-subject to account for individual differences.
+
+    For columns with few unique values or uneven distributions, uses value-based binning
+    instead of frequency-based binning to ensure all distinct values get separate bins.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe with time-segmented trial data.
+    columns_to_bin : list of str
+        Column names to create bins for.
+    n_bins_dict : dict
+        Dictionary mapping column names to number of bins.
+        Example: {'Median Force Level [0-1]': 5, 'Median Heart Rate [bpm]': 3}
+    subject_col : str, default='Subject ID'
+        Name of the subject identifier column.
+    trial_col : str, default='Trial ID'
+        Name of the trial identifier column.
+
+    Returns
+    -------
+    pd.DataFrame
+        Original dataframe with additional columns suffixed with '_bin' containing
+        ordinal bin labels (1 to n_bins). NaN values in the original data will result
+        in NaN bins.
+
+    Examples
+    --------
+    >>> binned_df = create_trial_bins(
+    ...     df=my_data,
+    ...     columns_to_bin=['Trial ID', 'Median Force Level [0-1]'],
+    ...     n_bins_dict={'Trial ID': 3, 'Median Force Level [0-1]': 5}
+    ... )
+    """
+    # Create a copy to avoid modifying the original dataframe
+    df_result = df.copy()
+
+    # Determine which columns need aggregation (exclude grouping columns)
+    grouping_cols = [subject_col, trial_col]
+    columns_to_aggregate = [col for col in columns_to_bin if col not in grouping_cols]
+
+    # Create trial-level data
+    if columns_to_aggregate:
+        trial_averages = df.groupby(grouping_cols, as_index=False)[columns_to_aggregate].mean()
+    else:
+        trial_averages = df[grouping_cols].drop_duplicates().reset_index(drop=True)
+
+    # Iterate through each column to create bins
+    for col in columns_to_bin:
+        n_bins = n_bins_dict.get(col, 5)
+
+        # Create bin column name
+        bin_col_name = f"{col}_bin"
+
+        # Initialize a list to store bin assignments
+        bin_assignments = []
+
+        # Bin separately for each subject (intra-subject binning)
+        for subject_id in trial_averages[subject_col].unique():
+            # Filter data for current subject
+            subject_mask = trial_averages[subject_col] == subject_id
+            subject_data = trial_averages[subject_mask].copy()
+            subject_values = subject_data[col]
+
+            # Handle all-NaN case
+            if subject_values.isna().all():
+                subject_data[bin_col_name] = np.nan
+                bin_assignments.append(subject_data[[subject_col, trial_col, bin_col_name]])
+                continue
+
+            # Get non-NaN values for binning
+            non_nan_values = subject_values.dropna()
+            n_unique = non_nan_values.nunique()
+
+            # If only one unique value, all get bin 1
+            if n_unique == 1:
+                subject_data[bin_col_name] = subject_values.notna().astype(int)
+                subject_data.loc[subject_values.isna(), bin_col_name] = np.nan
+                bin_assignments.append(subject_data[[subject_col, trial_col, bin_col_name]])
+                continue
+
+            # Determine effective number of bins
+            effective_bins = min(n_bins, n_unique)
+
+            # Initialize bin column with NaN
+            subject_data[bin_col_name] = np.nan
+
+            try:
+                # For discrete-like data (few unique values relative to requested bins),
+                # use rank-based binning to ensure different values get different bins
+                if n_unique <= n_bins:
+                    # Rank the values and map to bins
+                    sorted_unique = sorted(non_nan_values.unique())
+                    value_to_bin = {val: i + 1 for i, val in enumerate(sorted_unique)}
+                    subject_data[bin_col_name] = subject_values.map(value_to_bin)
+                else:
+                    # For continuous data, use qcut for percentile-based binning
+                    bins = pd.qcut(
+                        subject_values,
+                        q=effective_bins,
+                        labels=False,
+                        duplicates='drop'
+                    )
+                    # Convert to 1-indexed (bins is 0-indexed)
+                    subject_data.loc[subject_values.notna(), bin_col_name] = bins.dropna() + 1
+
+            except Exception as e:
+                # Fallback: use cut with explicit boundaries
+                try:
+                    bins = pd.cut(
+                        subject_values,
+                        bins=effective_bins,
+                        labels=False,
+                        duplicates='drop'
+                    )
+                    subject_data.loc[subject_values.notna(), bin_col_name] = bins.dropna() + 1
+                except:
+                    # Last resort: all non-NaN values get bin 1
+                    subject_data[bin_col_name] = subject_values.notna().astype(float)
+                    subject_data.loc[subject_values.isna(), bin_col_name] = np.nan
+
+            bin_assignments.append(subject_data[[subject_col, trial_col, bin_col_name]])
+
+        # Combine all bin assignments for this column
+        bin_df = pd.concat(bin_assignments, ignore_index=True)
+
+        # Merge bin labels back to original dataframe
+        df_result = df_result.merge(
+            bin_df,
+            on=[subject_col, trial_col],
+            how='left'
+        )
+
+    # Convert bin columns to integer type (handling NaN values)
+    bin_columns = [f"{col}_bin" for col in columns_to_bin]
+    for bin_col in bin_columns:
+        if bin_col in df_result.columns:
+            df_result[bin_col] = df_result[bin_col].astype('Int64')
+
+    return df_result
+
+
