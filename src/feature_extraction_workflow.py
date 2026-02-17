@@ -34,7 +34,7 @@ if __name__=="__main__":
 
     ### WORKFLOW CONTROL
     # select subject:
-    for subject_ind in [4, 5, 6, 7]:
+    for subject_ind in [8]:  # only new
         handedness: Literal['left', 'right'] = 'right' if subject_ind != 3 else 'left'
 
 
@@ -44,7 +44,7 @@ if __name__=="__main__":
 
 
         # PSD computation:
-        do_compute_psd: bool = False  #(subject_ind == 6)  # only for subject 6
+        do_compute_psd: bool = True  #(subject_ind == 6)  # only for subject 6
         fetch_precomputed_psd: bool = False
         psd_window_size_sec: float = .25  # -> 4 Hz resolution
         save_psd: bool = True
@@ -130,25 +130,6 @@ if __name__=="__main__":
             emg_extensor_array, emg_extensor_config = preprocessing.import_npy_with_config(
                 f"sub_{subject_ind:02}_emg_2_extensor", subject_qtc_data_dir,
                 load_only_first_n_seconds=load_only_first_n_seconds)
-
-            # validate time alignment:
-            alignment_results = validate_time_alignment(
-                eeg_array, eeg_config, log_frame, qtc_start, qtc_end,
-                tolerance_sec=2.0  # Allow 2 sec mismatch
-            )
-            # validate time alignment:
-            alignment_results = validate_time_alignment(
-                emg_flexor_array, emg_flexor_config, log_frame, qtc_start, qtc_end,
-                tolerance_sec=2.0  # Allow 2 sec mismatch
-            )
-            # validate time alignment:
-            alignment_results = validate_time_alignment(
-                emg_extensor_array, emg_extensor_config, log_frame, qtc_start, qtc_end,
-                tolerance_sec=2.0  # Allow 2 sec mismatch
-            )
-
-
-            continue
 
 
 
@@ -256,16 +237,6 @@ if __name__=="__main__":
 
         ### CMC computation:
         if do_compute_cmc or fetch_precomputed_cmc:
-            # eeg channel subset indices for slicing:
-            """if len(cmc_eeg_channel_subset) > 0:
-                # prepare channel inds:
-                cmc_eeg_channel_subset_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in cmc_eeg_channel_subset]
-                print(
-                    f"Reducing EEG channels for CMC computation to {len(cmc_eeg_channel_subset)} channels: {cmc_eeg_channel_subset}\n")
-
-                # slice EEG array by channel subset:
-                eeg_array = eeg_array[:, cmc_eeg_channel_subset_inds]"""
-
 
             ####### FLEXOR #######
             ## Computation

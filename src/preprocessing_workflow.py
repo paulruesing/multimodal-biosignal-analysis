@@ -18,7 +18,7 @@ if __name__=="__main__":
 
     ### WORKFLOW CONTROL
     # change these to select subject and trial:
-    for subject_ind in [7]:
+    for subject_ind in [8]:
         print("\n" + "-"*100)
         print(f"Processing subject {subject_ind}")
         print("-" * 100)
@@ -42,7 +42,7 @@ if __name__=="__main__":
 
         ### ITERATE OVER ALL CHANNEL SUBSETS
         for channel_set in [
-            "eeg",
+            #"eeg",
             "emg_1_flexor",
             "emg_2_extensor"
         ]:
@@ -98,7 +98,7 @@ if __name__=="__main__":
                     sampling_freq=sampling_freq,
                     modality=data_modality,
                     band_pass_frequencies='auto',
-                    amplitude_rejection_threshold=.01,
+                    amplitude_rejection_threshold=.005,
                     wavelet_type=None,  # seems to be over-conservative
                     laplacian_filter_neighbor_radius='auto',  # automatic: -> None for EMG
 
@@ -121,7 +121,7 @@ if __name__=="__main__":
                 visualizations.plot_spectrogram(np.mean(psd, axis=2), psd_times, psd_freqs,
                                                 frequency_range=(0, 100),
                                                 save_dir=subject_plot_dir, title=f'Input Averaged PSD ({file_title})',
-                                                log_scale=False,  # already transformed to log during computed
+                                                is_log_scale=True,  # already transformed to log during computed
                                                 )
 
 
@@ -163,7 +163,7 @@ if __name__=="__main__":
                 visualizations.plot_spectrogram(np.mean(spectrograms, axis=2), timestamps, freqs,
                                                 frequency_range=(0, 100),
                                                 save_dir=subject_plot_dir, title=f'Output Averaged PSD ({file_title})',
-                                                log_scale=False,  # already transformed to log during computed
+                                                is_log_scale=True,  # already transformed to log during computed
                                                 )
 
             ### PSD Animation

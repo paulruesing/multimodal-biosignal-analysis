@@ -7,7 +7,7 @@ if __name__ == '__main__':
     QTC_DATA = ROOT / 'data' / 'qtc_data'
     OTB_FILES = QTC_DATA / "otb-files"
 
-    subject_ind = 7
+    subject_ind = 8
 
     # subject 0 has EXTENSOR at MULTI-IN 1 and FLEXOR at MULTI-IN 2 (-> swap order)
     # the others are consistent EEG - FLEXOR - EXTENSOR
