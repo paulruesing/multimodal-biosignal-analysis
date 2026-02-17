@@ -20,6 +20,325 @@ import src.pipeline.data_integration as data_integration
 import src.utils.file_management as filemgmt
 
 
+def calculate_actual_sampling_rate(
+        subject_ind: int,
+        qtc_data_dir: Path,
+        experiment_data_dir: Path,
+        channel_set: str,
+        nominal_fs: int = 2048,
+        verbose: bool = True
+) -> Dict:
+    """
+    Calculate the actual sampling rate by comparing file duration with true experiment duration.
+    
+    Compares the number of samples in EEG/EMG files against the true duration measured by
+    the serial system to detect sampling rate discrepancies or clock drift.
+    
+    Parameters
+    ----------
+    subject_ind : int
+        Subject index
+    qtc_data_dir : Path
+        Directory containing QTC (EEG/EMG) data files
+    experiment_data_dir : Path
+        Directory containing experiment logs and serial measurements
+    channel_set : str
+        Channel set identifier (e.g., 'eeg', 'emg_1_flexor', 'emg_2_extensor')
+    nominal_fs : int, default=2048
+        Nominal/claimed sampling frequency in Hz
+    verbose : bool, default=True
+        Print detailed output
+        
+    Returns
+    -------
+    dict
+        Dictionary containing:
+        - 'subject': Subject index
+        - 'channel_set': Channel set name
+        - 'nominal_fs': Nominal sampling frequency (Hz)
+        - 'n_samples': Number of samples in file
+        - 'true_duration_sec': True duration from serial measurements (seconds)
+        - 'claimed_duration_sec': Duration based on nominal sampling rate (seconds)
+        - 'duration_discrepancy_sec': Difference between claimed and true (seconds)
+        - 'actual_fs': Estimated actual sampling frequency (Hz)
+        - 'sampling_rate_error_percent': Percentage error in sampling rate
+        - 'samples_missing_or_extra': Number of samples missing (negative) or extra (positive)
+    
+    Raises
+    ------
+    FileNotFoundError
+        If data files cannot be found
+    """
+    subject_qtc_dir = qtc_data_dir / f"subject_{subject_ind:02}"
+    subject_experiment_dir = experiment_data_dir / f"subject_{subject_ind:02}"
+    
+    file_title = f"sub_{subject_ind:02}_{channel_set}"
+    
+    # Load experiment log to get true start and end times
+    log_frame = data_integration.fetch_enriched_log_frame(
+        subject_experiment_dir, set_time_index=True, verbose=False
+    )
+    qtc_start, qtc_end = data_integration.get_qtc_measurement_start_end(log_frame, verbose=False)
+    true_duration_sec = (qtc_end - qtc_start).total_seconds()
+    
+    # Determine number of samples in the file
+    npy_path = subject_qtc_dir / f"{file_title}.npy"
+    csv_path = subject_qtc_dir / f"{file_title}.csv"
+    
+    if npy_path.exists():
+        data = np.load(npy_path, mmap_mode='r')
+        n_samples = data.shape[0]
+        file_type = '.npy'
+    elif csv_path.exists():
+        # Read only first and last rows to get count efficiently
+        df_head = pd.read_csv(csv_path, nrows=1)
+        # Count lines without loading entire file
+        with open(csv_path, 'r') as f:
+            n_samples = sum(1 for _ in f) - 1  # Subtract header
+        file_type = '.csv'
+    else:
+        raise FileNotFoundError(
+            f"No data file found for {file_title} in {subject_qtc_dir}\n"
+            f"Searched for: {npy_path.name} and {csv_path.name}"
+        )
+    
+    # Calculate durations and discrepancies
+    claimed_duration_sec = n_samples / nominal_fs
+    duration_discrepancy_sec = claimed_duration_sec - true_duration_sec
+    
+    # Calculate actual sampling rate
+    actual_fs = n_samples / true_duration_sec
+    sampling_rate_error_percent = ((actual_fs - nominal_fs) / nominal_fs) * 100
+    
+    # Calculate how many samples are missing or extra
+    expected_samples = int(true_duration_sec * nominal_fs)
+    samples_discrepancy = n_samples - expected_samples
+    
+    result = {
+        'subject': subject_ind,
+        'channel_set': channel_set,
+        'file_type': file_type,
+        'nominal_fs': nominal_fs,
+        'n_samples': n_samples,
+        'true_duration_sec': true_duration_sec,
+        'claimed_duration_sec': claimed_duration_sec,
+        'duration_discrepancy_sec': duration_discrepancy_sec,
+        'actual_fs': actual_fs,
+        'sampling_rate_error_percent': sampling_rate_error_percent,
+        'samples_missing_or_extra': samples_discrepancy,
+        'qtc_start': qtc_start,
+        'qtc_end': qtc_end
+    }
+    
+    if verbose:
+        print(f"\n{'='*100}")
+        print(f"SAMPLING RATE VALIDATION: Subject {subject_ind:02d} - {channel_set}")
+        print(f"{'='*100}")
+        print(f"  File type:               {file_type}")
+        print(f"  Nominal sampling rate:   {nominal_fs} Hz")
+        print(f"  Number of samples:       {n_samples:,}")
+        print(f"  True duration (serial):  {true_duration_sec:.2f} sec ({true_duration_sec/60:.2f} min)")
+        print(f"  Claimed duration (file): {claimed_duration_sec:.2f} sec ({claimed_duration_sec/60:.2f} min)")
+        print(f"  Duration discrepancy:    {duration_discrepancy_sec:+.2f} sec")
+        print(f"  ")
+        print(f"  → Actual sampling rate:  {actual_fs:.4f} Hz")
+        print(f"  → Sampling rate error:   {sampling_rate_error_percent:+.4f}%")
+        print(f"  → Samples discrepancy:   {samples_discrepancy:+,} samples")
+        
+        # Interpretation
+        if abs(sampling_rate_error_percent) < 0.01:
+            print(f"  ✓ Negligible error (<0.01%)")
+        elif abs(sampling_rate_error_percent) < 0.1:
+            print(f"  ⚠ Minor error (0.01-0.1%) - acceptable for most analyses")
+        elif abs(sampling_rate_error_percent) < 1.0:
+            print(f"  ⚠ Moderate error (0.1-1%) - consider correction for precise timing")
+        else:
+            print(f"  ✗ SIGNIFICANT error (>1%) - correction REQUIRED!")
+        
+        print(f"  ")
+        if duration_discrepancy_sec < 0:
+            print(f"  → File is SHORTER than expected ({abs(duration_discrepancy_sec):.2f} sec)")
+        else:
+            print(f"  → File is LONGER than expected ({duration_discrepancy_sec:.2f} sec)")
+    
+    return result
+
+
+def validate_sampling_rates_all_subjects(
+        subject_indices: List[int],
+        qtc_data_dir: Path,
+        experiment_data_dir: Path,
+        channel_sets: List[str] = None,
+        nominal_fs: int = 2048,
+        save_report: bool = False,
+        save_dir: Path = None
+) -> pd.DataFrame:
+    """
+    Validate sampling rates across multiple subjects and channel sets.
+    
+    Parameters
+    ----------
+    subject_indices : list of int
+        List of subject indices to validate
+    qtc_data_dir : Path
+        Directory containing QTC data
+    experiment_data_dir : Path
+        Directory containing experiment data
+    channel_sets : list of str, optional
+        Channel sets to validate. If None, uses ['eeg', 'emg_1_flexor', 'emg_2_extensor']
+    nominal_fs : int, default=2048
+        Nominal sampling frequency
+    save_report : bool, default=False
+        Whether to save validation report
+    save_dir : Path, optional
+        Directory to save report
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with validation results for all subjects and channel sets
+    """
+    if channel_sets is None:
+        channel_sets = ['eeg', 'emg_1_flexor', 'emg_2_extensor']
+    
+    print(f"\n{'#'*100}")
+    print(f"# SAMPLING RATE VALIDATION ACROSS ALL SUBJECTS")
+    print(f"{'#'*100}\n")
+    
+    all_results = []
+    
+    for subject_ind in subject_indices:
+        for channel_set in channel_sets:
+            try:
+                result = calculate_actual_sampling_rate(
+                    subject_ind, qtc_data_dir, experiment_data_dir,
+                    channel_set, nominal_fs, verbose=True
+                )
+                all_results.append(result)
+            except FileNotFoundError as e:
+                print(f"\n✗ Skipping {channel_set} for subject {subject_ind:02d}: {e}")
+            except Exception as e:
+                print(f"\n✗ ERROR processing subject {subject_ind:02d}, {channel_set}: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    if len(all_results) == 0:
+        print("\n✗ No valid results obtained!")
+        return pd.DataFrame()
+    
+    # Create summary DataFrame
+    df = pd.DataFrame(all_results)
+    
+    # Print summary statistics
+    print(f"\n\n{'='*100}")
+    print(f"SUMMARY STATISTICS ACROSS ALL RECORDINGS")
+    print(f"{'='*100}\n")
+    
+    print(f"Total recordings analyzed: {len(df)}")
+    print(f"")
+    
+    print(f"Duration Discrepancy (claimed - true):")
+    print(f"  Mean:    {df['duration_discrepancy_sec'].mean():+.2f} sec")
+    print(f"  Std:     {df['duration_discrepancy_sec'].std():.2f} sec")
+    print(f"  Min:     {df['duration_discrepancy_sec'].min():+.2f} sec")
+    print(f"  Max:     {df['duration_discrepancy_sec'].max():+.2f} sec")
+    print(f"")
+    
+    print(f"Actual Sampling Rate:")
+    print(f"  Mean:    {df['actual_fs'].mean():.4f} Hz")
+    print(f"  Std:     {df['actual_fs'].std():.4f} Hz")
+    print(f"  Min:     {df['actual_fs'].min():.4f} Hz")
+    print(f"  Max:     {df['actual_fs'].max():.4f} Hz")
+    print(f"")
+    
+    print(f"Sampling Rate Error:")
+    print(f"  Mean:    {df['sampling_rate_error_percent'].mean():+.4f}%")
+    print(f"  Std:     {df['sampling_rate_error_percent'].std():.4f}%")
+    print(f"  Min:     {df['sampling_rate_error_percent'].min():+.4f}%")
+    print(f"  Max:     {df['sampling_rate_error_percent'].max():+.4f}%")
+    print(f"")
+    
+    print(f"Sample Discrepancy:")
+    print(f"  Mean:    {df['samples_missing_or_extra'].mean():+,.0f} samples")
+    print(f"  Std:     {df['samples_missing_or_extra'].std():.0f} samples")
+    print(f"  Min:     {df['samples_missing_or_extra'].min():+,.0f} samples")
+    print(f"  Max:     {df['samples_missing_or_extra'].max():+,.0f} samples")
+    
+    # Classification
+    print(f"\n{'='*100}")
+    print(f"ERROR CLASSIFICATION")
+    print(f"{'='*100}\n")
+    
+    negligible = (df['sampling_rate_error_percent'].abs() < 0.01).sum()
+    minor = ((df['sampling_rate_error_percent'].abs() >= 0.01) & 
+             (df['sampling_rate_error_percent'].abs() < 0.1)).sum()
+    moderate = ((df['sampling_rate_error_percent'].abs() >= 0.1) & 
+                (df['sampling_rate_error_percent'].abs() < 1.0)).sum()
+    significant = (df['sampling_rate_error_percent'].abs() >= 1.0).sum()
+    
+    print(f"  Negligible (<0.01%):       {negligible}/{len(df)} recordings")
+    print(f"  Minor (0.01-0.1%):         {minor}/{len(df)} recordings")
+    print(f"  Moderate (0.1-1%):         {moderate}/{len(df)} recordings")
+    print(f"  Significant (>1%):         {significant}/{len(df)} recordings")
+    
+    if significant > 0:
+        print(f"\n  ✗ {significant} recordings have SIGNIFICANT errors - correction REQUIRED!")
+        print(f"\n  Affected recordings:")
+        sig_df = df[df['sampling_rate_error_percent'].abs() >= 1.0]
+        for _, row in sig_df.iterrows():
+            print(f"    - Subject {row['subject']:02d}, {row['channel_set']}: {row['sampling_rate_error_percent']:+.4f}%")
+    elif moderate > 0:
+        print(f"\n  ⚠ {moderate} recordings have moderate errors - consider correction")
+    else:
+        print(f"\n  ✓ All recordings have acceptable sampling rate accuracy")
+    
+    # Check for consistent vs variable errors
+    print(f"\n{'='*100}")
+    print(f"CONSISTENCY ANALYSIS")
+    print(f"{'='*100}\n")
+    
+    cv_error = (df['sampling_rate_error_percent'].std() / 
+                (abs(df['sampling_rate_error_percent'].mean()) + 1e-10))
+    
+    print(f"  Coefficient of variation: {cv_error:.2f}")
+    
+    if cv_error < 0.1:
+        print(f"  → CONSISTENT error across recordings")
+        print(f"  → Likely hardware clock drift")
+        print(f"  → Recommendation: Apply uniform correction factor")
+    elif cv_error < 0.5:
+        print(f"  → MODERATELY VARIABLE error")
+        print(f"  → Possible hardware variability or environmental factors")
+        print(f"  → Recommendation: Apply per-recording correction")
+    else:
+        print(f"  → HIGHLY VARIABLE error")
+        print(f"  → Inconsistent sampling or data corruption")
+        print(f"  → Recommendation: Investigate individual recordings")
+    
+    # Group by channel set
+    print(f"\n{'='*100}")
+    print(f"BY CHANNEL SET")
+    print(f"{'='*100}\n")
+    
+    for channel_set in df['channel_set'].unique():
+        subset = df[df['channel_set'] == channel_set]
+        print(f"  {channel_set}:")
+        print(f"    Mean error: {subset['sampling_rate_error_percent'].mean():+.4f}%")
+        print(f"    Std error:  {subset['sampling_rate_error_percent'].std():.4f}%")
+        print(f"    N:          {len(subset)} recordings")
+    
+    # Save report
+    if save_report and save_dir is not None:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        report_path = save_dir / "sampling_rate_validation_report.csv"
+        # Drop timestamp columns for CSV export
+        df_export = df.drop(columns=['qtc_start', 'qtc_end'], errors='ignore')
+        df_export.to_csv(report_path, index=False)
+        print(f"\n✓ Saved validation report to: {report_path}")
+    
+    return df
+
+
 def load_emg_psd_both_muscles(
         subject_ind: int,
         feature_data_dir: Path,
@@ -576,7 +895,7 @@ def create_multi_task_comparison_plot(
         force_series: pd.Series,
         task_periods: List[Tuple[pd.Timestamp, pd.Timestamp]],
         subject_ind: int,
-        n_tasks_to_display: int = 5,
+        n_tasks_to_display: int = 10,
         save_dir: Path = None
 ):
     """
@@ -869,7 +1188,7 @@ if __name__ == "__main__":
                         create_multi_task_comparison_plot(
                             flexor_power, extensor_power, flexor_times,
                             data['force_series'], task_periods, subject_ind,
-                            n_tasks_to_display=5,
+                            n_tasks_to_display=10,
                             save_dir=ALIGNMENT_REPORTS if save_reports else None
                         )
             
@@ -954,3 +1273,147 @@ if __name__ == "__main__":
     print(f"\n{'='*100}")
     print("ENHANCED VALIDATION WORKFLOW COMPLETE")
     print(f"{'='*100}\n")
+
+
+if __name__ == "__main__":
+    """
+    Main execution block for time alignment validation workflow.
+    
+    This workflow performs:
+    1. Sampling rate validation (duration discrepancy analysis)
+    2. EMG-force synchronization validation
+    3. Muscle identity validation (flexor vs extensor)
+    """
+    from pathlib import Path
+    
+    # Directory configuration
+    ROOT = Path().resolve().parent
+    OUTPUT = ROOT / 'output'
+    QTC_DATA = ROOT / "data" / "qtc_data"
+    EXPERIMENT_DATA = ROOT / "data" / "experiment_results"
+    FEATURE_DATA = OUTPUT / 'feature_data'
+    ALIGNMENT_REPORTS = OUTPUT / 'alignment_validation_reports'
+    
+    # Create output directory
+    ALIGNMENT_REPORTS.mkdir(parents=True, exist_ok=True)
+    
+    # Workflow configuration
+    SUBJECTS_TO_VALIDATE = [0, 1, 2, 3, 4, 5, 6, 7]  # List of subject indices
+    
+    # Workflow control flags
+    run_sampling_rate_validation = True
+    run_muscle_validation = False  # Set to True if you want to run muscle validation
+    run_visualization = False  # Set to True to generate alignment plots
+    
+    save_reports = True
+    
+    print("\n" + "#" * 100)
+    print("# TIME ALIGNMENT VALIDATION WORKFLOW")
+    print("#" * 100 + "\n")
+    
+    # ========== STEP 1: SAMPLING RATE VALIDATION ==========
+    if run_sampling_rate_validation:
+        print("\n" + "=" * 100)
+        print("STEP 1: SAMPLING RATE VALIDATION")
+        print("=" * 100 + "\n")
+        
+        try:
+            validation_df = validate_sampling_rates_all_subjects(
+                subject_indices=SUBJECTS_TO_VALIDATE,
+                qtc_data_dir=QTC_DATA,
+                experiment_data_dir=EXPERIMENT_DATA,
+                channel_sets=['eeg', 'emg_1_flexor', 'emg_2_extensor'],
+                nominal_fs=2048,
+                save_report=save_reports,
+                save_dir=ALIGNMENT_REPORTS
+            )
+            
+            print(f"\n{'=' * 100}")
+            print("SAMPLING RATE VALIDATION RECOMMENDATIONS")
+            print(f"{'=' * 100}\n")
+            
+            if len(validation_df) > 0:
+                mean_error = validation_df['sampling_rate_error_percent'].mean()
+                std_error = validation_df['sampling_rate_error_percent'].std()
+                
+                if abs(mean_error) > 0.1:
+                    print(f"  ⚠ Mean sampling rate error: {mean_error:+.4f}%")
+                    print(f"  ⚠ Correction IS RECOMMENDED")
+                    print(f"")
+                    print(f"  Correction factor: {validation_df['actual_fs'].mean() / 2048:.6f}")
+                    print(f"  ")
+                    print(f"  To apply correction, use one of these approaches:")
+                    print(f"  1. Update nominal_fs in preprocessing_workflow.py")
+                    print(f"  2. Resample data to match expected duration")
+                    print(f"  3. Use actual_fs values in feature extraction")
+                else:
+                    print(f"  ✓ Mean sampling rate error: {mean_error:+.4f}%")
+                    print(f"  ✓ Negligible error - no correction needed")
+            else:
+                print(f"  ✗ No validation results obtained")
+                
+        except Exception as e:
+            print(f"\n✗ ERROR in sampling rate validation: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # ========== STEP 2: MUSCLE IDENTITY VALIDATION ==========
+    if run_muscle_validation:
+        print("\n\n" + "=" * 100)
+        print("STEP 2: MUSCLE IDENTITY VALIDATION")
+        print("=" * 100 + "\n")
+        
+        all_muscle_comparisons = []
+        
+        for subject_ind in SUBJECTS_TO_VALIDATE:
+            try:
+                results = validate_muscle_identity(
+                    subject_ind=subject_ind,
+                    feature_data_dir=FEATURE_DATA,
+                    experiment_data_dir=EXPERIMENT_DATA,
+                    emg_freq_band=(30, 250),
+                    save_dir=ALIGNMENT_REPORTS if save_reports else None
+                )
+                
+                if 'comparison' in results and 'error' not in results['comparison']:
+                    all_muscle_comparisons.append({
+                        'subject': subject_ind,
+                        **results['comparison']
+                    })
+                    
+            except Exception as e:
+                print(f"\n✗ ERROR processing subject {subject_ind:02d}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        # Summary across all subjects
+        if len(all_muscle_comparisons) > 0:
+            summary_df = pd.DataFrame(all_muscle_comparisons)
+            
+            if save_reports:
+                summary_path = ALIGNMENT_REPORTS / "muscle_comparison_all_subjects.csv"
+                summary_df.to_csv(summary_path, index=False)
+                print(f"\n✓ Saved muscle validation summary to: {summary_path}")
+    
+    # ========== STEP 3: VISUALIZATION ==========
+    if run_visualization:
+        print("\n\n" + "=" * 100)
+        print("STEP 3: ALIGNMENT VISUALIZATION")
+        print("=" * 100 + "\n")
+        print("  Visualization functionality can be added here...")
+        print("  (See existing visualization functions in the file)")
+    
+    print("\n" + "#" * 100)
+    print("# WORKFLOW COMPLETE")
+    print("#" * 100 + "\n")
+    
+    if save_reports:
+        print(f"All reports saved to: {ALIGNMENT_REPORTS}")
+        print("")
+        print("Generated files:")
+        if run_sampling_rate_validation:
+            print(f"  - sampling_rate_validation_report.csv")
+        if run_muscle_validation:
+            print(f"  - muscle_comparison_all_subjects.csv")
+        print("")
