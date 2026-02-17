@@ -158,8 +158,9 @@ def prepare_log_frame(log_frame: pd.DataFrame, set_time_index: bool = True) -> p
 
 
     ############### Extract Values and Extend ###############
-    # todo: pull task end 3s ahead, since there is on average a slight delay -> window closing, RMSE computation, RMSE documentation
-    def add_task_freqs_and_average_rmse(df: pd.DataFrame, avg_end_delay_seconds: float = 3.0) -> pd.DataFrame:
+    def add_task_freqs_and_average_rmse(df: pd.DataFrame,
+                                        avg_end_delay_seconds: float = 6.0,  # pretty high, but prevents analysis of transients
+                                        ) -> pd.DataFrame:
         """ Based on Questionnaire (given) """
         # Step 1: Extract frequency and RMSE values
         df['Task Frequency'] = df['Questionnaire'].str.extract(
@@ -202,6 +203,7 @@ def prepare_log_frame(log_frame: pd.DataFrame, set_time_index: bool = True) -> p
         end_times = df.loc[is_end, 'Time'].values  # find the times of end markers
         adjusted_is_end = pd.Series(False, index=df.index)  # this will hold the adjusted values
         for end_time in end_times:  # find the closest row where Time <= (end_time - avg_end_delay_seconds) for each
+            # pull task end 3s ahead, since there is on average a slight delay -> window closing, RMSE computation, RMSE documentation
             target_time = end_time - pd.Timedelta(seconds=avg_end_delay_seconds)
             task_of_end = df.loc[is_end & (df['Time'] == end_time), 'task_id'].iloc[0]
 
@@ -529,7 +531,8 @@ def get_song_start_end(df: pd.DataFrame,
 def get_task_start_end(df: pd.DataFrame,
                        song_id: int | None = None, song_title: str | None = None,
                        trial_id: int | None = None,
-                       silence_id: int | None = None) -> tuple[pd.Timestamp, pd.Timestamp]:
+                       silence_id: int | None = None,
+                       cut_off_sec_to_prevent_transients: float = 2.0) -> tuple[pd.Timestamp, pd.Timestamp]:
     if song_id is None and song_title is None and silence_id is None and trial_id is None:
         raise ValueError("Either song_id, song_title, trial_id or silence_id must be specified")
 
@@ -580,11 +583,17 @@ def get_task_start_end(df: pd.DataFrame,
     else:
         raise ValueError('df must contain "Time" column or DatetimeIndex!')
 
-    return times.min(), times.max()
+    start, end = times.min(), times.max()
+
+    if cut_off_sec_to_prevent_transients > 0:
+        end = end - pd.Timedelta(seconds=cut_off_sec_to_prevent_transients)
+
+    return start, end
 
 
 def get_all_task_start_ends(enriched_log_df: pd.DataFrame,
                             output_type: Literal['dict', 'list'] = 'dict',
+                            cut_off_sec_to_prevent_transients: float = 2.0,
                             ) -> dict[int, tuple[pd.Timestamp, pd.Timestamp]] | list[tuple[pd.Timestamp, pd.Timestamp]]:
     if output_type == 'dict': trial_start_end_dict: dict[int, tuple[pd.Timestamp, pd.Timestamp]] = {}
     else: start_end_list: list[tuple[pd.Timestamp, pd.Timestamp]] = []
@@ -592,7 +601,8 @@ def get_all_task_start_ends(enriched_log_df: pd.DataFrame,
     for trial in enriched_log_df['Trial ID'].unique():
         if pd.isna(trial): continue
         try:
-            start, end = get_task_start_end(enriched_log_df, trial_id=trial)
+            start, end = get_task_start_end(enriched_log_df, trial_id=trial,
+                                            cut_off_sec_to_prevent_transients=cut_off_sec_to_prevent_transients)
             start = make_timezone_aware(start)
             end = make_timezone_aware(end)
         except ValueError:
@@ -604,47 +614,193 @@ def get_all_task_start_ends(enriched_log_df: pd.DataFrame,
     return trial_start_end_dict if output_type == 'dict' else start_end_list
 
 
+def get_qtc_measurement_start_end(df: pd.DataFrame, verbose: bool = True,
+                                  assumed_latency_sec: float = .75) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """
+    Derive QTC measurement duration from trigger events in DataFrame.
 
-def get_qtc_measurement_start_end(df: pd.DataFrame, verbose: bool = True) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """ Derive QTC measurement duration based on 'Start Trigger' and 'Stop Trigger' keywords in 'Event' column.
-    If during data-integration, 'Actual Start Trigger' was inserted to indicate a measurement cut-off, this will be leveraged."""
-    df = df.copy()  # copied here because we change the index below
+    Extracts measurement start and end times based on 'Start Trigger' and
+    'Stop Trigger' keywords in the 'Event' column. Optionally applies a
+    latency adjustment to account for system delays. If an 'Actual Start
+    Trigger' event is found (inserted during data integration to indicate
+    a measurement cut-off), it overrides the standard start trigger.
 
-    # convert to datetime index timestamps:
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame containing EEG/EMG event data. Must have either:
+        - A DatetimeIndex, OR
+        - A 'Time' column with datetime-compatible values
+        Additionally requires an 'Event' column containing trigger keywords.
+
+    verbose : bool, default True
+        If True, prints informative messages about found triggers and
+        measurement duration. If False, suppresses all output messages.
+
+    assumed_latency_sec : float, default 0.75
+        Latency adjustment in seconds to add to trigger timestamps.
+        Accounts for system delays between trigger recording and actual
+        measurement start/stop. Set to 0 to use raw trigger times.
+
+    Returns
+    -------
+    tuple[pd.Timestamp, pd.Timestamp]
+        A tuple containing:
+
+        qtc_start : pd.Timestamp
+            Start timestamp of the QTC measurement period, timezone-aware (UTC).
+            Derived from 'Start Trigger' or 'Actual Start Trigger' event,
+            or first timestamp in DataFrame if no trigger found.
+
+        qtc_end : pd.Timestamp
+            End timestamp of the QTC measurement period, timezone-aware (UTC).
+            Derived from 'Stop Trigger' event, or last timestamp in
+            DataFrame if no trigger found.
+
+    Raises
+    ------
+    ValueError
+        If DataFrame lacks both a DatetimeIndex and a 'Time' column.
+
+    KeyError
+        If DataFrame does not contain an 'Event' column.
+
+    ValueError
+        If multiple 'Start Trigger' or 'Stop Trigger' events are found
+        (ambiguous trigger specification).
+
+    Notes
+    -----
+    **Trigger Priority:**
+
+    The function searches for triggers in the following order:
+
+    1. 'Start Trigger' → standard measurement start
+    2. 'Actual Start Trigger' → overrides start if found (indicates cut-off)
+    3. 'Stop Trigger' → standard measurement end
+
+    If triggers are missing, falls back to DataFrame boundaries (min/max index).
+
+    **Timezone Handling:**
+
+    Output timestamps are always timezone-aware in UTC. If input timestamps
+    are timezone-naive, UTC is assumed and assigned via `.tz_localize()`.
+    If already timezone-aware, they are converted to UTC via `.tz_convert()`.
+
+    **Latency Adjustment:**
+
+    The `assumed_latency_sec` parameter compensates for recording delays:
+
+    - Default 0.75 sec accounts for typical EEG system latency
+    - Applied to both start and end triggers via `pd.Timedelta`
+    - Use 0 if timestamps already reflect actual measurement times
+
+    **Data Integration Context:**
+
+    During preprocessing, if initial measurements are invalid (e.g., electrode
+    settling), an 'Actual Start Trigger' event may be inserted to mark the
+    true analysis window. This function respects that override.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> df = pd.DataFrame({
+    ...     'Time': pd.to_datetime(['2024-01-01 10:00:00',
+    ...                             '2024-01-01 10:00:05',
+    ...                             '2024-01-01 10:05:00']),
+    ...     'Event': ['Start Trigger', 'Some Event', 'Stop Trigger']
+    ... })
+    >>> start, end = get_qtc_measurement_start_end(df, verbose=True)
+    EEG and EMG measurements last from 2024-01-01 10:00:00.750000+00:00 to 2024-01-01 10:05:00.750000+00:00!
+
+    >>> # With actual start trigger override
+    >>> df_override = pd.DataFrame({
+    ...     'Time': pd.to_datetime(['2024-01-01 10:00:00',
+    ...                             '2024-01-01 10:00:10',
+    ...                             '2024-01-01 10:05:00']),
+    ...     'Event': ['Start Trigger', 'Actual Start Trigger', 'Stop Trigger']
+    ... })
+    >>> start, end = get_qtc_measurement_start_end(df_override)
+    Found 'Actual Start Trigger' event, indicating cut-off of initial measurements...
+    """
+    # Create copy to avoid modifying original DataFrame
+    df = df.copy()
+
+    # Validate that 'Event' column exists
+    if 'Event' not in df.columns:
+        raise KeyError("DataFrame must contain an 'Event' column with trigger information.")
+
+    # Convert to DatetimeIndex if needed
     if isinstance(df.index, pd.DatetimeIndex):
         pass
     elif 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'])
         df.set_index('Time', inplace=True)
     else:
-        raise ValueError('df must contain "Time" column or DatetimeIndex!')
+        raise ValueError('DataFrame must contain "Time" column or have a DatetimeIndex!')
 
-    try:  # retrieve start of QTC measurement
-        qtc_start = df.loc[df['Event'] == "Start Trigger"].index.item()
-    except ValueError:  # if 'Start Trigger' not found
-        print("No 'Start Trigger' event found, assuming measurement started upon beginning")
+    # Retrieve start of QTC measurement
+    try:
+        start_trigger_matches = df.loc[df['Event'] == "Start Trigger"]
+        if len(start_trigger_matches) > 1:
+            raise ValueError(f"Found {len(start_trigger_matches)} 'Start Trigger' events. Expected exactly one.")
+        qtc_start = start_trigger_matches.index.item()
+        if assumed_latency_sec > 0:
+            qtc_start = qtc_start + pd.Timedelta(seconds=assumed_latency_sec)
+    except ValueError as e:
+        if "Found" in str(e) and "Start Trigger" in str(e):
+            raise  # Re-raise if multiple triggers found
+        # No 'Start Trigger' found
+        if verbose:
+            print("No 'Start Trigger' event found, assuming measurement started at beginning")
         qtc_start = df.index.min()
 
-    try:  # retrieve end
-        qtc_end = df.loc[df['Event'] == "Stop Trigger"].index.item()
-    except ValueError:  # if 'Stop Trigger' not found
-        print("No 'Stop Trigger' event found, assuming measurement ran until end.")
+    # Retrieve end of QTC measurement
+    try:
+        stop_trigger_matches = df.loc[df['Event'] == "Stop Trigger"]
+        if len(stop_trigger_matches) > 1:
+            raise ValueError(f"Found {len(stop_trigger_matches)} 'Stop Trigger' events. Expected exactly one.")
+        qtc_end = stop_trigger_matches.index.item()
+        if assumed_latency_sec > 0:
+            qtc_end = qtc_end + pd.Timedelta(seconds=assumed_latency_sec)
+    except ValueError as e:
+        if "Found" in str(e) and "Stop Trigger" in str(e):
+            raise  # Re-raise if multiple triggers found
+        # No 'Stop Trigger' found
+        if verbose:
+            print("No 'Stop Trigger' event found, assuming measurement ran until end.")
         qtc_end = df.index.max()
 
+    # Check for 'Actual Start Trigger' override
     try:
-        actual_qtc_start = df.loc[df['Event'] == "Actual Start Trigger"].index.item()
-        print(f"Found 'Actual Start Trigger' event, indicating cut-off of initial measurements. Will return actual start timestamp: {actual_qtc_start}")
+        actual_trigger_matches = df.loc[df['Event'] == "Actual Start Trigger"]
+        if len(actual_trigger_matches) > 1:
+            raise ValueError(
+                f"Found {len(actual_trigger_matches)} 'Actual Start Trigger' events. Expected at most one.")
+        actual_qtc_start = actual_trigger_matches.index.item()
+        if verbose:
+            print(f"Found 'Actual Start Trigger' event, indicating cut-off of initial measurements. "
+                  f"Will return actual start timestamp: {actual_qtc_start}")
         qtc_start = actual_qtc_start
-    except ValueError:
+    except ValueError as e:
+        if "Found" in str(e) and "Actual Start Trigger" in str(e):
+            raise  # Re-raise if multiple triggers found
+        # No 'Actual Start Trigger' found, which is expected
         pass
 
-    # make timezone-aware:
+    # Make timezone-aware (UTC)
     if qtc_start.tz is None:
         qtc_start = qtc_start.tz_localize('UTC')
+    else:
+        qtc_start = qtc_start.tz_convert('UTC')
+
     if qtc_end.tz is None:
         qtc_end = qtc_end.tz_localize('UTC')
+    else:
+        qtc_end = qtc_end.tz_convert('UTC')
 
-    if verbose: print(f"EEG and EMG measurements last from {qtc_start} to {qtc_end}!\n")
+    if verbose:
+        print(f"EEG and EMG measurements last from {qtc_start} to {qtc_end}!\n")
 
     return qtc_start, qtc_end
 
@@ -1303,6 +1459,7 @@ def fetch_serial_measurements(subject_data_dir: Path, load_only_first_n_seconds:
 
     if set_time_index:  # set time index if desired
         result = result.set_index("Time")
+        result.index = make_timezone_aware(result.index)
 
     return result
 
@@ -1507,6 +1664,7 @@ def fetch_enriched_log_frame(experiment_data_dir: str | Path, set_time_index: bo
         if set_time_index:
             log_frame['Time'] = pd.to_datetime(log_frame['Time'])
             log_frame = log_frame.set_index("Time")
+            log_frame.index = make_timezone_aware(log_frame.index)
     except ValueError:
         raise ValueError(f"Couldn't find enriched (integrated) experiment log frame with signature 'Enriched Experiment Log' in file title within {log_dir}...\nPlease ensure to run data_integration_workflow.py on subject data beforehand.")
 
@@ -1523,8 +1681,9 @@ def fetch_enriched_log_frame(experiment_data_dir: str | Path, set_time_index: bo
         skipped_trials = fetch_skipped_trials(log_frame)
         if len(skipped_trials) > 0:
             print(f"- Thereof {len(skipped_trials)} trial(s) skipped: {skipped_trials}")
+        invalid_trials = set(skipped_trials + excluded_trials)  # use set to prevent duplicates
         if len(skipped_trials) > 0 or len(excluded_trials) > 0:
-            print(f"- Remaining valid trials: {int(log_frame['Trial ID'].max()+1) - len(skipped_trials) - len(excluded_trials)}")
+            print(f"- Remaining valid trials: {int(log_frame['Trial ID'].max()+1) - len(invalid_trials)}")
 
         # music info:
         print(f"- Valid trial list:")
