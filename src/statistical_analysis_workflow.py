@@ -32,11 +32,29 @@ if __name__ == '__main__':
 
 
     ##### PARAMETERS
-    n_within_trial_segments: int = 5  # slices per 45s trial
-    overwrite: bool = False  # compute new frame
-    show_effect_plots: bool = False
-    # which comparison levels?
-    lvls_to_include: list[Literal['lvl0', 'lvl1', 'lvl2', 'lvl3', 'lvl4']] = ['lvl0', 'lvl1', 'lvl2', 'lvl3', 'lvl4']
+    # feature extraction:
+    n_within_trial_segments: int = 40 # slices per ~40s trial
+    overwrite: bool = False  # ALWAYS compute new frame
+
+    # data exploration:
+    add_bin_features_dict: dict[str, int] = {'Median Force Level [0-1]': 4, 'Familiarity [0-7]': 5,
+                                               'GSR [0-3.3]': 4, 'Trial ID': 4}
+    # creates bin index for per subject values to be used as categories (new col. will be named "{OLD_COL}_bin")
+    cmc_plot_categories: list[str] = ['Subject ID', 'Category or Silence', 'Familiarity [0-7]_bin', 'Trial ID_bin',
+                                      'Median Force Level [0-1]_bin', 'GSR [0-3.3]_bin']
+    # subject wise line plots:
+    plot_cmc_lineplots: bool = False
+    save_cmc_lineplots: bool = True
+    # compound scatters:
+    show_cmc_scatterplots: bool = False
+    save_cmc_scatterplots: bool = True
+
+
+    # statistical analysis:
+    conduct_analysis: bool = True
+    show_effect_plots: bool = True
+    lvls_to_include: list[Literal['lvl0', 'lvl1', 'lvl2', 'lvl3', 'lvl4']] = ['lvl0', 'lvl1', 'lvl2', 'lvl3']
+
 
 
     #####################################################
@@ -74,7 +92,7 @@ if __name__ == '__main__':
         #       -> 'alpha' (auditory attention)
         #       -> 'beta' (motor control)
         #       -> 'gamma'
-            
+
         # window lenghts:
         psd_time_window_size_sec = .25
         psd_is_log_scaled: bool = True  # define whether PSD was log scaled during feature extraction
@@ -105,7 +123,7 @@ if __name__ == '__main__':
 
         # window lengths:
         cmc_time_window_size_sec = 2.0
-        
+
 
 
 
@@ -168,6 +186,7 @@ if __name__ == '__main__':
 
             ### DERIVE SEGMENT TIMESPANS
             # trial start end times:
+            # (contains default cut-off seconds to prevent transients!)
             trial_start_end_dict = data_integration.get_all_task_start_ends(log_df, 'dict')
             # convert into segment start end times:
             seg_starts = []; seg_ends = []
@@ -406,7 +425,7 @@ if __name__ == '__main__':
                                       ('Emotional State [0-7]', emotional_state_per_segment),
                                       ('Median Heart Rate [bpm]', bpm_per_segment),
                                       ('Median HRV [sec]', hrv_per_segment),
-                                      ('Galvanic Skin Response [0-3.3]', gsr_per_segment),
+                                      ('GSR [0-3.3]', gsr_per_segment),
                                       # music features:
                                       ('Perceived Category', song_category_per_segment),
                                       ('Category or Silence', category_or_silence),
@@ -444,246 +463,409 @@ if __name__ == '__main__':
 
 
     #######################################################
+    ################ DATA EXPLORATION #####################
+    #######################################################
+
+    all_subject_data_frame = data_analysis.create_trial_bins(
+        df=all_subject_data_frame,
+        columns_to_bin=list(add_bin_features_dict.keys()),
+        n_bins_dict=add_bin_features_dict,
+
+    )
+
+
+
+    if plot_cmc_lineplots:
+        cmc_operator: Literal['mean', 'max'] = 'mean'
+        print(features.compute_cmc_independence_threshold(5, .2))
+        cmc_plot_min, cmc_plot_max = .7, 1.0  # independence thresholds: 80% -> .673, 90% -> .753
+        n_yticks: int = 4
+        include_std_dev: bool = True
+        std_dev_factor: float = .2
+        colormap = 'tab20'
+
+        # plot CMC per subject and category:
+        for muscle in ['Flexor', 'Extensor']:
+
+            # loop over categories (new plot per category)
+            for category_column in cmc_plot_categories:
+                if category_column == 'Subject ID': continue  # doesn't work, we split by subject anyways
+                print(f"Plotting CMC lineplot for category: {category_column}")
+                unique_labels = all_subject_data_frame[category_column].dropna().unique().tolist()
+                unique_labels.sort()  # sort values
+    
+                # sample colors evenly from colormap
+                cmap = plt.colormaps[colormap]  # or 'viridis', 'plasma', 'Set3', etc.
+                colors = [cmap(i / len(unique_labels)) for i in range(len(unique_labels))]
+
+                # create legend handles for all unique labels (to ensure complete legend):
+                from matplotlib.lines import Line2D
+                legend_handles = [Line2D([0], [0], color=color, lw=2, label=label)
+                                  for color, label in zip(colors, unique_labels)]
+    
+                # subplot per subject and band:
+                subject_ids = all_subject_data_frame['Subject ID'].unique().tolist()
+                fig, axs = plt.subplots(2, # top: beta, bottom: gamma
+                                        len(subject_ids), figsize=(20, 10))
+    
+                # loop over bands:
+                for row_ind, freq_band in enumerate(['beta', 'gamma']):
+    
+                    # loop over subjects:
+                    for col_ind, subject_id in enumerate(subject_ids):
+                        # derive relevant data:
+                        subject_frame = all_subject_data_frame[all_subject_data_frame['Subject ID'] == subject_id]
+    
+                        # prepare x-labels: (0 = trial start, 1 = trial end)
+                        x_ticks = np.linspace(0, 1,
+                                              max(n_within_trial_segments, 2))  # at least 2 (should plot line not point)
+    
+                        for color, category in zip(colors, unique_labels):
+                            category_frame = subject_frame[subject_frame[category_column] == category]
+    
+                            # averaging is important if there are multiple trials per category:
+                            # (and does no harm otherwise)
+                            within_trial_counter = category_frame.groupby('Trial ID').cumcount()
+                            grouped_cmc_timesteps = category_frame[f"CMC_{muscle}_{cmc_operator}_{freq_band}"].groupby(within_trial_counter)
+                            cmc_series = grouped_cmc_timesteps.mean().to_numpy()
+                            cmc_std = grouped_cmc_timesteps.std().to_numpy()
+    
+                            if len(cmc_series) == 0: continue  # no entries for that category instance
+    
+                            if len(cmc_series) == 1:  # if only one sample, draw line between start and end
+                                cmc_series = np.array([cmc_series[0], cmc_series[0]])
+                                cmc_std = np.array([cmc_std[0], cmc_std[0]])
+    
+                            # plot line with std. dev:
+                            axs[row_ind, col_ind].plot(x_ticks, cmc_series, label=category, color=color)
+                            if include_std_dev:
+                                axs[row_ind, col_ind].fill_between(x_ticks, cmc_series - std_dev_factor * cmc_std, cmc_series + std_dev_factor * cmc_std, alpha=0.2,
+                                                                   color=color)
+    
+                        # formatting:
+                        if row_ind == 0:  # titles for top row
+                            axs[row_ind, col_ind].set_title(f"Subject {subject_id:02}")
+                        # y label for left column:
+                        if col_ind == 0:
+                            axs[row_ind, col_ind].set_ylabel(f"{muscle} {freq_band.capitalize()} CMC (Mean{f' ± {std_dev_factor:.1f}x Std.Dev.' if include_std_dev else ''})")
+                        else:
+                            axs[row_ind, col_ind].set_ylabel('')
+                        # yticks:
+                        y_ticks = np.linspace(cmc_plot_min, cmc_plot_max, n_yticks)
+                        axs[row_ind, col_ind].set_yticks(y_ticks)  # no effect, but prevents warning for below
+                        if col_ind != 0:  # remove y labels:
+                            axs[row_ind, col_ind].set_yticklabels([''] * len(y_ticks))
+                        # equal y-axis limits:
+                        axs[row_ind, col_ind].set_ylim([cmc_plot_min, cmc_plot_max])
+                        # grid:
+                        axs[row_ind, col_ind].grid()
+                        # legend:
+                        if row_ind == 1 and col_ind == (len(subject_ids) - 1):  # lower right plot receives legend
+                            axs[row_ind, col_ind].legend(handles=legend_handles, bbox_to_anchor=(1.0, 0.0),
+                                                         loc='lower left', title=category_column,)
+    
+                        # x ticks and label:
+                        if row_ind == 1:  # only lower row
+                            if len(x_ticks) > 2:  # insert middle
+                                x_tick_labels = ['Start'] + [''] * (len(x_ticks) - 2) + ['End']
+                            else:
+                                x_tick_labels = ['Start', 'End']
+                            # x label:
+                            axs[row_ind, col_ind].set_xlabel("Trial Time")
+                        else:
+                            x_tick_labels = [""] * len(x_ticks)
+                            axs[row_ind, col_ind].set_xlabel('')
+                        # enforce x ticks:
+                        axs[row_ind, col_ind].set_xticks(x_ticks)
+                        axs[row_ind, col_ind].set_xticklabels(x_tick_labels)
+
+                # figure title:
+                fig.suptitle(f"CMC per Subject and {category_column}")
+    
+                # (eventually) save figure:
+                if save_cmc_lineplots:
+                    save_path = STATISTICS_OUTPUT_DATA / filemgmt.file_title(f"CMC {muscle} per Subject per {category_column}", ".svg")
+                    fig.savefig(save_path, bbox_inches='tight')
+                
+                # show:
+                plt.show()
+
+
+
+
+
+    # dependent var (plot beta + gamma scatter for flexor + extensor) for each category:
+    # [((x_column, x_label), (y_column, y_label), category_column), ...]
+    if show_cmc_scatterplots:
+        scatters_to_plot: list[tuple[tuple[str, str], tuple[str, str], str]] = []
+        for category_column in cmc_plot_categories:
+            scatters_to_plot.append(
+                (('CMC_Flexor_mean_beta', 'CMC Flexor Avg. Beta'), ('CMC_Flexor_mean_gamma', 'CMC Flexor Avg. Gamma'),
+                 category_column))
+            scatters_to_plot.append(
+                (('CMC_Extensor_mean_beta', 'CMC Extensor Avg. Beta'), ('CMC_Extensor_mean_gamma', 'CMC Extensor Avg. Gamma'),
+                 category_column))
+
+
+        # scatters:
+        for (x, x_label), (y, y_label), category_column in scatters_to_plot:
+            dataframe_subset = all_subject_data_frame.dropna(subset=[x, y, category_column])
+            x_data = dataframe_subset[x]
+            y_data = dataframe_subset[y]
+            category_list = dataframe_subset[category_column]
+            visualizations.plot_scatter(x=x_data, x_label=x_label,
+                                        y=y_data, y_label=y_label,
+                                        category_list=category_list,
+                                        category_label=category_column,
+                                        save_dir=STATISTICS_OUTPUT_DATA,
+                                        cmap='tab20',
+                                        )
+
+
+
+
+    #######################################################
     ################ STATISTICAL ANALYSIS #################
     #######################################################
-    
-    # Store all results and diagnostics for summary tables
-    all_model_results = []
-    all_diagnostics = []
-    
-    for hypothesis, dependent_variable in [
-        # CMC Hypotheses:
-        ('H1: Flexor Beta Peak CMC Increases with Music', "CMC_Flexor_max_beta"),
-        ('H1: Flexor Beta Avg. CMC Increases with Music', "CMC_Flexor_mean_beta"),
-        ('H1: Flexor Gamma Peak CMC Increases with Music', "CMC_Flexor_max_gamma"),
-        ('H1: Flexor Gamma Avg. CMC Increases with Music', "CMC_Flexor_mean_gamma"),
-        ('H1: Extensor Beta Peak CMC Increases with Music', "CMC_Extensor_max_beta"),
-        ('H1: Extensor Beta Avg. CMC Increases with Music', "CMC_Extensor_mean_beta"),
-        ('H1: Extensor Gamma Peak CMC Increases with Music', "CMC_Extensor_max_gamma"),
-        ('H1: Extensor Gamma Avg. CMC Increases with Music', "CMC_Extensor_mean_gamma"),
 
-        # EEG-PSD Hypotheses:
-        ('H2: Temporal Prediction PSD Increases with Music', 'PSD_eeg_FC_CP_T_theta'),
-        ('H3: Vigilance PSD Increases with Music', 'PSD_eeg_F_C_beta'),
-        ('H4: Internal vs. External Attention PSD changes with Music', 'PSD_eeg_P_PO_alpha'),
-        ('H5: Long Range Interactions PSD Increases with Music', 'PSD_eeg_Global_gamma'),
+    if conduct_analysis:
+        # Store all results and diagnostics for summary tables
+        all_model_results = []
+        all_diagnostics = []
 
-        # Validation Hypotheses (EMG PSD):
-        ('VALIDATION: EMG Flexor PSD Increases with Force', 'PSD_emg_1_flexor_Global_all'),
-        ('VALIDATION: EMG Extensor PSD Increases with Force', 'PSD_emg_2_extensor_Global_all'), ]:
+        for hypothesis, dependent_variable in [
+            # CMC Hypotheses:
+            ('H1: Flexor Beta Peak CMC Increases with Music', "CMC_Flexor_max_beta"),
+            ('H1: Flexor Beta Avg. CMC Increases with Music', "CMC_Flexor_mean_beta"),
+            ('H1: Flexor Gamma Peak CMC Increases with Music', "CMC_Flexor_max_gamma"),
+            ('H1: Flexor Gamma Avg. CMC Increases with Music', "CMC_Flexor_mean_gamma"),
+            ('H1: Extensor Beta Peak CMC Increases with Music', "CMC_Extensor_max_beta"),
+            ('H1: Extensor Beta Avg. CMC Increases with Music', "CMC_Extensor_mean_beta"),
+            ('H1: Extensor Gamma Peak CMC Increases with Music', "CMC_Extensor_max_gamma"),
+            ('H1: Extensor Gamma Avg. CMC Increases with Music', "CMC_Extensor_mean_gamma"),
 
-        # Intro String:
-        print("\n")
-        print("=" * 100)
-        print("=" * 100)
-        print(f"HYPOTHESIS:\t\t{hypothesis} ")
-        print(f"DEPENDENT VARIABLE:\t{dependent_variable}")
-        print("=" * 100)
-        print("=" * 100, "\n"*3)
+            # EEG-PSD Hypotheses:
+            ('H2: Temporal Prediction PSD Increases with Music', 'PSD_eeg_FC_CP_T_theta'),
+            ('H3: Vigilance PSD Increases with Music', 'PSD_eeg_F_C_beta'),
+            ('H4: Internal vs. External Attention PSD changes with Music', 'PSD_eeg_P_PO_alpha'),
+            ('H5: Long Range Interactions PSD Increases with Music', 'PSD_eeg_Global_gamma'),
 
+            # Validation Hypotheses (EMG PSD):
+            ('VALIDATION: EMG Flexor PSD Increases with Force', 'PSD_emg_1_flexor_Global_all'),
+            ('VALIDATION: EMG Extensor PSD Increases with Force', 'PSD_emg_2_extensor_Global_all'), ]:
 
-        ############# COMPARISON LEVELS #############
-        if "lvl0" in lvls_to_include:
-            # Level 0: Music + Force + Trial ID (all data)
-            level0_results = statistics.fit_both_models(
-                df=all_subject_data_frame,
-                response_var=dependent_variable,
-                condition_vars={'Music Listening': 'categorical'},
-                reference_categories={'Music Listening': 'False'},
-                explanatory_vars=['Median Force Level [0-1]', 'Trial ID'],
-                comparison_level_name='Level 0 (Music + Force + Trial ID)',
-                hypothesis_name=hypothesis,
-                n_windows_per_trial=n_within_trial_segments
-            )
-
-            statistics.store_model_results(
-                model_results=level0_results,
-                hypothesis_name=hypothesis,
-                dependent_variable=dependent_variable,
-                comparison_level_name='Level 0 (Music + Force + Trial ID)',
-                all_results_list=all_model_results,
-                diagnostics_list=all_diagnostics
-            )
-
-        if "lvl1" in lvls_to_include:
-            # Level 1: Music Categories or Silence
-            level1_results = statistics.fit_both_models(
-                df=all_subject_data_frame,
-                response_var=dependent_variable,
-                condition_vars={
-                    # changed:
-                    'Category or Silence': 'categorical',
-                },
-                reference_categories={'Category or Silence': 'Silence'},
-                explanatory_vars=['Median Force Level [0-1]', 'Trial ID'],
-                comparison_level_name='Level 1 (Category or Silence + Force + Trial ID)',
-                hypothesis_name=hypothesis,
-                n_windows_per_trial=n_within_trial_segments
-            )
-
-            statistics.store_model_results(
-                model_results=level1_results,
-                hypothesis_name=hypothesis,
-                dependent_variable=dependent_variable,
-                comparison_level_name='Level 1 (Category or Silence + Force + Trial ID)',
-                all_results_list=all_model_results,
-                diagnostics_list=all_diagnostics
-            )
-
-        if "lvl2" in lvls_to_include:
-            # Level 2: Subjective Music Features (music trials only)
-            level2_results = statistics.fit_both_models(
-                df=all_subject_data_frame.loc[all_subject_data_frame['Music Listening']],
-                response_var=dependent_variable,
-                condition_vars={
-                    # changed:
-                    'Perceived Category': 'categorical',
-                    'Familiarity [0-7]': 'ordinal'
-                },
-                reference_categories={'Perceived Category': 'Classical'},
-                explanatory_vars=['Median Force Level [0-1]', 'Trial ID',
-                                  # new:
-                                  'Liking [0-7]'],
-                comparison_level_name='Level 2 (Subjective Music Features + Force + Trial ID)',
-                hypothesis_name=hypothesis,
-                n_windows_per_trial=n_within_trial_segments
-            )
-
-            statistics.store_model_results(
-                model_results=level2_results,
-                hypothesis_name=hypothesis,
-                dependent_variable=dependent_variable,
-                comparison_level_name='Level 2 (Subjective Music Features + Force + Trial ID)',
-                all_results_list=all_model_results,
-                diagnostics_list=all_diagnostics
-            )
-
-        if "lvl3" in lvls_to_include:
-            # Level 3: Add Emotional State and Biomarkers (music trials only)
-            level3_results = statistics.fit_both_models(
-                df=all_subject_data_frame.loc[all_subject_data_frame['Music Listening']],
-                response_var=dependent_variable,
-                condition_vars={
-                    'Perceived Category': 'categorical',
-                    'Familiarity [0-7]': 'ordinal'
-                },
-                reference_categories={'Perceived Category': 'Classical'},
-                explanatory_vars=['Median Force Level [0-1]', 'Trial ID', 'Liking [0-7]',
-                                  # new:
-                                  'Emotional State [0-7]',
-                                  'Median Heart Rate [bpm]', 'Median HRV [sec]', 'Galvanic Skin Response [0-3.3]'],
-                comparison_level_name='Level 3 (Emotional State + Biomarkers + Subjective Music Features + Force + Trial ID)',
-                hypothesis_name=hypothesis,
-                n_windows_per_trial=n_within_trial_segments
-            )
-
-            statistics.store_model_results(
-                model_results=level3_results,
-                hypothesis_name=hypothesis,
-                dependent_variable=dependent_variable,
-                comparison_level_name='Level 3 (Emotional State + Biomarkers + Subjective Music Features + Force + Trial ID)',
-                all_results_list=all_model_results,
-                diagnostics_list=all_diagnostics
-            )
-
-        if "lvl4" in lvls_to_include:
-            # Level 4: Add Objective Music Features (music trials only)
-            level4_results = statistics.fit_both_models(
-                df=all_subject_data_frame.loc[all_subject_data_frame['Music Listening']],
-                response_var=dependent_variable,
-                condition_vars={
-                    'Perceived Category': 'categorical',
-                    'Familiarity [0-7]': 'ordinal'
-                },
-                reference_categories={'Perceived Category': 'Classical'},
-                explanatory_vars=['Median Force Level [0-1]', 'Trial ID', 'Liking [0-7]',
-                                  'Emotional State [0-7]',
-                                  'Median Heart Rate [bpm]', 'Median HRV [sec]', 'Galvanic Skin Response [0-3.3]',
-                                  # new:
-                                  'BPM_manual', 'Spectral Flux Mean', 'Spectral Centroid Mean', 'IOI Variance Coeff',
-                                  'Syncopation Ratio'],
-                comparison_level_name='Level 4 (Objective Music Features + Emotional State + Biomarkers + Subjective Music Features + Force + Trial ID)',
-                hypothesis_name=hypothesis,
-                n_windows_per_trial=n_within_trial_segments
-            )
-
-            statistics.store_model_results(
-                model_results=level4_results,
-                hypothesis_name=hypothesis,
-                dependent_variable=dependent_variable,
-                comparison_level_name='Level 4 (Objective Music Features + Emotional State + Biomarkers + Subjective Music Features + Force + Trial ID)',
-                all_results_list=all_model_results,
-                diagnostics_list=all_diagnostics
-            )
-
-    
-    # ============================================================================
-    # Summary statistics
-    # ============================================================================
-
-    # Generate all summary tables with one function call
-    statistics.generate_all_summary_tables(
-        results_df=pd.DataFrame(all_model_results),
-        output_dir=STATISTICS_OUTPUT_DATA,
-        diagnostics_df=pd.DataFrame(all_diagnostics),
-        file_identifier=f"{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-    )
+            # Intro String:
+            print("\n")
+            print("=" * 100)
+            print("=" * 100)
+            print(f"HYPOTHESIS:\t\t{hypothesis} ")
+            print(f"DEPENDENT VARIABLE:\t{dependent_variable}")
+            print("=" * 100)
+            print("=" * 100, "\n"*3)
 
 
+            ############# COMPARISON LEVELS #############
+            if "lvl0" in lvls_to_include:
+                # Level 0: Music + Force + Trial ID (all data)
+                level0_results = statistics.fit_both_models(
+                    df=all_subject_data_frame,
+                    response_var=dependent_variable,
+                    condition_vars={'Music Listening': 'categorical'},
+                    reference_categories={'Music Listening': 'False'},
+                    explanatory_vars=['Median Force Level [0-1]', 'Trial ID'],
+                    comparison_level_name='Level 0 (Music + Force + Trial ID)',
+                    hypothesis_name=hypothesis,
+                    n_windows_per_trial=n_within_trial_segments
+                )
 
-    # ============================================================================
-    # Subject-specific analysis
-    # ============================================================================
+                statistics.store_model_results(
+                    model_results=level0_results,
+                    hypothesis_name=hypothesis,
+                    dependent_variable=dependent_variable,
+                    comparison_level_name='Level 0 (Music + Force + Trial ID)',
+                    all_results_list=all_model_results,
+                    diagnostics_list=all_diagnostics
+                )
 
-    # After all models are run
-    filemgmt.assert_dir(STATISTICS_OUTPUT_DATA / f"subject_level_effects_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}")
-    statistics.create_subject_effect_summary(
-        all_model_results=all_model_results,
-        original_data=all_subject_data_frame,
-        output_dir=STATISTICS_OUTPUT_DATA / f"subject_level_effects_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}"
-    )
+            if "lvl1" in lvls_to_include:
+                # Level 1: Music Categories or Silence
+                level1_results = statistics.fit_both_models(
+                    df=all_subject_data_frame,
+                    response_var=dependent_variable,
+                    condition_vars={
+                        # changed:
+                        'Category or Silence': 'categorical',
+                    },
+                    reference_categories={'Category or Silence': 'Silence'},
+                    explanatory_vars=['Median Force Level [0-1]', 'Trial ID'],
+                    comparison_level_name='Level 1 (Category or Silence + Force + Trial ID)',
+                    hypothesis_name=hypothesis,
+                    n_windows_per_trial=n_within_trial_segments
+                )
 
-    # ============================================================================
-    # Plotting
-    # ============================================================================
+                statistics.store_model_results(
+                    model_results=level1_results,
+                    hypothesis_name=hypothesis,
+                    dependent_variable=dependent_variable,
+                    comparison_level_name='Level 1 (Category or Silence + Force + Trial ID)',
+                    all_results_list=all_model_results,
+                    diagnostics_list=all_diagnostics
+                )
 
-    results_frame = pd.DataFrame(all_model_results)
+            if "lvl2" in lvls_to_include:
+                # Level 2: Subjective Music Features (music trials only)
+                level2_results = statistics.fit_both_models(
+                    df=all_subject_data_frame.loc[all_subject_data_frame['Music Listening']],
+                    response_var=dependent_variable,
+                    condition_vars={
+                        # changed:
+                        'Perceived Category': 'categorical',
+                        'Familiarity [0-7]': 'ordinal'
+                    },
+                    reference_categories={'Perceived Category': 'Classical'},
+                    explanatory_vars=['Median Force Level [0-1]', 'Trial ID',
+                                      # new:
+                                      'Liking [0-7]'],
+                    comparison_level_name='Level 2 (Subjective Music Features + Force + Trial ID)',
+                    hypothesis_name=hypothesis,
+                    n_windows_per_trial=n_within_trial_segments
+                )
 
-    # derive unique hypotheses:
-    hypotheses = results_frame['Hypothesis'].dropna().unique().tolist()
+                statistics.store_model_results(
+                    model_results=level2_results,
+                    hypothesis_name=hypothesis,
+                    dependent_variable=dependent_variable,
+                    comparison_level_name='Level 2 (Subjective Music Features + Force + Trial ID)',
+                    all_results_list=all_model_results,
+                    diagnostics_list=all_diagnostics
+                )
 
-    # group hypotheses:
-    cmc_flexor_hypotheses = [h for h in hypotheses if 'CMC' in h and 'Flexor' in h and not 'VALIDATION: ' in h]
-    cmc_extensor_hypotheses = [h for h in hypotheses if 'CMC' in h and 'Extensor' in h and not 'VALIDATION: ' in h]
-    psd_hypotheses = [h for h in hypotheses if 'PSD' in h and not 'VALIDATION: ' in h]
-    validation_hypotheses = [h for h in hypotheses if 'VALIDATION: ' in h]
+            if "lvl3" in lvls_to_include:
+                # Level 3: Add Emotional State and Biomarkers (music trials only)
+                level3_results = statistics.fit_both_models(
+                    df=all_subject_data_frame.loc[all_subject_data_frame['Music Listening']],
+                    response_var=dependent_variable,
+                    condition_vars={
+                        'Perceived Category': 'categorical',
+                        'Familiarity [0-7]': 'ordinal'
+                    },
+                    reference_categories={'Perceived Category': 'Classical'},
+                    explanatory_vars=['Median Force Level [0-1]', 'Trial ID', 'Liking [0-7]',
+                                      # new:
+                                      'Emotional State [0-7]',
+                                      'Median Heart Rate [bpm]', 'Median HRV [sec]', 'GSR [0-3.3]'],
+                    comparison_level_name='Level 3 (Emotional State + Biomarkers + Subjective Music Features + Force + Trial ID)',
+                    hypothesis_name=hypothesis,
+                    n_windows_per_trial=n_within_trial_segments
+                )
+
+                statistics.store_model_results(
+                    model_results=level3_results,
+                    hypothesis_name=hypothesis,
+                    dependent_variable=dependent_variable,
+                    comparison_level_name='Level 3 (Emotional State + Biomarkers + Subjective Music Features + Force + Trial ID)',
+                    all_results_list=all_model_results,
+                    diagnostics_list=all_diagnostics
+                )
+
+            if "lvl4" in lvls_to_include:
+                # Level 4: Add Objective Music Features (music trials only)
+                level4_results = statistics.fit_both_models(
+                    df=all_subject_data_frame.loc[all_subject_data_frame['Music Listening']],
+                    response_var=dependent_variable,
+                    condition_vars={
+                        'Perceived Category': 'categorical',
+                        'Familiarity [0-7]': 'ordinal'
+                    },
+                    reference_categories={'Perceived Category': 'Classical'},
+                    explanatory_vars=['Median Force Level [0-1]', 'Trial ID', 'Liking [0-7]',
+                                      'Emotional State [0-7]',
+                                      'Median Heart Rate [bpm]', 'Median HRV [sec]', 'GSR [0-3.3]',
+                                      # new:
+                                      'BPM_manual', 'Spectral Flux Mean', 'Spectral Centroid Mean', 'IOI Variance Coeff',
+                                      'Syncopation Ratio'],
+                    comparison_level_name='Level 4 (Objective Music Features + Emotional State + Biomarkers + Subjective Music Features + Force + Trial ID)',
+                    hypothesis_name=hypothesis,
+                    n_windows_per_trial=n_within_trial_segments
+                )
+
+                statistics.store_model_results(
+                    model_results=level4_results,
+                    hypothesis_name=hypothesis,
+                    dependent_variable=dependent_variable,
+                    comparison_level_name='Level 4 (Objective Music Features + Emotional State + Biomarkers + Subjective Music Features + Force + Trial ID)',
+                    all_results_list=all_model_results,
+                    diagnostics_list=all_diagnostics
+                )
+
+
+        # ============================================================================
+        # Summary statistics
+        # ============================================================================
+
+        # Generate all summary tables with one function call
+        statistics.generate_all_summary_tables(
+            results_df=pd.DataFrame(all_model_results),
+            output_dir=STATISTICS_OUTPUT_DATA,
+            diagnostics_df=pd.DataFrame(all_diagnostics),
+            file_identifier=f"{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
+        )
 
 
 
-    visualizations.plot_hypothesis_forest_mosaic(results_frame, cmc_flexor_hypotheses, output_dir=STATISTICS_OUTPUT_DATA,
-                                  file_identifier_suffix=f"H1_Flexor_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                  model_type='OLS', hidden=not show_effect_plots)
-    visualizations.plot_hypothesis_forest_mosaic(results_frame, cmc_flexor_hypotheses, output_dir=STATISTICS_OUTPUT_DATA,
-                                  file_identifier_suffix=f"H1_Flexor_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                  model_type='LME', hidden=not show_effect_plots)
+        # ============================================================================
+        # Subject-specific analysis
+        # ============================================================================
 
-    visualizations.plot_hypothesis_forest_mosaic(results_frame, cmc_extensor_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
-                                  file_identifier_suffix=f"H1_Extensor_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                  model_type='OLS', hidden=not show_effect_plots)
-    visualizations.plot_hypothesis_forest_mosaic(results_frame, cmc_extensor_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
-                                  file_identifier_suffix=f"H1_Extensor_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                  model_type='LME', hidden=not show_effect_plots)
+        # After all models are run
+        filemgmt.assert_dir(STATISTICS_OUTPUT_DATA / f"subject_level_effects_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}")
+        statistics.create_subject_effect_summary(
+            all_model_results=all_model_results,
+            original_data=all_subject_data_frame,
+            output_dir=STATISTICS_OUTPUT_DATA / f"subject_level_effects_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}"
+        )
 
-    visualizations.plot_hypothesis_forest_mosaic(results_frame, psd_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
-                                  file_identifier_suffix=f"H2-5_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                  model_type='OLS', hidden=not show_effect_plots)
-    visualizations.plot_hypothesis_forest_mosaic(results_frame, psd_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
-                                  file_identifier_suffix=f"H2-5_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                  model_type='LME', hidden=not show_effect_plots)
+        # ============================================================================
+        # Plotting
+        # ============================================================================
 
-    visualizations.plot_hypothesis_forest_mosaic(results_frame, validation_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
-                                  file_identifier_suffix=f"VAL_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                  model_type='OLS', hidden=not show_effect_plots)
-    visualizations.plot_hypothesis_forest_mosaic(results_frame, validation_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
-                                  file_identifier_suffix=f"VAL_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                  model_type='LME', hidden=not show_effect_plots)
+        results_frame = pd.DataFrame(all_model_results)
+
+        # derive unique hypotheses:
+        hypotheses = results_frame['Hypothesis'].dropna().unique().tolist()
+
+        # group hypotheses:
+        cmc_flexor_hypotheses = [h for h in hypotheses if 'CMC' in h and 'Flexor' in h and not 'VALIDATION: ' in h]
+        cmc_extensor_hypotheses = [h for h in hypotheses if 'CMC' in h and 'Extensor' in h and not 'VALIDATION: ' in h]
+        psd_hypotheses = [h for h in hypotheses if 'PSD' in h and not 'VALIDATION: ' in h]
+        validation_hypotheses = [h for h in hypotheses if 'VALIDATION: ' in h]
+
+
+
+        visualizations.plot_hypothesis_forest_mosaic(results_frame, cmc_flexor_hypotheses, output_dir=STATISTICS_OUTPUT_DATA,
+                                      file_identifier_suffix=f"H1_Flexor_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
+                                      model_type='OLS', hidden=not show_effect_plots)
+        visualizations.plot_hypothesis_forest_mosaic(results_frame, cmc_flexor_hypotheses, output_dir=STATISTICS_OUTPUT_DATA,
+                                      file_identifier_suffix=f"H1_Flexor_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
+                                      model_type='LME', hidden=not show_effect_plots)
+
+        visualizations.plot_hypothesis_forest_mosaic(results_frame, cmc_extensor_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
+                                      file_identifier_suffix=f"H1_Extensor_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
+                                      model_type='OLS', hidden=not show_effect_plots)
+        visualizations.plot_hypothesis_forest_mosaic(results_frame, cmc_extensor_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
+                                      file_identifier_suffix=f"H1_Extensor_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
+                                      model_type='LME', hidden=not show_effect_plots)
+
+        visualizations.plot_hypothesis_forest_mosaic(results_frame, psd_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
+                                      file_identifier_suffix=f"H2-5_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
+                                      model_type='OLS', hidden=not show_effect_plots)
+        visualizations.plot_hypothesis_forest_mosaic(results_frame, psd_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
+                                      file_identifier_suffix=f"H2-5_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
+                                      model_type='LME', hidden=not show_effect_plots)
+
+        visualizations.plot_hypothesis_forest_mosaic(results_frame, validation_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
+                                      file_identifier_suffix=f"VAL_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
+                                      model_type='OLS', hidden=not show_effect_plots)
+        visualizations.plot_hypothesis_forest_mosaic(results_frame, validation_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
+                                      file_identifier_suffix=f"VAL_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
+                                      model_type='LME', hidden=not show_effect_plots)

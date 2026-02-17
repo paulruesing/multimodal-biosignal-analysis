@@ -1709,7 +1709,7 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
                      significant_neg_color: str = 'red',
                      insignificant_color: str = '#AAAAAA',
                      include_y_labels: bool = True,
-                     title_max_width: int = 40,
+                     title_max_width: int = 30,
                      show_significance_legend: bool = False,
                      ):
     """
@@ -1909,6 +1909,7 @@ def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
                                   output_dir: Path = None,
                                   file_identifier_suffix: str | None = None,
                                   hidden: bool = False,
+                                  plot_size: tuple[int, int] = (16, 7),
                                   ):
     # slice results_frame:
     results_frame_subset = result_frame.copy()
@@ -1923,7 +1924,7 @@ def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
     results_frame_subset['Parameter'] = results_frame_subset['Parameter'].str.replace(")", "")
 
     # prepare plot mosaic:
-    fig, axs = plt.subplots(1, len(hypotheses), figsize=(15, 10))
+    fig, axs = plt.subplots(1, len(hypotheses), figsize=plot_size)
     # plot hypothesis forest plots:
     for col_ind, hypothesis in enumerate(hypotheses):
         print(f"Plotting forest plot ({col_ind}) for hypothesis: {hypothesis}")
@@ -1940,7 +1941,7 @@ def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
     fig.tight_layout()
 
     if output_dir is not None:
-        save_path = filemgmt.file_title(fig_title, '.pdf')
+        save_path = filemgmt.file_title(fig_title, '.svg')
         fig.savefig(output_dir / save_path, bbox_inches='tight')
 
     if not hidden:
