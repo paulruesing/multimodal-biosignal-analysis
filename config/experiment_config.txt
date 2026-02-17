@@ -9,8 +9,9 @@ Serial Port --- /dev/tty.usbmodem143309601
 Serial Sampling Rate --- 1000
 
 # mvc settings:
+Initial Force DC Offset --- -12.0
 Use Initial MVC --- True
-Initial MVC --- 9.5
+Initial MVC --- 44
 MVC Maximum Time --- 30
 
 # sampling smoothing settings:
