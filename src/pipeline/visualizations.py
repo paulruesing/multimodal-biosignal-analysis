@@ -1948,6 +1948,201 @@ def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
         plt.show()
 
 
+def plot_cmc_lineplots_per_category(
+        all_subject_data_frame: pd.DataFrame,
+        category_column: str,
+        muscle: str,
+        cmc_operator: str,
+        n_within_trial_segments: int,
+        cmc_plot_min: float = 0.7,
+        cmc_plot_max: float = 1.0,
+        n_yticks: int = 4,
+        include_std_dev: bool = True,
+        std_dev_factor: float = 0.2,
+        colormap: str = 'tab20',
+        save_dir: Path = None,
+        save_plots: bool = False,
+        show_significance_threshold: bool = True,
+        n_tapers: int = 5,
+        alpha: float = 0.2
+) -> None:
+    """
+    Create line plots of CMC values across trial time for different categories.
+
+    Args:
+        all_subject_data_frame: DataFrame containing all subject data
+        category_column: Column name to use for categorization
+        muscle: Muscle name ('Flexor' or 'Extensor')
+        cmc_operator: CMC operator ('mean' or 'max')
+        n_within_trial_segments: Number of segments per trial
+        cmc_plot_min: Minimum y-axis value
+        cmc_plot_max: Maximum y-axis value
+        n_yticks: Number of y-axis ticks
+        include_std_dev: Whether to plot standard deviation bands
+        std_dev_factor: Multiplier for standard deviation bands
+        colormap: Matplotlib colormap name
+        save_dir: Directory to save plots
+        save_plots: Whether to save the plots
+        show_significance_threshold: Whether to show CMC significance threshold line
+        n_tapers: Number of tapers for CMC significance threshold
+        alpha: Alpha level for CMC significance threshold
+    """
+    from matplotlib.lines import Line2D
+
+    if category_column == 'Subject ID':
+        print(f"Skipping category '{category_column}' (incompatible with subject-wise plots)")
+        return
+
+    print(f"Plotting CMC lineplot for category: {category_column}")
+
+    # Get unique category labels
+    unique_labels = all_subject_data_frame[category_column].dropna().unique().tolist()
+    unique_labels.sort()
+
+    # Generate colors from colormap
+    cmap = plt.colormaps[colormap]
+    colors = [cmap(i / len(unique_labels)) for i in range(len(unique_labels))]
+
+    # Create legend handles for all unique labels
+    legend_handles = [Line2D([0], [0], color=color, lw=2, label=label)
+                      for color, label in zip(colors, unique_labels)]
+
+    # Add CMC significance threshold to legend if requested
+    if show_significance_threshold:
+        cmc_threshold = features.compute_cmc_independence_threshold(n_tapers, alpha)
+        threshold_handle = Line2D([0], [0], color='grey', lw=2, linestyle='--',
+                                  label=f"CMC Sig. Threshold ({int(alpha * 100)}%)")
+        legend_handles.append(threshold_handle)
+
+    # Create subplots (rows: beta/gamma, columns: subjects)
+    subject_ids = all_subject_data_frame['Subject ID'].unique().tolist()
+    fig, axs = plt.subplots(2, len(subject_ids), figsize=(20, 10))
+
+    # Prepare x-axis values
+    x_ticks = np.linspace(0, 1, max(n_within_trial_segments, 2))
+
+    # Loop over frequency bands
+    for row_ind, freq_band in enumerate(['beta', 'gamma']):
+
+        # Loop over subjects
+        for col_ind, subject_id in enumerate(subject_ids):
+            ax = axs[row_ind, col_ind]
+
+            # Get subject-specific data
+            subject_frame = all_subject_data_frame[
+                all_subject_data_frame['Subject ID'] == subject_id
+                ]
+
+            # Plot each category
+            for color, category in zip(colors, unique_labels):
+                category_frame = subject_frame[subject_frame[category_column] == category]
+
+                if len(category_frame) == 0:
+                    continue
+
+                # Average across trials for each time point
+                within_trial_counter = category_frame.groupby('Trial ID').cumcount()
+                grouped_cmc = category_frame[f"CMC_{muscle}_{cmc_operator}_{freq_band}"].groupby(
+                    within_trial_counter
+                )
+                cmc_series = grouped_cmc.mean().to_numpy()
+                cmc_std = grouped_cmc.std().to_numpy()
+
+                if len(cmc_series) == 0:
+                    continue
+
+                # Handle single-point case
+                if len(cmc_series) == 1:
+                    cmc_series = np.array([cmc_series[0], cmc_series[0]])
+                    cmc_std = np.array([cmc_std[0], cmc_std[0]])
+
+                # Plot line with optional std dev bands
+                ax.plot(x_ticks, cmc_series, label=category, color=color)
+                if include_std_dev:
+                    ax.fill_between(
+                        x_ticks,
+                        cmc_series - std_dev_factor * cmc_std,
+                        cmc_series + std_dev_factor * cmc_std,
+                        alpha=0.2,
+                        color=color
+                    )
+
+            # Plot CMC significance threshold if requested
+            if show_significance_threshold:
+                ax.axhline(y=cmc_threshold, color='grey', linestyle='--', linewidth=2)
+
+            # Format subplot
+            _format_cmc_subplot(
+                ax=ax,
+                row_ind=row_ind,
+                col_ind=col_ind,
+                subject_id=subject_id,
+                muscle=muscle,
+                freq_band=freq_band,
+                n_subjects=len(subject_ids),
+                y_ticks=np.linspace(cmc_plot_min, cmc_plot_max, n_yticks),
+                cmc_plot_min=cmc_plot_min,
+                cmc_plot_max=cmc_plot_max,
+                legend_handles=legend_handles,
+                category_column=category_column,
+                include_std_dev=include_std_dev,
+                std_dev_factor=std_dev_factor
+            )
+
+    # Figure title
+    fig.suptitle(f"CMC per Subject and {category_column}")
+
+    # Save if requested
+    if save_plots and save_dir is not None:
+        save_path = save_dir / filemgmt.file_title(
+            f"CMC {muscle} per Subject per {category_column}", ".svg"
+        )
+        fig.savefig(save_path, bbox_inches='tight')
+
+    plt.show()
+
+
+def _format_cmc_subplot(
+        ax, row_ind: int, col_ind: int, subject_id: int,
+        muscle: str, freq_band: str, n_subjects: int, y_ticks: np.ndarray,
+        cmc_plot_min: float, cmc_plot_max: float,
+        legend_handles: list, category_column: str,
+        include_std_dev: bool, std_dev_factor: float
+) -> None:
+    """Format individual subplot for CMC line plot."""
+
+    # Title for top row
+    if row_ind == 0:
+        ax.set_title(f"Subject {subject_id:02}")
+
+    # Y-axis formatting
+    if col_ind == 0:
+        ylabel = f"{muscle} {freq_band.capitalize()} CMC (Mean"
+        if include_std_dev:
+            ylabel += f" ± {std_dev_factor:.1f}x Std.Dev."
+        ylabel += ")"
+        ax.set_ylabel(ylabel)
+    else:
+        ax.set_ylabel('')
+
+    ax.set_yticks(y_ticks)
+    if col_ind != 0:
+        ax.set_yticklabels([''] * len(y_ticks))
+    ax.set_ylim([cmc_plot_min, cmc_plot_max])
+
+    # Grid
+    ax.grid()
+
+    # Legend (only lower right subplot)
+    if row_ind == 1 and col_ind == (n_subjects - 1):
+        ax.legend(
+            handles=legend_handles,
+            bbox_to_anchor=(1.0, 0.0),
+            loc='lower left',
+            title=category_column
+        )
+
+
 
 if __name__ == '__main__':
     initialise_electrode_heatmap(values=[0]*64,
