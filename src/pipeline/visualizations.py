@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from typing import Optional, Union, Tuple, List, Callable
+from typing import Optional, Union, Tuple, List, Callable, Literal
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
@@ -229,6 +229,7 @@ def initialise_electrode_heatmap(
     ax.set_yticks([])
 
     if not hidden: plt.show()
+    else: plt.close()
 
     # eventually save:
     if save_dir is not None: smart_save_fig(save_dir, plot_title)
@@ -1855,7 +1856,7 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
 
     if include_y_labels:
         # All y-tick labels in black
-        ax.set_yticklabels(df['y_label'], fontsize=9)
+        ax.set_yticklabels(df['y_label'], fontsize=7)
     else:
         # Hide labels but keep ticks visible
         ax.set_yticklabels([])
@@ -1873,7 +1874,7 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
     # Set title from hypothesis with text wrapping
     hypothesis_name = df[hypothesis_column].iloc[0]
     wrapped_title = '\n'.join(textwrap.wrap(hypothesis_name, width=title_max_width))
-    ax.set_title(wrapped_title, fontsize=9, fontweight='bold', pad=10)
+    ax.set_title(wrapped_title, fontsize=7, fontweight='bold', pad=10)
 
     # Add a subtle spine styling - always show left spine and ticks
     ax.spines['top'].set_visible(False)
@@ -1901,6 +1902,309 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
 
 
 
+def draw_time_resolution_forest_plot(
+        ax,
+        effects_frame: pd.DataFrame,
+        parameter: str,
+        comparison_level: str | int,
+        time_resolution_column: str,
+        hypothesis: str | None = None,
+        hypothesis_column: str = 'Hypothesis',
+        param_column: str = 'Parameter',
+        comparison_lvl_column: str = 'Comparison_Level',
+        model_type_column: str = 'Model_Type',
+        coeff_column: str = 'Coefficient',
+        se_column: str = 'SE',
+        p_column: str = 'p_value',
+        y_axis_label: str = 'Model Time Resolution [sec]',
+        CI_z_score: float = 1.96,
+        significant_pos_color: str = 'green',
+        significant_neg_color: str = 'red',
+        insignificant_color: str = '#AAAAAA',
+        include_y_labels: bool = True,
+        show_significance_legend: bool = False,
+):
+    """
+    Forest plot comparing one parameter at one comparison level across time resolutions.
+
+    The parameter name is shown as the plot title. The y-axis holds time resolution
+    labels (from `time_resolution_column`), one row per model type per resolution.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes to draw on.
+    effects_frame : pd.DataFrame
+        Full results frame — will be filtered to `parameter` x `comparison_level`.
+    parameter : str
+        Exact value to match in `param_column`.
+    comparison_level : str
+        Exact value to match in `comparison_lvl_column`.
+    time_resolution_column : str
+        Column whose values label the y-axis rows (e.g. 'n_segments', 'Time Resolution').
+    y_axis_label : str
+        Y-axis label. Defaults to 'Model Time Resolution'.
+    """
+    # --- filter to the single parameter x level of interest ---
+    df = effects_frame.copy()
+    if hypothesis is not None:
+        df = df[df[hypothesis_column] == hypothesis]
+    df = df[df[param_column] == parameter]
+    is_multiple_model_types = (df[model_type_column].nunique(dropna=True) > 1)
+
+    # allow for integer comparison levels:
+    comparison_level_strs: list[str] = []
+    if isinstance(comparison_level, int):
+        for comparison_levl_str in df[comparison_lvl_column].unique():
+            # check for level string
+            if f"Level {comparison_level} " in comparison_levl_str:
+                comparison_level_strs.append(comparison_levl_str)
+
+    # allow for multiple slightly different level names:
+    df = df[df[comparison_lvl_column].isin(comparison_level_strs)]
+
+    if df.empty:
+        ax.text(0.5, 0.5, f'No data\n"{parameter}"\n@ "{comparison_level}"',
+                ha='center', va='center', transform=ax.transAxes, fontsize=8, color='gray')
+        ax.set_title('\n'.join(textwrap.wrap(parameter, width=40)),
+                     fontsize=7, fontweight='bold', pad=10)
+        return ax
+
+    df = df.reset_index(drop=True)
+
+    # --- sort by time resolution, then model type ---
+    df = df.sort_values(by=[time_resolution_column, model_type_column], ascending=False).reset_index(drop=True)
+
+    # --- y-axis labels: resolution | model_type ---
+    if is_multiple_model_types:
+        df['y_label'] = (df[time_resolution_column].round(2).astype(str) + ' | ' +
+                         df[model_type_column].astype(str))
+    else: df['y_label'] = df[time_resolution_column].round(2).astype(str)
+
+    # --- confidence intervals ---
+    df['ci_lower'] = df[coeff_column] - CI_z_score * df[se_column]
+    df['ci_upper'] = df[coeff_column] + CI_z_score * df[se_column]
+
+    # --- significance ---
+    def get_significance(p):
+        if p < 0.001:  return '***'
+        elif p < 0.01: return '**'
+        elif p < 0.05: return '*'
+        return ''
+
+    df['sig_label'] = df[p_column].apply(get_significance)
+    df['is_significant'] = df[p_column] < 0.05
+
+    def assign_color(row):
+        if row['is_significant']:
+            return significant_pos_color if row[coeff_column] > 0 else significant_neg_color
+        return insignificant_color
+
+    df['color'] = df.apply(assign_color, axis=1)
+
+    # --- y-positions with spacing between resolution groups ---
+    y_position = 0
+    separator_positions = []
+    current_resolution = None
+
+    df['y_pos'] = 0.0  # initialise before loop assignment to set dtype
+    for idx, row in df.iterrows():
+        if current_resolution is not None and row[time_resolution_column] != current_resolution:
+            separator_positions.append(y_position)
+            y_position += 1
+        df.at[idx, 'y_pos'] = y_position
+        current_resolution = row[time_resolution_column]
+        y_position += 1
+
+    # flip so first row is at top
+    max_y = df['y_pos'].max()
+    df['y_pos'] = max_y - df['y_pos']
+    separator_positions = [max_y - pos for pos in separator_positions]
+
+    # --- whiskers ---
+    for _, row in df.iterrows():
+        ax.plot([row['ci_lower'], row['ci_upper']], [row['y_pos'], row['y_pos']],
+                color=row['color'], linewidth=2, alpha=0.8, zorder=1)
+
+    for model_type, group in df.groupby(model_type_column):
+        group = group.sort_values('y_pos', ascending=False)  # top-to-bottom order
+        rows = list(group.itertuples())
+        for i in range(len(rows) - 1):
+            curr, nxt = rows[i], rows[i + 1]
+            # connect lower CI ends
+            ax.plot([curr.ci_lower, nxt.ci_lower],
+                    [curr.y_pos, nxt.y_pos],
+                    color='lightgray', linestyle='-', linewidth=0.8,
+                    alpha=0.6, zorder=0)
+            # connect upper CI ends
+            ax.plot([curr.ci_upper, nxt.ci_upper],
+                    [curr.y_pos, nxt.y_pos],
+                    color='lightgray', linestyle='-', linewidth=0.8,
+                    alpha=0.6, zorder=0)
+
+    # --- coefficient points ---
+    ax.scatter(df[coeff_column], df['y_pos'],
+               c=df['color'], s=100, zorder=2,
+               edgecolors='white', linewidths=1.5, alpha=0.9)
+
+    # --- zero line ---
+    ax.axvline(x=0.0, color='black', linestyle='--', linewidth=1.5, alpha=0.6, zorder=0)
+
+    # --- separator lines between resolution groups ---
+    x_min, x_max = df['ci_lower'].min(), df['ci_upper'].max()
+    x_range = x_max - x_min
+    x_range = x_range if x_range > 0 else abs(x_max) * 0.1 or 0.01
+    for sep_pos in separator_positions:
+        ax.axhline(y=sep_pos, color='lightgray', linestyle='--', linewidth=1, alpha=0.5, zorder=0)
+
+    # --- significance labels ---
+    text_x = x_max + 0.05 * x_range
+    for _, row in df.iterrows():
+        if row['sig_label']:
+            ax.text(text_x, row['y_pos'], row['sig_label'],
+                    va='center', ha='left', fontsize=10,
+                    fontweight='bold', color=row['color'])
+
+    # --- y-axis ---
+    ax.set_yticks(df['y_pos'].values)
+    if include_y_labels:
+        ax.set_yticklabels(df['y_label'], fontsize=7)
+    else:
+        ax.set_yticklabels([])
+
+    ax.set_ylabel(y_axis_label, fontsize=10, fontweight='bold')
+    ax.set_ylim(-0.5, max_y + 0.5)
+
+    # --- x-axis ---
+    ax.set_xlabel('Effect Size (β coefficient)', fontsize=11, fontweight='bold')
+    ax.tick_params(axis='x', labelsize=10)
+
+    # --- grid & spines ---
+    ax.grid(axis='x', alpha=0.3, linestyle=':', linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(1.2)
+    ax.spines['bottom'].set_linewidth(1.2)
+
+    # --- title = hypothesis if provided, else parameter name ---
+    title_text = hypothesis if hypothesis is not None else parameter
+    ax.set_title('\n'.join(textwrap.wrap(title_text, width=40)),
+                 fontsize=7, fontweight='bold', pad=10)
+
+    # --- x limits ---
+    x_margin = x_range * 0.15
+    ax.set_xlim(x_min - x_margin, text_x + x_margin)
+
+    # --- optional significance legend ---
+    if show_significance_legend and include_y_labels:
+        ax.text(0.02, 0.92, "* p<0.05  ** p<0.01  *** p<0.001",
+                transform=ax.transAxes, fontsize=8, va='top',
+                ha='left', style='italic', color='dimgray',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          edgecolor='lightgray', alpha=0.8))
+
+    return ax
+
+
+def plot_time_resolution_forest_mosaic(
+        result_frame: pd.DataFrame,
+        hypotheses: list[str],
+        parameter: str,
+        comparison_level: str | int,
+        time_resolution_column: str = 'Time Resolution',
+        exclude_intercepts: bool = True,
+        model_type: str | None = None,
+        y_axis_label: str = 'Model Time Resolution [sec]',
+        output_dir: Path = None,
+        file_identifier_suffix: str | None = None,
+        hidden: bool = False,
+        plot_size: tuple[int, int] | Literal['auto'] = 'auto',
+):
+    """
+    Mosaic of time-resolution forest plots — one column per hypothesis,
+    all showing a single fixed parameter at a single comparison level,
+    with time resolutions on the y-axis.
+
+    Parameters
+    ----------
+    result_frame : pd.DataFrame
+        Full results frame from store_model_results.
+    hypotheses : list[str]
+        Hypotheses to plot, one subplot column each.
+    parameter : str
+        The exact parameter name to plot (matched after formatting).
+    comparison_level : str
+        The exact comparison level name to filter to.
+    time_resolution_column : str
+        Column holding the time resolution label per row
+        (e.g. 'n_segments' or 'Time Resolution').
+    model_type : str or None
+        If set, filters to that model type (e.g. 'LME'). If None, both
+        OLS and LME are shown as separate y-rows per resolution.
+    y_axis_label : str
+        Y-axis label passed to draw_time_resolution_forest_plot.
+    output_dir : Path, optional
+        Directory to save the figure. If None, not saved.
+    file_identifier_suffix : str, optional
+        Appended to figure title and filename.
+    hidden : bool
+        If True, plt.show() is suppressed.
+    plot_size : tuple or 'auto'
+        Figure size in inches. 'auto' sizes by number of time resolution rows.
+    """
+    # --- shared preprocessing (mirrors plot_hypothesis_forest_mosaic) ---
+    df = result_frame.copy()
+    if exclude_intercepts:
+        df = df[df['Parameter'] != 'Intercept']
+    if model_type is not None:
+        df = df[df['Model_Type'] == model_type]
+    is_multiple_model_types = (df['Model_Type'].nunique() > 1)
+
+    # clean up formula syntax from parameter names
+    for pat in ['C(', 'Q(', "'", ')']:
+        df['Parameter'] = df['Parameter'].str.replace(pat, '', regex=False)
+
+    # --- auto plot size: height driven by number of time-resolution rows ---
+    if plot_size == 'auto':
+        n_rows = df[time_resolution_column].nunique() * (1 if model_type else 2)
+        plot_size = (5 * len(hypotheses), max(4, n_rows * 0.6))
+
+    fig, axs = plt.subplots(1, len(hypotheses), figsize=plot_size, constrained_layout=True)
+
+    # ensure axs is always iterable even for a single hypothesis
+    if len(hypotheses) == 1:
+        axs = [axs]
+
+    for col_ind, hypothesis in enumerate(hypotheses):
+        print(f"Plotting time-resolution forest plot ({col_ind}) for hypothesis: {hypothesis}")
+
+        draw_time_resolution_forest_plot(
+            ax=axs[col_ind],
+            effects_frame=df,
+            parameter=parameter,
+            comparison_level=comparison_level,
+            time_resolution_column=time_resolution_column,
+            hypothesis=hypothesis,
+            y_axis_label=y_axis_label if col_ind == 0 else '',
+            include_y_labels=(col_ind == 0),  # only label y-axis on first column
+            show_significance_legend=(col_ind == 0),
+        )
+
+    fig_title = (
+        f"Time Resolution Comparison: {parameter}"
+        f"{f' ({model_type})' if model_type else ''}"
+        f"{f' — {file_identifier_suffix}' if file_identifier_suffix else ''}"
+    )
+    fig.suptitle(fig_title, fontsize=9, fontweight='bold')
+
+    if output_dir is not None:
+        save_path = filemgmt.file_title(fig_title, '.svg')
+        fig.savefig(output_dir / save_path, bbox_inches='tight')
+
+    if not hidden:
+        plt.show()
+
 
 def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
                                   hypotheses: list[str],
@@ -1909,8 +2213,60 @@ def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
                                   output_dir: Path = None,
                                   file_identifier_suffix: str | None = None,
                                   hidden: bool = False,
-                                  plot_size: tuple[int, int] = (16, 7),
+                                  plot_size: tuple[int, int] | Literal['auto'] = 'auto',
                                   ):
+    """
+    Creates a mosaic of forest plots visualizing hypothesis effects across
+    multiple statistical hypotheses. Each subplot in the mosaic represents a
+    different hypothesis, displaying effect sizes with confidence intervals
+    for various model parameters.
+
+    The function filters and processes the input result frame based on specified
+    criteria, formats parameter names for better readability, and generates a
+    multi-panel forest plot visualization. The resulting figure can be saved to
+    disk and/or displayed interactively.
+
+    Parameters
+    ----------
+    result_frame : pd.DataFrame
+        DataFrame containing statistical model results with columns including
+        'Parameter', 'Model_Type', 'Hypothesis', and effect size information
+    hypotheses : list[str]
+        List of hypothesis names to plot, each corresponding to a separate
+        subplot in the mosaic
+    exclude_intercepts : bool, optional
+        Whether to exclude intercept parameters from the visualization,
+        by default True
+    model_type : str or None, optional
+        Filter results to specific model type (e.g., 'LME'). If None, includes
+        all model types, by default 'LME'
+    output_dir : Path, optional
+        Directory path where the plot should be saved. If None, the plot is not
+        saved to disk, by default None
+    file_identifier_suffix : str or None, optional
+        Additional suffix to append to the figure title and filename for
+        identification purposes, by default None
+    hidden : bool, optional
+        Whether to suppress displaying the plot interactively. If True, the plot
+        is not shown with plt.show(), by default False
+    plot_size : tuple[int, int] or Literal['auto'], optional
+        Size of the figure as (width, height) in inches. If 'auto', calculates
+        size based on number of unique parameters, by default 'auto'
+
+    Notes
+    -----
+    The function performs the following parameter name formatting transformations:
+    - Removes 'C(' prefix for categorical variables
+    - Removes 'Q(' prefix for quantile variables
+    - Removes single quotes
+    - Removes closing parentheses
+
+    When plot_size is 'auto', the height is calculated as half the number of
+    unique parameters, with a fixed width of 16 inches.
+
+    The figure title includes the model type and file identifier suffix when
+    provided.
+    """
     # slice results_frame:
     results_frame_subset = result_frame.copy()
     if exclude_intercepts:
@@ -1924,7 +2280,10 @@ def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
     results_frame_subset['Parameter'] = results_frame_subset['Parameter'].str.replace(")", "")
 
     # prepare plot mosaic:
-    fig, axs = plt.subplots(1, len(hypotheses), figsize=plot_size)
+    if plot_size == 'auto':
+        n_predictors = results_frame_subset['Parameter'].nunique(dropna=True)
+        plot_size = (16, n_predictors/2)
+    fig, axs = plt.subplots(1, len(hypotheses), figsize=plot_size, constrained_layout=True)
     # plot hypothesis forest plots:
     for col_ind, hypothesis in enumerate(hypotheses):
         print(f"Plotting forest plot ({col_ind}) for hypothesis: {hypothesis}")
@@ -1938,14 +2297,14 @@ def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
     fig_title = f"Effect Size Overview{f' ({model_type} models)' if model_type is not None else ''}{f' ({file_identifier_suffix})' if file_identifier_suffix is not None else ''}"
     fig.suptitle(fig_title)
 
-    fig.tight_layout()
-
     if output_dir is not None:
         save_path = filemgmt.file_title(fig_title, '.svg')
         fig.savefig(output_dir / save_path, bbox_inches='tight')
 
     if not hidden:
         plt.show()
+    else:
+        plt.close()
 
 
 def plot_cmc_lineplots_per_category(
@@ -2141,6 +2500,10 @@ def _format_cmc_subplot(
             loc='lower left',
             title=category_column
         )
+
+
+
+
 
 
 

@@ -14,6 +14,302 @@ def fit_linear_regression_model(
         condition_vars: dict,
         explanatory_vars: list,
         show_diagnostic_plots: bool = False,
+        autocorr_threshold: float = 0.1,
+        moderation_pairs: list = None
+) -> dict:
+    """
+    Fit an OLS linear regression model with flexible condition and explanatory variables.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe containing all variables
+    response_var : str
+        Name of the response variable (e.g., 'PSD')
+    condition_vars : dict
+        Dictionary mapping variable names to treatment types:
+        - 'categorical': treated as factor with dummy variables
+        - 'ordinal': treated as continuous scale (0-7)
+        Example: {'Category': 'categorical', 'Familiarity': 'ordinal'}
+    explanatory_vars : list
+        List of additional explanatory variables (e.g., ['Force Level'])
+    n_windows_per_trial : int
+        Number of windows per trial (legacy parameter, not used for autocorrelation)
+    show_diagnostic_plots : bool, default=False
+        Whether to display Q-Q plot and residual distribution plot
+    autocorr_threshold : float, default=0.1
+        Minimum |ρ| required to apply SE inflation. Only autocorrelations exceeding this
+        threshold trigger SE adjustment. Default of 0.1 balances Type I error control
+        with statistical power for small samples (n=8 subjects).
+    moderation_pairs : list of tuples, optional
+        List of (MODERATED_VAR, MODERATING_VAR) tuples for interaction effects.
+        Adds: MODERATING_VAR + MODERATED_VAR:MODERATING_VAR to the formula.
+        Example: [('Force Level', 'Familiarity'), ('Category', 'Force Level')]
+
+    Returns
+    -------
+    dict
+        Dictionary containing:
+        - 'model': fitted statsmodels OLS object
+        - 'results_df': DataFrame with adjusted coefficients and p-values
+        - 'diagnostics': Dictionary with Shapiro-Wilk and autocorrelation stats
+    """
+
+    df = df.copy()
+
+    # Ensure response variable is numeric
+    df[response_var] = pd.to_numeric(df[response_var], errors='coerce')
+
+    # Ensure explanatory vars are numeric
+    for var in explanatory_vars:
+        if var not in condition_vars:  # Don't convert categorical/ordinal vars
+            df[var] = pd.to_numeric(df[var], errors='coerce')
+
+    # Convert categorical variables to category dtype
+    for var_name, var_type in condition_vars.items():
+        if var_type == 'categorical':
+            df[var_name] = df[var_name].astype('category')
+        elif var_type == 'ordinal':
+            df[var_name] = pd.to_numeric(df[var_name], errors='coerce')
+
+    # Build formula dynamically
+    formula_parts = [response_var, '~']
+
+    # Add condition variables with appropriate encoding
+    condition_formula_parts = []
+    for var_name, var_type in condition_vars.items():
+        if var_type == 'categorical':
+            # Quote variable names with spaces for C()
+            quoted_var = f"Q('{var_name}')" if ' ' in var_name else var_name
+            condition_formula_parts.append(f"C({quoted_var})")
+        elif var_type == 'ordinal':
+            # Quote variable names with spaces
+            if ' ' in var_name:
+                condition_formula_parts.append(f"Q('{var_name}')")
+            else:
+                condition_formula_parts.append(var_name)
+        else:
+            raise ValueError(f"Unknown variable type: {var_type}")
+
+    # Add explanatory variables (assume continuous with Q() for spaces in names)
+    explanatory_formula_parts = [
+        f"Q('{var}')" if ' ' in var else var
+        for var in explanatory_vars
+    ]
+
+    # Combine all parts
+    all_predictors = condition_formula_parts + explanatory_formula_parts
+
+    # Add moderation effects (interaction terms)
+    if moderation_pairs:
+        print("\n[MODERATION EFFECTS SPECIFIED]")
+        for moderated_var, moderating_var in moderation_pairs:
+            # Format variable names with Q() if they contain spaces
+            moderated_formatted = f"Q('{moderated_var}')" if ' ' in moderated_var else moderated_var
+            moderating_formatted = f"Q('{moderating_var}')" if ' ' in moderating_var else moderating_var
+
+            # Check if moderated_var is categorical - if so, wrap in C()
+            if moderated_var in condition_vars and condition_vars[moderated_var] == 'categorical':
+                moderated_formatted = f"C({moderated_formatted})"
+
+            # Check if moderating_var is categorical - if so, wrap in C()
+            if moderating_var in condition_vars and condition_vars[moderating_var] == 'categorical':
+                moderating_formatted = f"C({moderating_formatted})"
+
+            # Check if moderating variable is already in the model
+            # Need to check both the raw variable name AND the formatted version
+            moderating_already_present = (
+                    moderating_var in condition_vars.keys() or
+                    moderating_var in explanatory_vars or
+                    moderating_formatted in all_predictors
+            )
+
+            # Add moderating variable as main effect (if not already present)
+            if not moderating_already_present:
+                all_predictors.append(moderating_formatted)
+                print(f"  Added main effect: {moderating_var}")
+            else:
+                print(f"  Main effect already present: {moderating_var} (skipped)")
+
+            # Add interaction term
+            interaction_term = f"{moderated_formatted}:{moderating_formatted}"
+            all_predictors.append(interaction_term)
+            print(f"  Added interaction: {moderated_var} × {moderating_var}")
+        print()
+
+    formula = formula_parts[0] + ' ~ ' + ' + '.join(all_predictors)
+
+    print("\n")
+    print("-" * 100)
+    print(f"---------------------     Linear Regression Analysis     --------------------- ")
+    print("-" * 100, "\n")
+    print(f"Formula: {formula}\n")
+
+    ### DATA CHECK
+    print("Data Summary:")
+    print(f"Total observations: {len(df)}")
+    print(f"Unique participants: {df['Subject ID'].nunique()}")
+    print(
+        f"Observations per participant: {len(df) / df['Subject ID'].nunique():.1f}")
+
+    print(f"\nCondition variables:")
+    for var_name, var_type in condition_vars.items():
+        if var_type == 'categorical':
+            print(f"  {var_name} (categorical): {df[var_name].nunique()} levels")
+            print(f"    {df[var_name].value_counts().to_dict()}")
+        elif var_type == 'ordinal':
+            print(f"  {var_name} (ordinal): range [{df[var_name].min()}, {df[var_name].max()}]")
+            print(f"    Distribution: {df[var_name].value_counts().sort_index().to_dict()}")
+
+    print(f"\nResponse variable ({response_var}):")
+    print(f"  Range: [{df[response_var].min():.2f}, {df[response_var].max():.2f}]")
+
+    print(f"\nExplanatory variables:")
+    for var in explanatory_vars:
+        print(f"  {var} range: [{df[var].min():.2f}, {df[var].max():.2f}]")
+
+    ### LINEAR REGRESSION
+    print("\n" * 3 + "=" * 80)
+    print("Linear Regression Model (OLS)")
+    print("=" * 80)
+
+    model = smf.ols(formula, data=df).fit()
+    print(model.summary())
+
+    # ============ DIAGNOSTICS ============
+    residuals = model.resid
+
+    # Q-Q plot and residual distribution (optional)
+    if show_diagnostic_plots:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+        stats.probplot(residuals, dist="norm", plot=axes[0])
+        axes[0].set_title("Q-Q Plot (Residuals)")
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].hist(residuals, bins=30, edgecolor='black', density=True)
+        axes[1].axvline(0, color='r', linestyle='--', label='Mean')
+        axes[1].set_title("Residual Distribution")
+        axes[1].legend()
+        plt.tight_layout()
+        plt.show()
+
+    # Shapiro-Wilk test
+    shapiro_stat, shapiro_p = stats.shapiro(residuals)
+    print(f"\nShapiro-Wilk p-value: {shapiro_p:.4f}")
+    if shapiro_p < 0.05:
+        print("  → Residuals significantly deviate from normality")
+    else:
+        print("  → Residuals approximately normal ✓")
+
+    # ============ AUTOCORRELATION CHECK ============
+    print("\n" + "=" * 80)
+    print("AUTOCORRELATION CHECK (temporal correlation between trials)")
+    print("=" * 80)
+
+    lag1_autocorr = np.corrcoef(residuals[:-1], residuals[1:])[0, 1]
+    if np.isnan(lag1_autocorr):
+        print("Warning: Autocorrelation is NaN")
+        lag1_autocorr = 0.0
+
+    # Calculate design effect based on number of trials per subject
+    # This accounts for temporal correlation across trials, NOT within-trial segments
+    n_trials_per_subject = len(df) / df['Subject ID'].nunique()
+
+    # Apply SE inflation only if autocorrelation exceeds threshold
+    if abs(lag1_autocorr) < autocorr_threshold:
+        design_effect = 1.0
+        se_inflation = 1.0
+        inflation_applied = False
+    else:
+        # Apply inflation for positive ρ only (prevents deflation)
+        design_effect = 1 + (n_trials_per_subject - 1) * max(0, lag1_autocorr)
+        se_inflation = np.sqrt(design_effect)
+        inflation_applied = True
+
+    print(f"Lag-1 autocorrelation (ρ): {lag1_autocorr:.3f}")
+    print(f"Average trials per subject: {n_trials_per_subject:.1f}")
+    print(
+        f"SE inflation threshold: |ρ| > {autocorr_threshold:.2f} (balancing power with n={df['Subject ID'].nunique()} subjects)")
+    print(f"Design effect: {design_effect:.2f}")
+    print(f"SE inflation factor: {se_inflation:.2f}×")
+
+    if not inflation_applied:
+        if abs(lag1_autocorr) < autocorr_threshold:
+            print(f"\n✓ Autocorrelation below threshold (|ρ| = {abs(lag1_autocorr):.3f} < {autocorr_threshold:.2f})")
+            print(f"→ No SE inflation applied (preserving statistical power)")
+        else:
+            print(f"\n✓ Negative autocorrelation (ρ = {lag1_autocorr:.3f})")
+            print(f"→ No inflation applied (SE inflation capped at 1.0×)")
+    else:
+        if lag1_autocorr > 0.2:
+            print(f"\n⚠️  High autocorrelation detected (ρ = {lag1_autocorr:.3f})")
+            print(f"→ Inflating SEs by {se_inflation:.2f}× to account for strong temporal dependence")
+        else:
+            print(f"\nℹ️  Moderate autocorrelation (ρ = {lag1_autocorr:.3f} > threshold)")
+            print(f"→ Inflating SEs by {se_inflation:.2f}× (threshold balances Type I error control with power)")
+
+    # Adjust SEs for autocorrelation
+    adjusted_se = model.bse * se_inflation
+    adjusted_z = model.params / adjusted_se
+    adjusted_p = 2 * (1 - stats.norm.cdf(np.abs(adjusted_z)))
+
+    # Convert to Series for proper indexing
+    if not isinstance(adjusted_p, pd.Series):
+        adjusted_p = pd.Series(adjusted_p, index=model.params.index)
+
+    # ============ RESULTS TABLE ============
+    print("\n" + "-" * 80)
+    print("ADJUSTED RESULTS (corrected for autocorrelation):")
+    print("-" * 80)
+    print(f"{'Parameter':<50s} {'β':>10s} {'SE (adj)':>12s} {'p (adj)':>10s}")
+    print("-" * 80)
+
+    results_data = []
+    for param in model.params.index:
+        adj_se_val = adjusted_se[param]
+        adj_p_val = adjusted_p[param]
+        print(f"{param:<50s} {model.params[param]:>10.4f} {adj_se_val:>12.4f} {adj_p_val:>10.4f}")
+
+        results_data.append({
+            'Parameter': param,
+            'Coefficient': model.params[param],
+            'SE (unadjusted)': model.bse[param],
+            'SE (adjusted)': adj_se_val,
+            'p-value (unadjusted)': model.pvalues[param],
+            'p-value (adjusted)': adj_p_val
+        })
+
+    results_df = pd.DataFrame(results_data)
+
+    # Store diagnostics
+    diagnostics = {
+        'n_observations': len(df),
+        'n_trials_per_subject': n_trials_per_subject,
+        'shapiro_stat': shapiro_stat,
+        'shapiro_p': shapiro_p,
+        'lag1_autocorr': lag1_autocorr,
+        'design_effect': design_effect,
+        'se_inflation': se_inflation,
+        'autocorr_threshold': autocorr_threshold,
+        'inflation_applied': inflation_applied,
+        'r_squared': model.rsquared,
+        'r_squared_adj': model.rsquared_adj
+    }
+
+    return {
+        'model': model,
+        'results_df': results_df,
+        'diagnostics': diagnostics
+    }
+
+
+def non_interaction_fit_linear_regression_model(
+        df: pd.DataFrame,
+        response_var: str,
+        condition_vars: dict,
+        explanatory_vars: list,
+        show_diagnostic_plots: bool = False,
         autocorr_threshold: float = 0.1
 ) -> dict:
     """
@@ -262,6 +558,429 @@ def fit_linear_regression_model(
 
 
 def fit_mixed_effects_model(
+        df: pd.DataFrame,
+        response_var: str,
+        condition_vars: dict,
+        explanatory_vars: list,
+        grouping_var: str = 'Subject ID',
+        show_diagnostic_plots: bool = False,
+        autocorr_threshold: float = 0.1,
+        moderation_pairs: list = None
+) -> dict:
+    """
+    Fit a Linear Mixed-Effects Model with flexible condition and explanatory variables.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe containing all variables
+    response_var : str
+        Name of the response variable (e.g., 'PSD')
+    condition_vars : dict
+        Dictionary mapping variable names to treatment types:
+        - 'categorical': treated as factor with dummy variables
+        - 'ordinal': treated as continuous scale (0-7)
+        Example: {'Category': 'categorical', 'Familiarity': 'ordinal'}
+    explanatory_vars : list
+        List of additional explanatory variables (e.g., ['Force Level'])
+    grouping_var : str
+        Name of the grouping variable for random intercepts (default: 'Subject ID')
+    n_windows_per_trial : int
+        Number of windows per trial (legacy parameter, not used for LME autocorrelation)
+    show_diagnostic_plots : bool
+        Whether to display diagnostic plots
+    autocorr_threshold : float, default=0.1
+        Minimum |ρ| required to apply SE inflation. Only autocorrelations exceeding this
+        threshold trigger SE adjustment. Default of 0.1 balances Type I error control
+        with statistical power for small samples (n=8 subjects).
+    moderation_pairs : list of tuples, optional
+        List of (MODERATED_VAR, MODERATING_VAR) tuples for interaction effects.
+        Adds: MODERATING_VAR + MODERATED_VAR:MODERATING_VAR to the formula.
+        Example: [('Force Level', 'Familiarity'), ('Category', 'Force Level')]
+
+    Returns
+    -------
+    dict
+        Dictionary containing:
+        - 'model': fitted statsmodels MixedLM object
+        - 'results_df': DataFrame with adjusted coefficients and p-values
+        - 'diagnostics': Dictionary with Shapiro-Wilk and autocorrelation stats
+        - 'random_effects': DataFrame of random intercepts per group
+    """
+
+    df = df.copy()
+
+    # Ensure response variable is numeric
+    df[response_var] = pd.to_numeric(df[response_var], errors='coerce')
+
+    # Ensure explanatory vars are numeric
+    for var in explanatory_vars:
+        if var not in condition_vars:
+            df[var] = pd.to_numeric(df[var], errors='coerce')
+
+    # Convert categorical variables to category dtype
+    for var_name, var_type in condition_vars.items():
+        if var_type == 'categorical':
+            df[var_name] = df[var_name].astype('category')
+        elif var_type == 'ordinal':
+            df[var_name] = pd.to_numeric(df[var_name], errors='coerce')
+
+    # Build formula dynamically
+    formula_parts = [response_var, '~']
+
+    # Add condition variables with appropriate encoding
+    condition_formula_parts = []
+    for var_name, var_type in condition_vars.items():
+        if var_type == 'categorical':
+            quoted_var = f"Q('{var_name}')" if ' ' in var_name else var_name
+            condition_formula_parts.append(f"C({quoted_var})")
+        elif var_type == 'ordinal':
+            if ' ' in var_name:
+                condition_formula_parts.append(f"Q('{var_name}')")
+            else:
+                condition_formula_parts.append(var_name)
+        else:
+            raise ValueError(f"Unknown variable type: {var_type}")
+
+    # Add explanatory variables
+    explanatory_formula_parts = [
+        f"Q('{var}')" if ' ' in var else var
+        for var in explanatory_vars
+    ]
+
+    # Combine all parts
+    all_predictors = condition_formula_parts + explanatory_formula_parts
+
+    # Add moderation effects (interaction terms)
+    if moderation_pairs:
+        print("\n[MODERATION EFFECTS SPECIFIED]")
+        for moderated_var, moderating_var in moderation_pairs:
+            # Format variable names with Q() if they contain spaces
+            moderated_formatted = f"Q('{moderated_var}')" if ' ' in moderated_var else moderated_var
+            moderating_formatted = f"Q('{moderating_var}')" if ' ' in moderating_var else moderating_var
+
+            # Check if moderated_var is categorical - if so, wrap in C()
+            if moderated_var in condition_vars and condition_vars[moderated_var] == 'categorical':
+                moderated_formatted = f"C({moderated_formatted})"
+
+            # Check if moderating_var is categorical - if so, wrap in C()
+            if moderating_var in condition_vars and condition_vars[moderating_var] == 'categorical':
+                moderating_formatted = f"C({moderating_formatted})"
+
+            # Check if moderating variable is already in the model
+            # Need to check both the raw variable name AND the formatted version
+            moderating_already_present = (
+                    moderating_var in condition_vars.keys() or
+                    moderating_var in explanatory_vars or
+                    moderating_formatted in all_predictors
+            )
+
+            # Add moderating variable as main effect (if not already present)
+            if not moderating_already_present:
+                all_predictors.append(moderating_formatted)
+                print(f"  Added main effect: {moderating_var}")
+            else:
+                print(f"  Main effect already present: {moderating_var} (skipped)")
+
+            # Add interaction term
+            interaction_term = f"{moderated_formatted}:{moderating_formatted}"
+            all_predictors.append(interaction_term)
+            print(f"  Added interaction: {moderated_var} × {moderating_var}")
+        print()
+
+    formula = formula_parts[0] + ' ~ ' + ' + '.join(all_predictors)
+
+    print("\n")
+    print("-" * 100)
+    print(f"---------------------     Linear Mixed-Effects Model Analysis     --------------------- ")
+    print("-" * 100, "\n")
+    print(f"Formula (fixed effects): {formula}")
+    print(f"Random effects: Random intercept by {grouping_var}\n")
+
+    ### DATA CHECK
+    print("Data Summary:")
+    print(f"Total observations: {len(df)}")
+    print(f"Unique {grouping_var}: {df[grouping_var].nunique()}")
+    print(
+        f"Observations per {grouping_var}: {len(df) / df[grouping_var].nunique():.1f}")
+
+    print(f"\nCondition variables:")
+    for var_name, var_type in condition_vars.items():
+        if var_type == 'categorical':
+            print(f"  {var_name} (categorical): {df[var_name].nunique()} levels")
+            print(f"    Levels: {df[var_name].cat.categories.tolist()}")
+            print(f"    {df[var_name].value_counts().to_dict()}")
+        elif var_type == 'ordinal':
+            print(f"  {var_name} (ordinal): range [{df[var_name].min()}, {df[var_name].max()}]")
+            print(f"    Distribution: {df[var_name].value_counts().sort_index().to_dict()}")
+
+    print(f"\nResponse variable ({response_var}):")
+    print(f"  dtype: {df[response_var].dtype}")
+    print(f"  Range: [{df[response_var].min():.2f}, {df[response_var].max():.2f}]")
+    print(f"  Non-null count: {df[response_var].notna().sum()} / {len(df)}")
+
+    print(f"\nExplanatory variables:")
+    for var in explanatory_vars:
+        print(f"  {var} dtype: {df[var].dtype}, range: [{df[var].min():.2f}, {df[var].max():.2f}]")
+
+    # Remove rows with NaN in key columns
+    cols_to_check = [response_var, grouping_var] + list(condition_vars.keys()) + explanatory_vars
+    df = df.dropna(subset=cols_to_check)
+    print(f"\nAfter removing NaN: {len(df)} observations")
+
+    ### LINEAR MIXED-EFFECTS MODEL
+    print("\n" * 3 + "=" * 80)
+    print("Linear Mixed-Effects Model (LME)")
+    print("=" * 80)
+
+    model = smf.mixedlm(formula, data=df, groups=df[grouping_var])
+    result = model.fit()
+    print(result.summary())
+
+    # ============ DIAGNOSTICS ============
+    residuals = result.resid
+
+    # Q-Q plot
+    if show_diagnostic_plots:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+        stats.probplot(residuals, dist="norm", plot=axes[0])
+        axes[0].set_title("Q-Q Plot (Residuals)")
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].hist(residuals, bins=30, edgecolor='black', density=True)
+        axes[1].axvline(0, color='r', linestyle='--', label='Mean')
+        axes[1].set_title("Residual Distribution")
+        axes[1].legend()
+        plt.tight_layout()
+        plt.show()
+
+    # Shapiro-Wilk test
+    shapiro_stat, shapiro_p = stats.shapiro(residuals)
+    print(f"\nShapiro-Wilk p-value: {shapiro_p:.4f}")
+    if shapiro_p < 0.05:
+        print("  → Residuals significantly deviate from normality (consider transformation)")
+    else:
+        print("  → Residuals approximately normal ✓")
+
+    # ============ AUTOCORRELATION CHECK ============
+    print("\n" + "=" * 80)
+    print("AUTOCORRELATION CHECK (temporal correlation between trials)")
+    print("=" * 80)
+
+    lag1_autocorr = np.corrcoef(residuals[:-1], residuals[1:])[0, 1]
+    if np.isnan(lag1_autocorr):
+        print("Warning: Autocorrelation is NaN (constant residuals?)")
+        lag1_autocorr = 0.0
+
+    # Calculate design effect based on number of trials per subject
+    # This accounts for temporal correlation across trials, NOT within-trial segments
+    n_trials_per_subject = len(df) / df[grouping_var].nunique()
+
+    # Apply SE inflation only if autocorrelation exceeds threshold
+    if abs(lag1_autocorr) < autocorr_threshold:
+        design_effect = 1.0
+        se_inflation = 1.0
+        inflation_applied = False
+    else:
+        # Apply inflation for positive ρ only (prevents deflation)
+        design_effect = 1 + (n_trials_per_subject - 1) * max(0, lag1_autocorr)
+        se_inflation = np.sqrt(design_effect)
+        inflation_applied = True
+
+    print(f"Lag-1 autocorrelation (ρ): {lag1_autocorr:.3f}")
+    print(f"Average trials per subject: {n_trials_per_subject:.1f}")
+    print(
+        f"SE inflation threshold: |ρ| > {autocorr_threshold:.2f} (balancing power with n={df[grouping_var].nunique()} subjects)")
+    print(f"Design effect: {design_effect:.2f}")
+    print(f"SE inflation factor: {se_inflation:.2f}×")
+
+    if not inflation_applied:
+        if abs(lag1_autocorr) < autocorr_threshold:
+            print(f"\n✓ Autocorrelation below threshold (|ρ| = {abs(lag1_autocorr):.3f} < {autocorr_threshold:.2f})")
+            print(f"→ No SE inflation applied (preserving statistical power)")
+        else:
+            print(f"\n✓ Negative autocorrelation (ρ = {lag1_autocorr:.3f})")
+            print(f"→ No inflation applied (SE inflation capped at 1.0×)")
+    else:
+        if lag1_autocorr > 0.2:
+            print(f"\n⚠️  High autocorrelation detected (ρ = {lag1_autocorr:.3f})")
+            print(f"→ Inflating SEs by {se_inflation:.2f}× to account for strong temporal dependence")
+        else:
+            print(f"\nℹ️  Moderate autocorrelation (ρ = {lag1_autocorr:.3f} > threshold)")
+            print(f"→ Inflating SEs by {se_inflation:.2f}× (threshold balances Type I error control with power)")
+
+    # Adjust SEs and p-values for FIXED EFFECTS ONLY
+    adjusted_se = result.bse.loc[result.fe_params.index] * se_inflation
+    adjusted_z = result.fe_params / adjusted_se
+    adjusted_p = 2 * (1 - stats.norm.cdf(np.abs(adjusted_z)))
+
+    # Ensure it's a Series
+    if not isinstance(adjusted_p, pd.Series):
+        adjusted_p = pd.Series(adjusted_p, index=result.fe_params.index)
+
+    # ============ RESULTS TABLE ============
+    print("\n" + "-" * 80)
+    print("ADJUSTED FIXED EFFECTS (corrected for autocorrelation):")
+    print("-" * 80)
+    print(f"{'Parameter':<50s} {'β':>10s} {'SE (orig)':>12s} {'SE (adj)':>12s} {'p (orig)':>10s} {'p (adj)':>10s}")
+    print("-" * 80)
+
+    results_data = []
+    for param in result.fe_params.index:
+        orig_se = result.bse[param]
+        adj_se = adjusted_se[param]
+        orig_p = result.pvalues[param]
+        adj_p = adjusted_p[param]
+        print(
+            f"{param:<50s} {result.fe_params[param]:>10.4f} {orig_se:>12.4f} {adj_se:>12.4f} {orig_p:>10.4f} {adj_p:>10.4f}")
+
+        results_data.append({
+            'Parameter': param,
+            'Coefficient': result.fe_params[param],
+            'SE (unadjusted)': orig_se,
+            'SE (adjusted)': adj_se,
+            'p-value (unadjusted)': orig_p,
+            'p-value (adjusted)': adj_p
+        })
+
+    results_df = pd.DataFrame(results_data)
+
+    # ============ RANDOM EFFECTS ============
+    print("\n" + "-" * 80)
+    print("RANDOM EFFECTS (Random Intercepts by Group):")
+    print("-" * 80)
+
+    random_effects = result.random_effects
+    random_effects_df = pd.DataFrame([
+        {grouping_var: group, 'Random Intercept': re['Group']}
+        for group, re in random_effects.items()
+    ])
+    print(random_effects_df.to_string(index=False))
+
+    print(f"\nRandom Intercept SD: {np.std(list(random_effects_df['Random Intercept'])):.4f}")
+
+    # Calculate marginal and conditional R-squared for LME
+    # Marginal R²: variance explained by fixed effects only
+    # Conditional R²: variance explained by fixed + random effects
+    print("\n[DEBUG] Computing R² metrics...")
+    print(f"  result type: {type(result)}")
+    print(f"  hasattr(result, 'cov_re'): {hasattr(result, 'cov_re')}")
+    print(f"  type(result.cov_re): {type(result.cov_re) if hasattr(result, 'cov_re') else 'N/A'}")
+
+    try:
+        # Extract random intercept variance (cov_re is a pandas DataFrame in statsmodels)
+        # It contains the random effects covariance matrix
+        if hasattr(result, 'cov_re'):
+            # cov_re is the random effects covariance matrix
+            if isinstance(result.cov_re, pd.DataFrame):
+                var_random = result.cov_re.iloc[0, 0]
+            else:
+                # If it's an array or scalar
+                var_random = float(result.cov_re)
+        else:
+            var_random = 0.0
+
+        # Calculate variance components
+        # Fixed effects variance: variance of predictions using only fixed effects
+        var_fixed = np.var(result.fittedvalues)
+        # Residual variance
+        var_residual = result.scale
+
+        # R² calculations using Nakagawa & Schielzeth (2013) method
+        r2_marginal = var_fixed / (var_fixed + var_random + var_residual)
+        r2_conditional = (var_fixed + var_random) / (var_fixed + var_random + var_residual)
+
+        print(f"  var_fixed={var_fixed:.4f}, var_random={var_random:.4f}, var_residual={var_residual:.4f}")
+        print(f"✓ R² metrics computed successfully: R²_marginal={r2_marginal:.4f}, R²_conditional={r2_conditional:.4f}")
+    except (AttributeError, KeyError, IndexError, TypeError) as e:
+        # Fallback with detailed error message
+        print(f"⚠️  Warning: Could not compute R² metrics: {type(e).__name__}: {e}")
+        import traceback
+        print(f"   Traceback: {traceback.format_exc()}")
+        r2_marginal = None
+        r2_conditional = None
+
+    # Store diagnostics with defensive attribute access
+    print("\n[DEBUG] Extracting model fit metrics...")
+    print(f"  hasattr(result, 'llf'): {hasattr(result, 'llf')}")
+    print(f"  hasattr(result, 'aic'): {hasattr(result, 'aic')}")
+    print(f"  hasattr(result, 'bic'): {hasattr(result, 'bic')}")
+
+    log_likelihood = getattr(result, 'llf', None)
+    aic = getattr(result, 'aic', None)
+    bic = getattr(result, 'bic', None)
+
+    print(f"  Extracted values: llf={log_likelihood}, aic={aic}, bic={bic}")
+
+    # If AIC/BIC are NaN, calculate them manually
+    if log_likelihood is not None and (aic is None or np.isnan(aic) or bic is None or np.isnan(bic)):
+        print("  ⚠️  AIC/BIC are NaN, calculating manually...")
+        # Count parameters: fixed effects + random effect variance + residual variance
+        n_fixed_params = len(result.fe_params)
+        n_random_params = 1  # Random intercept variance
+        n_residual_params = 1  # Residual variance
+        k = n_fixed_params + n_random_params + n_residual_params
+        n = len(df)
+
+        # Manual calculation: AIC = -2*llf + 2*k, BIC = -2*llf + k*log(n)
+        if aic is None or np.isnan(aic):
+            aic = -2 * log_likelihood + 2 * k
+            print(f"    Calculated AIC = -2*{log_likelihood:.2f} + 2*{k} = {aic:.2f}")
+
+        if bic is None or np.isnan(bic):
+            bic = -2 * log_likelihood + k * np.log(n)
+            print(f"    Calculated BIC = -2*{log_likelihood:.2f} + {k}*log({n}) = {bic:.2f}")
+
+    diagnostics = {
+        'n_observations': len(df),
+        'shapiro_stat': shapiro_stat,
+        'shapiro_p': shapiro_p,
+        'lag1_autocorr': lag1_autocorr,
+        'design_effect': design_effect,
+        'se_inflation': se_inflation,
+        'log_likelihood': log_likelihood,
+        'aic': aic,
+        'bic': bic,
+        'r_squared_marginal': r2_marginal,
+        'r_squared_conditional': r2_conditional
+    }
+
+    print("\n" + "=" * 80)
+    print("MODEL FIT STATISTICS:")
+    if log_likelihood is not None:
+        print(f"  Log-Likelihood: {log_likelihood:.2f}")
+    else:
+        print("  Log-Likelihood: N/A")
+
+    if aic is not None and not np.isnan(aic):
+        print(f"  AIC: {aic:.2f}")
+    else:
+        print("  AIC: N/A (failed to calculate)")
+
+    if bic is not None and not np.isnan(bic):
+        print(f"  BIC: {bic:.2f}")
+    else:
+        print("  BIC: N/A (failed to calculate)")
+
+    if r2_marginal is not None:
+        print(f"R² (marginal - fixed only): {r2_marginal:.4f}")
+        print(f"R² (conditional - fixed+random): {r2_conditional:.4f}")
+    else:
+        print("R² metrics: N/A (calculation failed)")
+    print("=" * 80)
+
+    return {
+        'model': model,
+        'result': result,
+        'results_df': results_df,
+        'random_effects_df': random_effects_df,
+        'diagnostics': diagnostics
+    }
+
+
+
+def non_interaction_fit_mixed_effects_model(
         df: pd.DataFrame,
         response_var: str,
         condition_vars: dict,
@@ -643,8 +1362,148 @@ def fit_mixed_effects_model(
 # ============================================================================
 # MODULAR MODEL FITTING FUNCTIONS
 # ============================================================================
-
 def fit_both_models(
+        df: pd.DataFrame,
+        response_var: str,
+        condition_vars: dict,
+        explanatory_vars: list,
+        comparison_level_name: str,
+        hypothesis_name: str,
+        n_windows_per_trial: int = 9,
+        show_diagnostic_plots: bool = False,
+        reference_categories: dict = None,
+        moderation_pairs: list = None
+) -> dict:
+    """
+    Fit both OLS and LME models together.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe
+    response_var : str
+        Dependent variable
+    condition_vars : dict
+        Condition variables with types (e.g., {'Category': 'categorical', 'Familiarity': 'ordinal'})
+    explanatory_vars : list
+        Explanatory variables
+    comparison_level_name : str
+        Name for reporting
+    hypothesis_name : str
+        Hypothesis name
+    n_windows_per_trial : int
+        Segments per trial
+    show_diagnostic_plots : bool
+        Show plots
+    reference_categories : dict, optional
+        Dictionary mapping categorical variable names to their desired reference levels.
+        Example: {'Category or Silence': 'Silence', 'Perceived Category': 'Classical'}
+        If not provided, pandas default (alphabetical order) is used.
+    moderation_pairs : list of tuples, optional
+        List of (MODERATED_VAR, MODERATING_VAR) tuples for interaction effects.
+        Adds: MODERATING_VAR + MODERATED_VAR:MODERATING_VAR to the formula.
+        Example: [('Force Level', 'Familiarity'), ('Category', 'Force Level')]
+
+    Returns
+    -------
+    dict
+        {'OLS': ols_results, 'LME': lme_results}
+
+    Examples
+    --------
+    >>> # Set Silence as reference for 'Category or Silence'
+    >>> results = fit_both_models(
+    ...     df=data,
+    ...     response_var='CMC',
+    ...     condition_vars={'Category or Silence': 'categorical'},
+    ...     explanatory_vars=['Force'],
+    ...     comparison_level_name='Level 2',
+    ...     hypothesis_name='H1',
+    ...     reference_categories={'Category or Silence': 'Silence'}
+    ... )
+    >>>
+    >>> # With moderation: Does Familiarity moderate the effect of Force?
+    >>> results = fit_both_models(
+    ...     df=data,
+    ...     response_var='CMC',
+    ...     condition_vars={'Category': 'categorical', 'Familiarity': 'ordinal'},
+    ...     explanatory_vars=['Force Level'],
+    ...     comparison_level_name='Level 2',
+    ...     hypothesis_name='H2: Force × Familiarity',
+    ...     moderation_pairs=[('Force Level', 'Familiarity')]
+    ... )
+    """
+    print("\n" + "=" * 100)
+    print(f"HYPOTHESIS: {hypothesis_name}")
+    print(f"DEPENDENT VARIABLE: {response_var}")
+    print(f"COMPARISON LEVEL: {comparison_level_name}")
+    print("=" * 100)
+
+    # Set reference categories for categorical variables
+    df = df.copy()  # Work on a copy to avoid modifying original
+
+    if reference_categories is not None:
+        print("\n[REFERENCE CATEGORY SETUP]")
+        for var_name, var_type in condition_vars.items():
+            if var_type == 'categorical' and var_name in reference_categories:
+                reference_level = reference_categories[var_name]
+
+                # Convert to categorical if not already
+                if not pd.api.types.is_categorical_dtype(df[var_name]):
+                    df[var_name] = df[var_name].astype('category')
+
+                # Get current categories
+                current_categories = df[var_name].cat.categories.tolist()
+
+                # Check if reference level exists
+                if reference_level not in current_categories:
+                    print(f"  ⚠️  Warning: Reference level '{reference_level}' not found in '{var_name}'")
+                    print(f"      Available categories: {current_categories}")
+                    print(f"      Using default (alphabetical) reference instead.")
+                else:
+                    # Reorder categories to put reference first
+                    other_categories = [c for c in current_categories if c != reference_level]
+                    new_order = [reference_level] + sorted(other_categories)
+                    df[var_name] = df[var_name].cat.reorder_categories(new_order)
+
+                    print(f"  ✓ Variable: '{var_name}'")
+                    print(f"      Reference level: '{reference_level}' (all coefficients compare TO this)")
+                    print(f"      Other levels: {sorted(other_categories)}")
+        print()
+
+    results = {}
+
+    # Fit OLS
+    print("\n" + "-" * 100)
+    print("OLS MODEL")
+    print("-" * 100)
+    results['OLS'] = fit_linear_regression_model(
+        df=df,
+        response_var=response_var,
+        condition_vars=condition_vars,
+        explanatory_vars=explanatory_vars,
+        show_diagnostic_plots=show_diagnostic_plots,
+        moderation_pairs=moderation_pairs
+    )
+
+    # Fit LME
+    print("\n" + "-" * 100)
+    print("LME MODEL")
+    print("-" * 100)
+    results['LME'] = fit_mixed_effects_model(
+        df=df,
+        response_var=response_var,
+        condition_vars=condition_vars,
+        explanatory_vars=explanatory_vars,
+        grouping_var='Subject ID',
+        show_diagnostic_plots=show_diagnostic_plots,
+        moderation_pairs=moderation_pairs
+    )
+
+    return results
+
+
+def non_interaction_fit_both_models(
         df: pd.DataFrame,
         response_var: str,
         condition_vars: dict,
@@ -1242,7 +2101,9 @@ def generate_all_summary_tables(
         results_df: pd.DataFrame,
         output_dir: Path,
         diagnostics_df: pd.DataFrame = None,
-        file_identifier: str = ""
+        file_identifier: str = "",
+        generate_per_level_tables: bool = False,
+        generate_thematic_tables: bool = False,
 ) -> None:
     """
     Generate all summary tables from results.
@@ -1310,113 +2171,116 @@ def generate_all_summary_tables(
     # ============================================================
     # DYNAMIC TABLES: One table per comparison level
     # ============================================================
-    print(f"\n{'=' * 120}")
-    print("TABLES BY COMPARISON LEVEL (Dynamically Generated)")
-    print(f"{'=' * 120}")
-
     table_num = 1
-    for level in unique_levels:
-        level_data = results_df_formatted[
-            results_df_formatted['Comparison_Level'] == level
-            ].copy()
+    if generate_per_level_tables:
+        print(f"\n{'=' * 120}")
+        print("TABLES BY COMPARISON LEVEL (Dynamically Generated)")
+        print(f"{'=' * 120}")
 
-        if len(level_data) > 0:
-            print(f"\n{'-' * 120}")
-            print(f"TABLE {table_num}: {level}")
-            print(f"{'-' * 120}\n")
+        for level in unique_levels:
+            level_data = results_df_formatted[
+                results_df_formatted['Comparison_Level'] == level
+                ].copy()
 
-            # Create clean filename from level name
-            # E.g., "Level 1 (Music + Force + Trial ID)" -> "level1_music_force_trial"
-            level_clean = level.lower()
-            level_clean = level_clean.replace('level ', 'level')
-            level_clean = level_clean.split('(')[0].strip()  # Take only "Level N" part
-            level_clean = level_clean.replace(' ', '')
+            if len(level_data) > 0:
+                print(f"\n{'-' * 120}")
+                print(f"TABLE {table_num}: {level}")
+                print(f"{'-' * 120}\n")
 
-            # Save using file management utility
-            filename = filemgmt.file_title(f"summary_{level_clean}{file_suffix}", ".csv")
-            save_path = output_dir / filename
-            level_data.to_csv(save_path, index=False)
+                # Create clean filename from level name
+                # E.g., "Level 1 (Music + Force + Trial ID)" -> "level1_music_force_trial"
+                level_clean = level.lower()
+                level_clean = level_clean.replace('level ', 'level')
+                level_clean = level_clean.split('(')[0].strip()  # Take only "Level N" part
+                level_clean = level_clean.replace(' ', '')
 
-            print(f"✓ Saved to: {save_path}")
-            print(f"  Rows: {len(level_data)}")
+                # Save using file management utility
+                filename = filemgmt.file_title(f"summary_{level_clean}{file_suffix}", ".csv")
+                save_path = output_dir / filename
+                level_data.to_csv(save_path, index=False)
 
-            # Display summary statistics for this level
-            n_hypotheses = level_data['Hypothesis'].nunique()
-            n_parameters = level_data['Parameter'].nunique()
-            n_significant = len(level_data[level_data['Significance_adjusted'].isin(['*', '**', '***'])])
+                print(f"✓ Saved to: {save_path}")
+                print(f"  Rows: {len(level_data)}")
 
-            print(f"  Hypotheses: {n_hypotheses}")
-            print(f"  Parameters: {n_parameters}")
-            print(
-                f"  Significant effects: {n_significant}/{len(level_data)} ({100 * n_significant / len(level_data):.1f}%)")
+                # Display summary statistics for this level
+                n_hypotheses = level_data['Hypothesis'].nunique()
+                n_parameters = level_data['Parameter'].nunique()
+                n_significant = len(level_data[level_data['Significance_adjusted'].isin(['*', '**', '***'])])
 
-            # Show sample rows
-            print("\nSample rows:")
-            display_cols = ['Hypothesis', 'Model_Type', 'Parameter', 'Coefficient',
-                            'p_value_adjusted', 'Significance_adjusted']
-            display_cols = [c for c in display_cols if c in level_data.columns]
-            print(level_data[display_cols].head(5).to_string(index=False))
+                print(f"  Hypotheses: {n_hypotheses}")
+                print(f"  Parameters: {n_parameters}")
+                print(
+                    f"  Significant effects: {n_significant}/{len(level_data)} ({100 * n_significant / len(level_data):.1f}%)")
 
-            table_num += 1
+                # Show sample rows
+                print("\nSample rows:")
+                display_cols = ['Hypothesis', 'Model_Type', 'Parameter', 'Coefficient',
+                                'p_value_adjusted', 'Significance_adjusted']
+                display_cols = [c for c in display_cols if c in level_data.columns]
+                print(level_data[display_cols].head(5).to_string(index=False))
+
+                table_num += 1
 
     # ============================================================
     # SPECIAL TABLES: Key Effects
     # ============================================================
 
-    # Music Listening Effects (across all levels with music parameter)
-    music_effects = results_df_formatted[
-        (results_df_formatted['Parameter'].str.contains('Music', case=False, na=False)) &
-        (~results_df_formatted['Parameter'].str.contains('Intercept', case=False, na=False))
-        ].copy()
+    if generate_thematic_tables:
 
-    if len(music_effects) > 0:
-        print(f"\n{'=' * 120}")
-        print(f"TABLE {table_num}: MUSIC EFFECTS ACROSS ALL LEVELS")
-        print(f"{'=' * 120}\n")
+        # Music Listening Effects (across all levels with music parameter)
+        music_effects = results_df_formatted[
+            (results_df_formatted['Parameter'].str.contains('Music', case=False, na=False)) &
+            (~results_df_formatted['Parameter'].str.contains('Intercept', case=False, na=False))
+            ].copy()
 
-        filename = filemgmt.file_title(f"summary_music_effects{file_suffix}", ".csv")
-        save_path = output_dir / filename
-        music_effects.to_csv(save_path, index=False)
+        if len(music_effects) > 0:
+            print(f"\n{'=' * 120}")
+            print(f"TABLE {table_num}: MUSIC EFFECTS ACROSS ALL LEVELS")
+            print(f"{'=' * 120}\n")
 
-        print(f"✓ Saved to: {save_path}")
-        print(f"  Rows: {len(music_effects)}")
+            filename = filemgmt.file_title(f"summary_music_effects{file_suffix}", ".csv")
+            save_path = output_dir / filename
+            music_effects.to_csv(save_path, index=False)
 
-        # Display summary
-        print("\nSample rows:")
-        display_cols = ['Hypothesis', 'Comparison_Level', 'Model_Type', 'Parameter',
-                        'Coefficient', 'p_value_adjusted', 'Significance_adjusted']
-        display_cols = [c for c in display_cols if c in music_effects.columns]
-        print(music_effects[display_cols].head(10).to_string(index=False))
+            print(f"✓ Saved to: {save_path}")
+            print(f"  Rows: {len(music_effects)}")
 
-        table_num += 1
+            # Display summary
+            print("\nSample rows:")
+            display_cols = ['Hypothesis', 'Comparison_Level', 'Model_Type', 'Parameter',
+                            'Coefficient', 'p_value_adjusted', 'Significance_adjusted']
+            display_cols = [c for c in display_cols if c in music_effects.columns]
+            print(music_effects[display_cols].head(10).to_string(index=False))
 
-    # Force Level Effects (across all levels)
-    force_results = results_df_formatted[
-        (results_df_formatted['Parameter'].str.contains('Force', case=False, na=False)) &
-        (~results_df_formatted['Parameter'].str.contains('Intercept', case=False, na=False))
-        ].copy()
+            table_num += 1
 
-    if len(force_results) > 0:
-        print(f"\n{'=' * 120}")
-        print(f"TABLE {table_num}: FORCE EFFECTS ACROSS ALL LEVELS")
-        print(f"{'=' * 120}\n")
+        # Force Level Effects (across all levels)
+        force_results = results_df_formatted[
+            (results_df_formatted['Parameter'].str.contains('Force', case=False, na=False)) &
+            (~results_df_formatted['Parameter'].str.contains('Intercept', case=False, na=False))
+            ].copy()
 
-        filename = filemgmt.file_title(f"summary_force_effects{file_suffix}", ".csv")
-        save_path = output_dir / filename
-        force_results.to_csv(save_path, index=False)
+        if len(force_results) > 0:
+            print(f"\n{'=' * 120}")
+            print(f"TABLE {table_num}: FORCE EFFECTS ACROSS ALL LEVELS")
+            print(f"{'=' * 120}\n")
 
-        print(f"✓ Saved to: {save_path}")
-        print(f"  Rows: {len(force_results)}")
+            filename = filemgmt.file_title(f"summary_force_effects{file_suffix}", ".csv")
+            save_path = output_dir / filename
+            force_results.to_csv(save_path, index=False)
 
-        # Display summary
-        print("\nTop 10 force effects by significance:")
-        force_sorted = force_results.sort_values('p_value_adjusted')
-        display_cols = ['Hypothesis', 'Comparison_Level', 'Model_Type',
-                        'Coefficient', 'p_value_adjusted', 'Significance_adjusted']
-        display_cols = [c for c in display_cols if c in force_sorted.columns]
-        print(force_sorted[display_cols].head(10).to_string(index=False))
+            print(f"✓ Saved to: {save_path}")
+            print(f"  Rows: {len(force_results)}")
 
-        table_num += 1
+            # Display summary
+            print("\nTop 10 force effects by significance:")
+            force_sorted = force_results.sort_values('p_value_adjusted')
+            display_cols = ['Hypothesis', 'Comparison_Level', 'Model_Type',
+                            'Coefficient', 'p_value_adjusted', 'Significance_adjusted']
+            display_cols = [c for c in display_cols if c in force_sorted.columns]
+            print(force_sorted[display_cols].head(10).to_string(index=False))
+
+            table_num += 1
 
     # ============================================================
     # TABLE: ALL SIGNIFICANT EFFECTS
@@ -1490,3 +2354,133 @@ def generate_all_summary_tables(
     print(f"All CSV files have identical structure (same columns, just filtered rows)")
     if file_identifier:
         print(f"All files include identifier: '{file_identifier}'")
+
+
+
+def run_model_levels(
+        base_df: pd.DataFrame,
+        level_definitions: list[dict],
+        levels_to_include: list[int],
+        response_var: str,
+        hypothesis_name: str,
+        n_windows_per_trial: int,
+        all_results_list: list,
+        diagnostics_list: list,
+        show_diagnostic_plots: bool = False,
+) -> None:
+    """
+    Iterate over a list of model level definitions, fit both models for each,
+    and store the results.
+
+    Each entry in `level_definitions` is a dict with keys:
+        - df_filter   : callable(df) -> pd.DataFrame, or None for no filter
+        - condition_vars       : dict
+        - reference_categories : dict
+        - explanatory_vars     : list[str]
+        - moderation_pairs     : list[tuple[str, str]] | None
+
+    The `comparison_level_name` is inferred automatically from the level index
+    and the variables present in each definition.
+
+    Parameters
+    ----------
+    base_df : pd.DataFrame
+        The full dataframe; `df_filter` in each level definition is applied to it.
+    level_definitions : list[dict]
+        Ordered list of level definitions (index 0 = Level 0, etc.).
+    levels_to_include : list[int]
+        Which levels to actually run, e.g. [0, 2].
+    response_var : str
+        Dependent variable column name.
+    hypothesis_name : str
+        Hypothesis label for reporting.
+    n_windows_per_trial : int
+        Segments per trial.
+    all_results_list : list
+        Accumulated results list (mutated in place).
+    diagnostics_list : list
+        Accumulated diagnostics list (mutated in place).
+    show_diagnostic_plots : bool
+        Whether to show diagnostic plots.
+    """
+    for level_idx, level_def in enumerate(level_definitions):
+        if level_idx not in levels_to_include: continue
+
+        # --- resolve dataframe ---
+        df_filter = level_def.get('df_filter', None)
+        df = df_filter(base_df) if df_filter is not None else base_df
+
+        condition_vars       = level_def['condition_vars']
+        reference_categories = level_def.get('reference_categories', None)
+        explanatory_vars     = level_def['explanatory_vars']
+        moderation_pairs     = level_def.get('moderation_pairs', None)
+
+        # --- auto-infer comparison_level_name ---
+        comparison_level_name = _build_level_name(
+            level_idx, condition_vars, explanatory_vars, moderation_pairs
+        )
+
+        results = fit_both_models(
+            df=df,
+            response_var=response_var,
+            condition_vars=condition_vars,
+            reference_categories=reference_categories,
+            explanatory_vars=explanatory_vars,
+            comparison_level_name=comparison_level_name,
+            hypothesis_name=hypothesis_name,
+            n_windows_per_trial=n_windows_per_trial,
+            show_diagnostic_plots=show_diagnostic_plots,
+            moderation_pairs=moderation_pairs,
+        )
+
+        store_model_results(
+            model_results=results,
+            hypothesis_name=hypothesis_name,
+            dependent_variable=response_var,
+            comparison_level_name=comparison_level_name,
+            all_results_list=all_results_list,
+            diagnostics_list=diagnostics_list,
+        )
+
+
+def _build_level_name(
+        level_idx: int,
+        condition_vars: dict,
+        explanatory_vars: list[str],
+        moderation_pairs: list[tuple] | None,
+) -> str:
+    """
+    Auto-generate a human-readable comparison level name.
+
+    Format:  Level N (VarA + VarB + ... [+ Interactions])
+    Condition vars come first, then explanatory vars, with
+    '+ Interactions' appended when moderation_pairs is non-empty.
+    """
+    # Friendly short labels: strip units/brackets for readability
+    def _short(name: str) -> str:
+        # e.g. 'Median Force Level [0-1]' -> 'Force'
+        #      'Musical skill [0-7]_centered' -> 'Musical skill'
+        name = name.replace('_centered', '')
+        name = name.split('[')[0].strip()
+        # shorten some known verbose names
+        abbreviations = {
+            'Median Force Level': 'Force',
+            'Median Heart Rate': 'Heart Rate',
+            'Median HRV': 'HRV',
+        }
+        return abbreviations.get(name, name)
+
+    parts = [_short(v) for v in condition_vars] + [_short(v) for v in explanatory_vars]
+    # deduplicate while preserving order
+    seen = set()
+    unique_parts = []
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            unique_parts.append(p)
+
+    label = ' + '.join(unique_parts)
+    if moderation_pairs:
+        label += ' + Interactions'
+
+    return f"Level {level_idx} ({label})"
