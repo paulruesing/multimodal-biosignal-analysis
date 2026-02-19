@@ -1942,7 +1942,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
             dc_offset_slider = Slider(
                 dc_offset_slider_ax,
                 '',
-                -30, 0,
+                -45, 0,
                 valinit=shared_dc_offset.value,
                 valstep=0.5,
                 valfmt='%.1f',
