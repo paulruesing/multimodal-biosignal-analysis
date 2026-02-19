@@ -1655,6 +1655,33 @@ def fetch_enriched_serial_frame(experiment_data_dir: str | Path, set_time_index:
     return serial_frame
 
 
+def fetch_personal_data(experiment_data_dir: str | Path) -> dict:
+    """
+    Reads subject data and post-study feedback data JSONs and returns corresponding dict.
+
+    Returns dict with keys:
+        'Name', 'Birthdate', 'Gender', 'Dominant hand', 'Listening habit', 'Listening habit [0-3]',
+        'Dancing habit', 'Athleticism', 'Musical skill', 'Total fatigue', 'Total pleasure'
+    """
+    subject_data_file = filemgmt.most_recent_file(experiment_data_dir, ".json", ["Subject", "Data"])
+    with open(subject_data_file, "r") as f:
+        personal_data_dict = json.load(f)
+
+    offboarding_data_file = filemgmt.most_recent_file(experiment_data_dir, ".json", ["Post-Study Feedback Data"])
+    with open(offboarding_data_file, "r") as f:
+        personal_data_dict.update(json.load(f))  # add to existing dict
+
+    # format values and check for missing ones:
+    if "Musical skill" not in personal_data_dict.keys():
+        personal_data_dict["Musical skill"] = 0
+
+    listening_habit_ordinal_mapping = {'Most of the day': 3, 'A small part of the day': 2, 'Every 2 or 3 days': 1, 'Seldom': 0}
+    personal_data_dict['Listening habit [0-3]'] = listening_habit_ordinal_mapping[personal_data_dict['Listening habit']]
+
+    # return:
+    return personal_data_dict
+
+
 def fetch_enriched_log_frame(experiment_data_dir: str | Path, set_time_index: bool = True,
                              verbose: bool = True) -> pd.DataFrame:
     log_dir = experiment_data_dir / "experiment_logs"
