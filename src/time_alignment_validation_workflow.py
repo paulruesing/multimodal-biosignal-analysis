@@ -379,6 +379,7 @@ def load_emg_psd_both_muscles(
         subject_experiment_dir, set_time_index=True, verbose=False
     )
     qtc_start, qtc_end = data_integration.get_qtc_measurement_start_end(log_frame, verbose=False)
+    true_duration_sec = (qtc_end - qtc_start).total_seconds()
     
     # Load serial frame for force
     serial_frame = data_integration.fetch_enriched_serial_frame(
@@ -423,11 +424,22 @@ def load_emg_psd_both_muscles(
             emg_psd = np.load(emg_psd_path)
             psd_times_sec = np.load(psd_times_path)
             psd_freqs = np.load(psd_freqs_path)
-            
+
+            ### EXPLICIT STRETCHING TO HANDLE SAMPLING RATE DRIFT
+            n_windows = len(psd_times_sec)
+
+            import src.pipeline.data_analysis as data_analysis
+            psd_times_absolute = data_analysis.add_time_index(
+                start_timestamp=qtc_start,
+                end_timestamp=qtc_end,
+                n_timesteps=n_windows,
+            )
+
+            """  # WITHOUT STRETCHING:
             # Convert to absolute timestamps
             psd_times_absolute = pd.to_datetime(
                 qtc_start + pd.to_timedelta(psd_times_sec, unit='s')
-            )
+            )"""
             
             # Extract power in frequency band
             freq_mask = (psd_freqs >= emg_frequency_band[0]) & (psd_freqs <= emg_frequency_band[1])
@@ -1128,19 +1140,30 @@ def create_power_comparison_plot(
     plt.close()
 
 
+
+
+
+
+
 if __name__ == "__main__":
     ROOT = Path().resolve().parent
     DATA = ROOT / "data"
     OUTPUT = ROOT / 'output'
     FEATURE_DATA = DATA / "precomputed_features"
     EXPERIMENT_DATA = DATA / "experiment_results"
+    QTC_DATA = DATA / "qtc_data"
     ALIGNMENT_REPORTS = OUTPUT / "alignment_validation_enhanced"
 
     filemgmt.assert_dir(ALIGNMENT_REPORTS)
 
     # Workflow control
-    subjects_to_check = [0, 1, 2, 3, 4, 5, 6, 7]
+    subjects_to_check = range(9 )
     save_reports = True
+
+    # Workflow control flags
+    run_sampling_rate_validation = True
+    run_muscle_validation = False  # Set to True if you want to run muscle validation
+    run_visualization = False  # Set to True to generate alignment plots
     
     # NOTE: Subject 0 and 1 may have different labeling
     # From subject 2 onwards, labeling is confirmed correct
@@ -1275,7 +1298,6 @@ if __name__ == "__main__":
     print(f"{'='*100}\n")
 
 
-if __name__ == "__main__":
     """
     Main execution block for time alignment validation workflow.
     
@@ -1284,28 +1306,6 @@ if __name__ == "__main__":
     2. EMG-force synchronization validation
     3. Muscle identity validation (flexor vs extensor)
     """
-    from pathlib import Path
-    
-    # Directory configuration
-    ROOT = Path().resolve().parent
-    OUTPUT = ROOT / 'output'
-    QTC_DATA = ROOT / "data" / "qtc_data"
-    EXPERIMENT_DATA = ROOT / "data" / "experiment_results"
-    FEATURE_DATA = OUTPUT / 'feature_data'
-    ALIGNMENT_REPORTS = OUTPUT / 'alignment_validation_reports'
-    
-    # Create output directory
-    ALIGNMENT_REPORTS.mkdir(parents=True, exist_ok=True)
-    
-    # Workflow configuration
-    SUBJECTS_TO_VALIDATE = [0, 1, 2, 3, 4, 5, 6, 7]  # List of subject indices
-    
-    # Workflow control flags
-    run_sampling_rate_validation = True
-    run_muscle_validation = False  # Set to True if you want to run muscle validation
-    run_visualization = False  # Set to True to generate alignment plots
-    
-    save_reports = True
     
     print("\n" + "#" * 100)
     print("# TIME ALIGNMENT VALIDATION WORKFLOW")
@@ -1319,7 +1319,7 @@ if __name__ == "__main__":
         
         try:
             validation_df = validate_sampling_rates_all_subjects(
-                subject_indices=SUBJECTS_TO_VALIDATE,
+                subject_indices=subjects_to_check,
                 qtc_data_dir=QTC_DATA,
                 experiment_data_dir=EXPERIMENT_DATA,
                 channel_sets=['eeg', 'emg_1_flexor', 'emg_2_extensor'],
@@ -1365,7 +1365,7 @@ if __name__ == "__main__":
         
         all_muscle_comparisons = []
         
-        for subject_ind in SUBJECTS_TO_VALIDATE:
+        for subject_ind in subjects_to_check:
             try:
                 results = validate_muscle_identity(
                     subject_ind=subject_ind,
