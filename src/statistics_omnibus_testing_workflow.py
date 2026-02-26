@@ -33,10 +33,9 @@ if __name__ == '__main__':
 
     ##### PARAMETERS
     # feature extraction:
-    current_subject_count: int = 9  # todo: increase to consider new data!
-    overwrite: bool = False  # ALWAYS compute new frame
-    n_within_trial_segments_list: list[int] = [1, 2, 3, 4, 5, 10, 20]
-    # n_within_trial_segments: int = 20  # slices per ~40s trial
+    current_subject_count: int = 11  # todo: increase to consider new data!
+    overwrite: bool = True  # ALWAYS compute new frame
+    n_within_trial_segments_list: list[int] = [3, 4, 5, 10, 20]  # of ~40sec trials
 
     # data exploration:
     add_bin_features_dict: dict[str, int] = {'Median Force Level [0-1]': 4, 'Familiarity [0-7]': 5,
