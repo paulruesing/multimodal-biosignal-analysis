@@ -1276,7 +1276,7 @@ def remove_silence_trial(enriched_log: pd.DataFrame, log: pd.DataFrame, silence_
 
 def remove_song_entries(enriched_log: pd.DataFrame, log: pd.DataFrame, song_title_artist_id_tuples: list[tuple[str, str, int]],
                         include_questionnaire_entries: bool = True) -> pd.DataFrame:
-    """ Remove songs from log frame that were wrongly executed.
+    """ Remove songs from log frame that were wrongly executed. Takes SONG ID not TRIAL ID!
     include_questionnaire_entries = True is recommended, if a motor task was started. """
     log = log.copy()
     if isinstance(enriched_log.index, pd.DatetimeIndex): enriched_log = enriched_log.reset_index()
