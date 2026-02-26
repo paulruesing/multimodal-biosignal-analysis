@@ -739,7 +739,7 @@ if __name__ == '__main__':
     EXPERIMENT_RESULTS = ROOT / "data" / "experiment_results"
 
     # important: (todo: CHANGE PER SUBJECT)
-    SUBJECT_DIR = EXPERIMENT_RESULTS / "subject_10"
+    SUBJECT_DIR = EXPERIMENT_RESULTS / "subject_11"
 
     SERIAL_MEASUREMENTS = SUBJECT_DIR / "serial_measurements"
     MVC_MEASUREMENTS = SUBJECT_DIR / "mvc_measurements"

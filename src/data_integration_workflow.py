@@ -28,7 +28,7 @@ if __name__=="__main__":
     EXPERIMENT_DATA = ROOT / "data" / "experiment_results"
 
     ### WORKFLOW CONTROL
-    subject_ind = 8
+    subject_ind = 10
     save_result: bool = True  # only set to True if manual adjustments finalized
 
     # experiment results import behaviour:
@@ -255,6 +255,61 @@ if __name__=="__main__":
         # idle state:
         enriched_log_frame.loc[pd.Timestamp("2026-02-12 16:55:00"):, 'Phase'] = 'Idle State'
 
+    elif subject_ind == 9:
+        # song start wasn't immediately registered:
+        log_frame = data_integration.remove_single_row_by_timestamp(log_frame, "2026-02-18 19:27:32.356709")
+
+        log_frame = data_integration.remove_song_entries(
+            enriched_log_frame, log_frame,
+            song_title_artist_id_tuples=[
+                ("Comptine d\'un autre été, l\'après-midi", "Yann Tiersen", 3),  # jumped somehow...
+                ("Blurred Lines", "Robin Thicke", 11),
+            ])
+
+        enriched_log_frame = data_integration.prepare_log_frame(log_frame, )
+
+        # mark some trials: (dynamometer jumped somehow)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=9)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=11)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement at End but shortened trial accordingly",
+                                                             False,  # still keep
+                                                             trial_id=12)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=15)
+
+        # idle state:
+        enriched_log_frame.loc[pd.Timestamp("2026-02-18 19:34:00"):, 'Phase'] = 'Idle State'
+
+    elif subject_ind == 10:
+
+        log_frame = data_integration.remove_song_entries(
+            enriched_log_frame, log_frame,
+            song_title_artist_id_tuples=[
+                ("Comptine d\'un autre été, l\'après-midi", "Yann Tiersen", 5),  # jumped somehow...
+            ])
+
+        enriched_log_frame = data_integration.prepare_log_frame(log_frame, )
+
+        # mark some trials: (dynamometer jumped somehow)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=10)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement and Corresponding Talking",
+                                                             True, trial_id=14)
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Flawed Dynamometer Measurement towards End (should be fine)",
+                                                             True, trial_id=15)
+
+        # idle state:
+        enriched_log_frame.loc[pd.Timestamp("2026-02-19 19:20:00"):, 'Phase'] = 'Idle State'
+
 
 
     task_start_ends = data_integration.get_all_task_start_ends(enriched_log_frame, 'list')
@@ -266,8 +321,8 @@ if __name__=="__main__":
     print("-" * 80)
     print("Song Data Validation")
     print("-" * 80)
-    song_data_consistency_report = data_integration.validate_song_indices(enriched_log_frame, subject_experiment_data,
-                                                                       verbose=True)
+    song_data_consistency_report = data_integration.validate_song_indices(
+        enriched_log_frame, subject_experiment_data, verbose=True)
 
     print("\n\n")
     print("-" * 80)
@@ -276,7 +331,8 @@ if __name__=="__main__":
     questionnaire_data_consistency_report = data_integration.validate_trial_questionnaires(enriched_log_frame,
                                                                                         subject_experiment_data,
                                                                                         verbose=True)
-    enriched_log_frame = data_integration.repair_trial_questionnaire_mismatches(enriched_log_frame, questionnaire_data_consistency_report)
+    enriched_log_frame = data_integration.repair_trial_questionnaire_mismatches(enriched_log_frame,
+                                                                                questionnaire_data_consistency_report)
 
 
 

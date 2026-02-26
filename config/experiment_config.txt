@@ -11,7 +11,7 @@ Serial Sampling Rate --- 1000
 # mvc settings:
 Initial Force DC Offset --- -12.0
 Use Initial MVC --- True
-Initial MVC --- 65
+Initial MVC --- 80
 MVC Maximum Time --- 30
 
 # sampling smoothing settings:
@@ -28,7 +28,7 @@ Display Refresh Rate --- 30
 ### general:
 # enter 0 if this is the first trial of this subject:
 Last Song Counter --- 0
-Last Silence Counter --- 1
+Last Silence Counter --- 0
 
 
 ### motor task:

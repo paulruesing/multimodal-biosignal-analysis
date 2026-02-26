@@ -34,7 +34,7 @@ if __name__=="__main__":
 
     ### WORKFLOW CONTROL
     # select subject:
-    for subject_ind in [8]:  # only new
+    for subject_ind in [10]:  # only new
         handedness: Literal['left', 'right'] = 'right' if subject_ind != 3 else 'left'
 
 
