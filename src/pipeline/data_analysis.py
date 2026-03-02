@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
 from typing import Literal, Union
+import logging
 
 ############################## DATA MANIPULATION / INTEGRATION METHODS ##############################
 def _normalize_to_datetimeindex(
@@ -256,6 +257,9 @@ def apply_window_operator(
             continue
 
         window_data = target_array_flat[mask, :]
+
+        if (window_data.min() == 0.0) & (window_data.max() == 0.0):
+            logging.warning(f"[data_analysis.apply_window_operator] Window {window_idx} only contains NULL values.")
 
         # Apply aggregation operation using nan-aware functions
         if operation == 'mean':
