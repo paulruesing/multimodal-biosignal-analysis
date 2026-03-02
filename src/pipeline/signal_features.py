@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 import src.pipeline.visualizations as visualizations
 import src.pipeline.data_integration as data_integration
 import src.pipeline.data_analysis as data_analysis
-from src.pipeline.visualizations import smart_save_fig
 import src.utils.file_management as filemgmt
 
 FREQUENCY_BANDS = {
@@ -889,6 +888,8 @@ def compute_task_wise_aggregated_cmc(eeg_array: np.ndarray, emg_array: np.ndarra
                                      use_jackknife: bool = True,
                                      jackknife_alpha: float = .05,
                                      save_dir: str | Path | None = None,
+                                     pre_trial_computation_buffer_sec: float = 3.0,
+                                     post_trial_computation_buffer_sec: float = 3.0,
                                      ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute channel-aggregated corticomuscular coherence (CMC) between EEG and EMG signals.
@@ -1028,16 +1029,27 @@ def compute_task_wise_aggregated_cmc(eeg_array: np.ndarray, emg_array: np.ndarra
         )
         window_indices = data_analysis.make_timezone_aware(window_indices)
 
+        # extend window to prevent data loss:
+        if pre_trial_computation_buffer_sec > 0:
+            print(f"Starting pre-trial CMC computation {pre_trial_computation_buffer_sec} seconds before trial start to prevent data loss.")
+        if post_trial_computation_buffer_sec > 0:
+            print(f"Ending post-trial CMC computation {post_trial_computation_buffer_sec} seconds after trial end to prevent data loss.")
+
+        adjusted_trial_start_ends = [
+            (start - pd.Timedelta(seconds=pre_trial_computation_buffer_sec),
+             end + pd.Timedelta(seconds=post_trial_computation_buffer_sec)) for start, end in trial_start_ends
+        ]
+
         # derive task-specific window indices:
         trial_window_start_end_indices: list[tuple[int, int]] = []
-        for start, end in trial_start_ends:
+        for start, end in adjusted_trial_start_ends:
             window_indices_subset = window_indices[start:end]
             start_window_idx, end_window_idx = window_indices_subset.min(), window_indices_subset.max()
             trial_window_start_end_indices.append((start_window_idx, end_window_idx))
 
-        # iterator for below loop:
-        iterator = tqdm(zip(trial_start_ends, trial_window_start_end_indices), desc="Computing Trial-wise CMC",
-                        total=len(trial_start_ends))
+        # iterator for the below loop:
+        iterator = tqdm(zip(adjusted_trial_start_ends, trial_window_start_end_indices), desc="Computing Trial-wise CMC",
+                        total=len(adjusted_trial_start_ends))
 
         # prepare EEG and EMG data for time slicing:
         time_indexed_eeg_df = data_analysis.add_time_index(
