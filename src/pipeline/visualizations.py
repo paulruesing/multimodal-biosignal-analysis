@@ -2438,35 +2438,45 @@ def plot_cmc_lineplots_per_category(
                 subject_id=subject_id,
                 muscle=muscle,
                 freq_band=freq_band,
-                n_subjects=len(subject_ids),
                 y_ticks=np.linspace(cmc_plot_min, cmc_plot_max, n_yticks),
                 cmc_plot_min=cmc_plot_min,
                 cmc_plot_max=cmc_plot_max,
-                legend_handles=legend_handles,
-                category_column=category_column,
                 include_std_dev=include_std_dev,
-                std_dev_factor=std_dev_factor
+                std_dev_factor=std_dev_factor,
+                x_ticks=x_ticks,
             )
 
-    # Figure title
-    fig.suptitle(f"CMC per Subject and {category_column}")
+    # Figure-level legend — placed outside the grid, tight layout accounts for it automatically
+    fig.legend(
+        handles=legend_handles,
+        loc='center left',
+        bbox_to_anchor=(.84, 0.5),  # right of figure, vertically centred
+        title=category_column,
+        borderaxespad=0,
+        frameon=True,
+    )
 
-    # Save if requested
+    fig.suptitle(f"CMC per Subject and '{category_column}'")
+
+    # Adjust layout to make room for the legend on the right
+    fig.subplots_adjust(left=0.05, right=0.83, top=0.93, bottom=0.10,
+                        hspace=0.05, wspace=0.1)
+
     if save_plots and save_dir is not None:
         save_path = save_dir / filemgmt.file_title(
             f"CMC {muscle} per Subject per {category_column}", ".svg"
         )
-        fig.savefig(save_path, bbox_inches='tight')
+        fig.savefig(save_path, bbox_inches='tight')  # bbox_inches='tight' now captures the legend correctly
 
     plt.show()
 
 
 def _format_cmc_subplot(
         ax, row_ind: int, col_ind: int, subject_id: int,
-        muscle: str, freq_band: str, n_subjects: int, y_ticks: np.ndarray,
+        muscle: str, freq_band: str, y_ticks: np.ndarray,
         cmc_plot_min: float, cmc_plot_max: float,
-        legend_handles: list, category_column: str,
-        include_std_dev: bool, std_dev_factor: float
+        include_std_dev: bool, std_dev_factor: float,
+        x_ticks: np.ndarray,
 ) -> None:
     """Format individual subplot for CMC line plot."""
 
@@ -2489,24 +2499,26 @@ def _format_cmc_subplot(
         ax.set_yticklabels([''] * len(y_ticks))
     ax.set_ylim([cmc_plot_min, cmc_plot_max])
 
+    # x_ticks:
+    ax.set_xticks(x_ticks)
+    if row_ind == 1:
+        if len(x_ticks) > 2: x_tick_labels = ['Start'] + [''] * (len(x_ticks) - 2) + ['End']
+        else: x_tick_labels = ['Start', 'End']
+        ax.set_xlabel('Trial Duration')
+    else:
+        x_tick_labels = [''] * len(x_ticks)
+    ax.set_xticklabels(x_tick_labels)#, rotation=90)
+    ax.get_xticklabels()[0].set_ha('left')  # 'Start' anchors left
+    ax.get_xticklabels()[1].set_ha('right')  # 'Start' anchors left
+
     # Grid
     ax.grid()
 
-    # Legend (only lower right subplot)
+    """# Legend (only lower right subplot)
     if row_ind == 1 and col_ind == (n_subjects - 1):
         ax.legend(
             handles=legend_handles,
             bbox_to_anchor=(1.0, 0.0),
             loc='lower left',
             title=category_column
-        )
-
-
-
-
-
-
-
-if __name__ == '__main__':
-    initialise_electrode_heatmap(values=[0]*64,
-                                 positios=EEG_POSITIONS, add_head_shape=True)
+        )"""
