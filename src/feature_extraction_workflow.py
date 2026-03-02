@@ -34,7 +34,7 @@ if __name__=="__main__":
 
     ### WORKFLOW CONTROL
     # select subject:
-    for subject_ind in [10]:  # only new
+    for subject_ind in range(11):  # only new
         handedness: Literal['left', 'right'] = 'right' if subject_ind != 3 else 'left'
 
 
@@ -44,7 +44,7 @@ if __name__=="__main__":
 
 
         # PSD computation:
-        do_compute_psd: bool = True  #(subject_ind == 6)  # only for subject 6
+        do_compute_psd: bool = False  # todo: change
         fetch_precomputed_psd: bool = False
         psd_window_size_sec: float = .25  # -> 4 Hz resolution
         save_psd: bool = True
@@ -71,7 +71,7 @@ if __name__=="__main__":
 
 
         # Compute Heart Rate (HR), HR Variability and Task-wise Scaled Force -> aka. "Enriched Serial Frame"
-        compute_enriched_serial_frame: bool = True
+        compute_enriched_serial_frame: bool = False  # todo: change!
         heart_refractory_period: str = '300ms'
         min_bpm: float = 30.0
         max_bpm: float = 200.0
