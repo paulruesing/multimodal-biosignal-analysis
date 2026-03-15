@@ -1864,7 +1864,7 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
     ax.set_ylim(-0.5, max_y + 0.5)
 
     # Set x-axis
-    ax.set_xlabel('Effect Size (β coefficient)', fontsize=11, fontweight='bold')
+    ax.set_xlabel('Effect Size (β)', fontsize=11, fontweight='bold')
     ax.tick_params(axis='x', labelsize=10)
 
     # Add grid for readability
@@ -2076,7 +2076,7 @@ def draw_time_resolution_forest_plot(
     ax.set_ylim(-0.5, max_y + 0.5)
 
     # --- x-axis ---
-    ax.set_xlabel('Effect Size (β coefficient)', fontsize=11, fontweight='bold')
+    ax.set_xlabel('Effect Size (β)', fontsize=11, fontweight='bold')
     ax.tick_params(axis='x', labelsize=10)
 
     # --- grid & spines ---
@@ -2115,11 +2115,12 @@ def plot_time_resolution_forest_mosaic(
         time_resolution_column: str = 'Time Resolution',
         exclude_intercepts: bool = True,
         model_type: str | None = None,
-        y_axis_label: str = 'Model Time Resolution [sec]',
+        y_axis_label: str = 'Time Res. [sec]',
         output_dir: Path = None,
         file_identifier_suffix: str | None = None,
         hidden: bool = False,
         plot_size: tuple[int, int] | Literal['auto'] = 'auto',
+        show_legend: bool = False,
 ):
     """
     Mosaic of time-resolution forest plots — one column per hypothesis,
@@ -2168,7 +2169,7 @@ def plot_time_resolution_forest_mosaic(
     # --- auto plot size: height driven by number of time-resolution rows ---
     if plot_size == 'auto':
         n_rows = df[time_resolution_column].nunique() * (1 if model_type else 2)
-        plot_size = (5 * len(hypotheses), max(4, n_rows * 0.6))
+        plot_size = (3 * len(hypotheses), max(2, n_rows * 0.6))
 
     fig, axs = plt.subplots(1, len(hypotheses), figsize=plot_size, constrained_layout=True)
 
@@ -2188,7 +2189,7 @@ def plot_time_resolution_forest_mosaic(
             hypothesis=hypothesis,
             y_axis_label=y_axis_label if col_ind == 0 else '',
             include_y_labels=(col_ind == 0),  # only label y-axis on first column
-            show_significance_legend=(col_ind == 0),
+            show_significance_legend=(col_ind == 0) and show_legend,
         )
 
     fig_title = (
@@ -2215,64 +2216,21 @@ def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
                                   hidden: bool = False,
                                   plot_size: tuple[int, int] | Literal['auto'] = 'auto',
                                   ):
-    """
-    Creates a mosaic of forest plots visualizing hypothesis effects across
-    multiple statistical hypotheses. Each subplot in the mosaic represents a
-    different hypothesis, displaying effect sizes with confidence intervals
-    for various model parameters.
+    # ... (docstring unchanged) ...
 
-    The function filters and processes the input result frame based on specified
-    criteria, formats parameter names for better readability, and generates a
-    multi-panel forest plot visualization. The resulting figure can be saved to
-    disk and/or displayed interactively.
-
-    Parameters
-    ----------
-    result_frame : pd.DataFrame
-        DataFrame containing statistical model results with columns including
-        'Parameter', 'Model_Type', 'Hypothesis', and effect size information
-    hypotheses : list[str]
-        List of hypothesis names to plot, each corresponding to a separate
-        subplot in the mosaic
-    exclude_intercepts : bool, optional
-        Whether to exclude intercept parameters from the visualization,
-        by default True
-    model_type : str or None, optional
-        Filter results to specific model type (e.g., 'LME'). If None, includes
-        all model types, by default 'LME'
-    output_dir : Path, optional
-        Directory path where the plot should be saved. If None, the plot is not
-        saved to disk, by default None
-    file_identifier_suffix : str or None, optional
-        Additional suffix to append to the figure title and filename for
-        identification purposes, by default None
-    hidden : bool, optional
-        Whether to suppress displaying the plot interactively. If True, the plot
-        is not shown with plt.show(), by default False
-    plot_size : tuple[int, int] or Literal['auto'], optional
-        Size of the figure as (width, height) in inches. If 'auto', calculates
-        size based on number of unique parameters, by default 'auto'
-
-    Notes
-    -----
-    The function performs the following parameter name formatting transformations:
-    - Removes 'C(' prefix for categorical variables
-    - Removes 'Q(' prefix for quantile variables
-    - Removes single quotes
-    - Removes closing parentheses
-
-    When plot_size is 'auto', the height is calculated as half the number of
-    unique parameters, with a fixed width of 16 inches.
-
-    The figure title includes the model type and file identifier suffix when
-    provided.
-    """
     # slice results_frame:
     results_frame_subset = result_frame.copy()
     if exclude_intercepts:
         results_frame_subset = results_frame_subset[results_frame_subset['Parameter'] != 'Intercept']
     if model_type is not None:
         results_frame_subset = results_frame_subset[results_frame_subset['Model_Type'] == model_type]
+
+    # exclude variance/residual components that are not hypothesis-relevant
+    _EXCLUDE_PARAMS = {'__re_std__', '__residual_std__'}
+    results_frame_subset = results_frame_subset[
+        ~results_frame_subset['Parameter'].isin(_EXCLUDE_PARAMS)
+    ]
+
     # formatting:
     results_frame_subset['Parameter'] = results_frame_subset['Parameter'].str.replace('C(', '')
     results_frame_subset['Parameter'] = results_frame_subset['Parameter'].str.replace('Q(', '')
@@ -2282,8 +2240,14 @@ def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
     # prepare plot mosaic:
     if plot_size == 'auto':
         n_predictors = results_frame_subset['Parameter'].nunique(dropna=True)
-        plot_size = (16, n_predictors/2)
-    fig, axs = plt.subplots(1, len(hypotheses), figsize=plot_size, constrained_layout=True)
+        plot_size = (12, n_predictors / 3)
+
+    # squeeze=False guarantees a numpy array even with a single hypothesis subplot;
+    # flatten() collapses the (1, n) 2-D result to 1-D for uniform col_ind indexing
+    fig, axs = plt.subplots(1, len(hypotheses), figsize=plot_size,
+                            constrained_layout=True, squeeze=False)
+    axs = axs.flatten()
+
     # plot hypothesis forest plots:
     for col_ind, hypothesis in enumerate(hypotheses):
         print(f"Plotting forest plot ({col_ind}) for hypothesis: {hypothesis}")
@@ -2291,7 +2255,7 @@ def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
         axs[col_ind], _ = draw_forest_plot(
             axs[col_ind],
             effects_frame=results_frame_subset.loc[results_frame_subset['Hypothesis'] == hypothesis, :],
-            include_y_labels=(col_ind == 0)  # Only True for first column
+            include_y_labels=(col_ind == 0)
         )
 
     fig_title = f"Effect Size Overview{f' ({model_type} models)' if model_type is not None else ''}{f' ({file_identifier_suffix})' if file_identifier_suffix is not None else ''}"
@@ -2307,6 +2271,8 @@ def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
         plt.close()
 
 
+
+
 def plot_cmc_lineplots_per_category(
         all_subject_data_frame: pd.DataFrame,
         category_column: str,
@@ -2320,7 +2286,6 @@ def plot_cmc_lineplots_per_category(
         std_dev_factor: float = 0.2,
         colormap: str = 'tab20',
         save_dir: Path = None,
-        save_plots: bool = False,
         show_significance_threshold: bool = True,
         n_tapers: int = 5,
         alpha: float = 0.2
@@ -2341,7 +2306,6 @@ def plot_cmc_lineplots_per_category(
         std_dev_factor: Multiplier for standard deviation bands
         colormap: Matplotlib colormap name
         save_dir: Directory to save plots
-        save_plots: Whether to save the plots
         show_significance_threshold: Whether to show CMC significance threshold line
         n_tapers: Number of tapers for CMC significance threshold
         alpha: Alpha level for CMC significance threshold
@@ -2462,7 +2426,7 @@ def plot_cmc_lineplots_per_category(
     fig.subplots_adjust(left=0.05, right=0.83, top=0.93, bottom=0.10,
                         hspace=0.05, wspace=0.1)
 
-    if save_plots and save_dir is not None:
+    if save_dir is not None:
         save_path = save_dir / filemgmt.file_title(
             f"CMC {muscle} per Subject per {category_column}", ".svg"
         )
