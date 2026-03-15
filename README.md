@@ -37,9 +37,9 @@ with externally recorded EEG/EMG improves experimental control and data richness
 - Conduct the statistical analysis
 
 ## 5. Notebooks structure
-- *src/*: source code directory containing classes and methods
-- *notebooks/*: jupyter notebooks demonstrating the workflow and necessary for development
-- *literature/*: a selection of papers explicating some theoretical underlinings
+- *src/*: source code directory containing classes and methods, as well as **workflow** scripts
+- *teensy-src/*: source code for microcontroller read-out and trigger issuing 
+- *config/*: config files for experiment parameters
 - *data/*: input data and saved models
 
 ## 6. How to run?
@@ -49,7 +49,7 @@ It is recommended to install all required modules by creating a conda environmen
 in terminal in the project directory.
 
 ### 6.2. Recommendations
-Usage is extensively demonstrated in the notebooks, and it is advised to follow such procedure when implementing.
+Usage is extensively demonstrated in the *_workflow.py scripts in src/.
 
 ## 7. Other Important Information
 ### 7.1. Authors and Acknowledgment
