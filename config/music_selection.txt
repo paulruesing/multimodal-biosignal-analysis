@@ -1,0 +1,190 @@
+# MUSIC SELECTION LIST
+#   comments start with #
+#   category labels come in single quotation marks, e.g. 'Groovy'
+#   all songs below a label get ascribed to that category
+#   songs are (and have to be!) defined by
+#        GENRE --- SONG_URL --- START_AFTER_SEC --- BPM --- DOWNLOAD_FILE_NAME
+
+'Familiar Groovy'
+# Blurred Lines
+R&B --- https://open.spotify.com/intl-de/track/0n4bITAu0Y0nigrz3MFJMb?si=6ce2542696c644b7 --- 0 --- 120.0 --- Robin Thicke - Blurred Lines ft. T.I., Pharrell.mp3
+# Something Got Me Started
+Funk --- https://open.spotify.com/intl-de/track/0DJnqFhVWoTDs58JPem5Zh?si=eaf0e1dbd3ee4660 --- 0 --- 112.1 --- Simply Red - Something Got Me Started (Official Video).mp3
+# Rasputin - Boney M, Majestic
+House --- https://open.spotify.com/intl-de/track/0b18g3G5spr4ZCkz7Y6Q0Q?si=cf687e61a05140bc --- 0 --- 128.6 --- Rasputin - Boney M - Majestic Edit.mp3
+# Crying at the Discoteque - Radio Edit - Alcazar
+Dance-Pop --- https://open.spotify.com/intl-de/track/6GOb5OnmhfPpCfs2p38l36?si=e3bfbb6f994a4ccf --- 0 --- 138.1 --- Alcazar = Crying At The Discoteque (Radio Edit).mp3
+# Can't Get You out of My Head by Kylie Minogue
+Dance-Pop --- https://open.spotify.com/intl-de/track/3E7ZwUMJFqpsDOJzEkBrQ7?si=21b4faccc4cb40f4 --- 0 --- 126.0 --- Kylie Minogue - Can't Get You Out Of My Head (Official Video).mp3
+# Stayin Alive - Bee Gees
+Disco --- https://open.spotify.com/intl-de/track/79hJaqmVdohltPBNN6BULM?si=6ba365e7f6e74534 --- 0 --- 103.4 --- Bee Gees - Stayin' Alive (Official Music Video).mp3
+# Boogie Wonderland - Earth, Wind & Fire
+Disco --- https://open.spotify.com/intl-de/track/6ztstiyZL6FXzh4aG46ZPD?si=1b093aad09244344 --- 0 --- 131.7 --- Earth, Wind & Fire, The Emotions - Boogie Wonderland (Audio).mp3
+# Maniac - The Revival
+Rock --- https://open.spotify.com/intl-de/track/3NJQ8R9DNMM3J4TdGA6C2V?si=ad42e156aa094f7e --- 0 --- 79.5 --- Maniac.mp3
+# Forget Me Nots - Patrice Rushen
+R&B --- https://open.spotify.com/intl-de/track/5ERZGchTi6sysVmA913Ryx?si=a02f8658e72a4674 --- 0 --- 114.0 --- Forget Me Nots.mp3
+# Take Me to the Limit (Radio Version) - Mr. President
+Eurodance --- https://open.spotify.com/intl-de/track/6sJkAC0ptlNjAJo8PPBvnY?si=e1c42fc0bbfe444f --- 0 --- 157.7 --- Take Me To The Limit (Radio Version).mp3
+# Don't Stop 'Til You Get Enough - Michael Jackson (very long)
+Disco-Funk --- https://open.spotify.com/intl-de/track/46eu3SBuFCXWsPT39Yg3tJ?si=4f5269ddfdee4206 --- 30 --- 118.9 --- Don't Stop 'Til You Get Enough.mp3
+# Dancing In The Dark - Bruce Springsteen
+Rock --- https://open.spotify.com/intl-de/track/7FwBtcecmlpc1sLySPXeGE?si=63de6a73da3c409a --- 0 --- 74.5 --- Bruce Springsteen - Dancing In The Dark.mp3
+# Smalltown Boy - Bronski Beat
+Synth-Pop --- https://open.spotify.com/intl-de/track/5vmRQ3zELMLUQPo2FLQ76x?si=c7f3f38d9174454a --- 0 --- 134.2 --- Bronski Beat - Smalltown Boy (Official Audio).mp3
+# Wake Me Up Before You Go-Go - Wham!
+Dance-Pop --- https://open.spotify.com/intl-de/track/0ikz6tENMONtK6qGkOrU3c?si=40272c64cb31484a --- 0 --- 81.3 --- Wham! - Wake Me Up Before You Go-Go (Official Video).mp3
+# Uptown Funk (feat. Bruno Mars) - Mark Ronson
+Funk-Pop --- https://open.spotify.com/intl-de/track/32OlwWuMpZ6b0aN2RZOeMS?si=ecc7a6fbda134f70 --- 0 --- 115.0 --- Mark Ronson - Uptown Funk (Official Video) ft. Bruno Mars.mp3
+# Mas Que Nada - Sérgio Mendes
+Samba --- https://open.spotify.com/intl-de/track/6U7GUjtamt2P0LcFod1dBT?si=ebdc3c40851d46bb --- 0 --- 131.2 --- Sérgio Mendes - Mas Que Nada (Official Audio).mp3
+# I Was Made For Lovin' You - KISS
+Disco-Rock --- https://open.spotify.com/intl-de/track/6S9q9mEifNdnTNlli2xSuD?si=41c50419402e4c19 --- 0 --- 128.2 --- Kiss - I Was Made For Lovin' You.mp3
+# For You - The Disco Boys
+House --- https://open.spotify.com/intl-de/track/6jbglMwIqyg1G1N96COAsD?si=be32fce3bea847f6 --- 0 --- 128.4 --- For You (Original Radio Edit).mp3
+# YMCA - Village People
+Disco --- https://open.spotify.com/intl-de/track/3ypMsqUwfNFMiooMLVHfkp?si=e22578994fbc459c --- 0 --- 126.8 --- Village People - YMCA (Original Version 1978).mp3
+# Sexbomb - Tom Jones
+Dance-Pop --- https://open.spotify.com/intl-de/track/7GHKA8GIMcND6c5nN1sFnD?si=c1c867d00ee74dd1 --- 0 --- 123.0 --- Tom Jones & Mousse T  - Sexbomb (Official Music Video).mp3
+# Another One Bites The Dust - Queen
+Funk Rock --- https://open.spotify.com/intl-de/track/5vdp5UmvTsnMEMESIF2Ym7?si=c373fa0161ab44c1 --- 0 --- 110.0 --- Queen  Another One Bites The Dust (Official Lyric Video).mp3
+# Billie Jean - Michael Jackson
+Dance-Pop --- https://open.spotify.com/intl-de/track/7J1uxwnxfQLu4APicE5Rnj?si=02d99ab68f2044f2 --- 0 --- 116.7 --- Michael Jackson - Billie Jean (Official Video).mp3
+
+'Unfamiliar Groovy'
+# Tighten It Up - Barney Bones - DRAMA Edit (125 bpm)
+Electronica --- https://open.spotify.com/intl-de/track/5suNUnahl3rSictF1dBPei?si=f883b3f3da014acb --- 0 --- 125.0 --- Tighten It Up - Barney Bones - DRAMA Edit.mp3
+# Can't Get Enough - Soulsearcher (Vocal Club Mix)
+Disco House --- https://open.spotify.com/intl-de/track/0qJDy1QsmmnZt343XTzxQd?si=2b8f2dad889d4926 --- 0 --- 128.1 --- Soulsearcher - Can't Get Enough (Vocal Club Mix) [Full Length] 1999.mp3
+# Feelin' Love (Soulsearcher Club Mix) - Soulsearcher
+Disco House --- https://open.spotify.com/intl-de/track/0WAWTDInnoz4ooHqOEHu16?si=c6eea1501a5745c6 --- 0 --- 126.0 --- Feelin' Love (Soulsearcher Club Mix) Soulsearcher - Soulfuric Deep.mp3
+# At Night (Purple Disco Machine Remix) - Shakedown
+Disco House --- https://open.spotify.com/intl-de/track/4tTpmg8AGcChIUnuio4CtR?si=dbb69bfd9c8847bc --- 0 --- 122.0 --- Shakedown 'At Night' (Purple Disco Machine Remix).mp3
+# Tears In Ibiza - The Stickmen Project
+Dance-Pop --- https://open.spotify.com/intl-de/track/7A0xA68c4NiTvbWWAsIsoN?si=896b1ce666494b64 --- 0 --- 127.6 --- The Stickmen Project - Tears In Ibiza (ft. ARCO).mp3
+
+
+'Familiar Classic'
+#   Manually adjusted bpm labels here (sometimes doubletime recognized)
+# Comptine d'un autre été, l'après-midi
+Classical --- https://open.spotify.com/intl-de/track/1DyscN2uN3bCn91g8P9oeG?si=bf3db7eb04944340 --- 0 --- 100 --- Comptine d'un autre été, l'après-midi.mp3
+# Canon and Gigue in D Major by Johann Pachelbel
+Chamber Music --- https://open.spotify.com/intl-de/track/16WL3s4JszXh14ORSeGNAE?si=1d439a472d5a4972 --- 0 --- 60 --- Pachelbel - Canon In D Major. Best version..mp3
+# Experience - Ludovico Einaudi
+Contemporary Classical --- https://open.spotify.com/intl-de/track/1BncfTJAWxrsxyT9culBrj?si=da137d60d9f8470e --- 0 --- 92.6 --- Ludovico Einaudi - Experience.mp3
+# Primavera - Ludovico Einaudi
+Contemporary Classical --- https://open.spotify.com/intl-de/track/4BMHp3DkI8VLsuB9Kr0pzu?si=af9544af6c7c44b1 --- 0 --- 142.4 --- Ludovico Einaudi - Primavera.mp3
+# Merry-Go-Round of Life - Joe Hisaishi
+Waltz --- https://open.spotify.com/intl-de/track/39uLYYZytVUwcjgeYLI409?si=9970eb66108346c3 --- 0 --- 161.9 --- Joe Hisaishi - Merry-Go-Round of Life (from Howls Moving Castle).mp3
+# I Wanted to Leave - SYML
+Contemporary Piano --- https://open.spotify.com/intl-de/track/61iGwqhbDwkXanVo5LwJyF?si=a9b70d0132cf481d --- 0 --- 85 --- SYML - I Wanted To Leave [Official Audio].mp3
+# Piano Sonata in C major, K. 545: I. Allegro by Wolfgang Amadeus Mozart (quite groovy...)
+# Classical Music --- https://open.spotify.com/intl-de/track/7o0PUNmeQ1Hq7xWya4IvXT?si=26dbe1b2357641a7  # not quite un-groovy
+
+'Unfamiliar Classic'
+#   Manually adjusted bpm labels here (sometimes doubletime recognized)
+# Che Vuole Questa Musica Stasera - Armando Trovajoli (eventually still quite popular)
+Italian Pop --- https://open.spotify.com/intl-de/track/6wrptu9SlLfq8bE6C86kEX?si=25584031aa7c4c11 --- 0 --- 91 --- Che vuole questa musica stasera.mp3
+# Jóhannsson: Good Morning, Midnight - Jóhann Jóhannsson
+Film Music --- https://open.spotify.com/intl-de/track/5oIYIaFjCZef9IYx3dUtJf?si=a9fbe8216f6b420e --- 0 --- 97.3 --- Johannsson_Good Morning Midnight.mp3
+# Three Thousand Five Hundred And Ninety One Benches - Jóhann Jóhannsson
+Film Music --- https://open.spotify.com/intl-de/track/4gLvYwz3bLVTa2i3QGFCtZ?si=3122e45785c643cf --- 0 --- 63 --- Three Thousand Five Hundred And Ninety One Benches.mp3
+# Table For Two - Abel Korzeniowski
+Classical Music --- https://open.spotify.com/intl-de/track/20vEB3It4xYzKHlMecu6X1?si=72e08baa220b4341 --- 0 --- 68.6 --- Abel Korzeniowski - Table for Two.mp3
+
+
+'Familiar Sad'
+# How Can You Mend A Broken Heart - Al Green
+Soul --- https://open.spotify.com/intl-de/track/6lUXneXZ9jc3HSMHgd8oqh?si=24e8fb4928fd4ad1 --- 0 --- 147.6 --- Al Green - How Can You Mend A Broken Heart.mp3
+# Another Love - Tom Odell
+Indie Pop --- https://open.spotify.com/intl-de/track/3JvKfv6T31zO0ini8iNItO?si=45d2e89d173f45be --- 0 --- 122.3 --- Tom Odell - Another Love (Official Video).mp3
+# Shape of My Heart - Sting (soothing)
+Pop --- https://open.spotify.com/intl-de/track/6CKoWCWAqEVWVjpeoJXyNH?si=4d6a3745371d4222 --- 0 --- 84.3 --- Sting - Shape of My Heart.mp3
+# Stand by Me - Ben King
+R&B --- https://open.spotify.com/intl-de/track/7jmHyHMEqm9MJWiMAneF05?si=db553d47d395493a --- 0 --- 82.1 --- Ben E. King - Stand By Me (Audio).mp3
+# Suzanne - Leonard Cohen
+Folk --- https://open.spotify.com/intl-de/track/2L93TdW2GMue1H2zlkt30F?si=f88079db9b404f6a --- 0 --- 127.5 --- Suzanne - Leonard Cohen.mp3
+# Ain't No Sunshine - Bill Withers
+R&B --- https://open.spotify.com/intl-de/track/1k1Bqnv2R0uJXQN4u6LKYt?si=2fbb52f039234d11 --- 0 --- 79 --- Bill Withers - Ain't No Sunshine (Official Audio).mp3
+# We Are the World - U.S.A. for Africa (could also be Gospel)
+Pop --- https://open.spotify.com/intl-de/track/3Z2tPWiNiIpg8UMMoowHIk?si=146d31a0b5954849 --- 0 --- 72.5 --- USA for Africa - We are the world.mp3
+# Wondeful Life - Katie Melua (also Folc-Pop)
+Pop --- https://open.spotify.com/intl-de/track/1C0bWhNWIF3yBdjNh4GlCT?si=07413f9c13a8412b --- 0 --- 105.2 --- Katie Melua - Wonderful Life.mp3
+# You Want It Darker - Leonard Cohen (published shortly before his death)
+Folk Rock --- https://open.spotify.com/intl-de/track/5zb7npjQqoJ7Kcpq4yD9qn?si=473971c3933d416e --- 0 --- 54.5 --- Leonard Cohen - You Want It Darker.mp3
+# Daylight - David Kushner
+Gothic Pop Ballad --- https://open.spotify.com/intl-de/track/1odExI7RdWc4BT515LTAwj?si=52b1e3036f704ef8 --- 0 --- 128.7 --- David Kushner - Daylight (Lyrics).mp3
+# Robin Hood - Anson Seabra  (detected bpm was double the one below, corrected it manually)
+Piano Ballad --- https://open.spotify.com/intl-de/track/5dyihZecYMcEPq09Bk2OL2?si=cc9a464975a94c9d --- 0 --- 78.0 --- Anson Seabra - Robin Hood (Official Lyric Video).mp3
+# Green, Green Grass of Home - Tom Jones (not sure about this...)
+# Country --- https://open.spotify.com/intl-de/track/5FEWoIwuseif9DQnxdoWB2?si=e7470e5b68da4cf6 --- 0 --- 95.6 --- Green Green Grass Of Home.mp3
+
+'Unfamiliar Sad'
+# Waiting for Godard - Marco Andrea Pes
+Classical Music --- https://open.spotify.com/intl-de/track/4qdAkMXaWSxYcC20VBn4VC?si=858eec2ee39547f5 --- 0 --- 117.8 --- Waiting For Godard (Alternate).mp3
+# Love and Affection - Rumer
+Indie --- https://open.spotify.com/intl-de/track/6CJMcJR3PxoAmT2Uqp5CWe?si=97d11f696ba14fc7 --- 0 --- 72.0 --- Love and Affection.mp3
+# Unchained Melody - George Benson
+Soul --- https://open.spotify.com/intl-de/track/4h7QUNPruq8t58z7CLExVh?si=8a4980533b374108 --- 0 --- 67 --- Unchained Melody.mp3
+# Outsiders - Blu Velvet
+Ambient --- https://open.spotify.com/intl-de/track/6oDbJij4zeGPulWJ2R2BRP?si=15e7359d6da34390 --- 0 --- 35.0 --- outsiders.mp3
+# Losing Interest - Cubox
+Lo-fi Hip Hop  --- https://open.spotify.com/intl-de/track/6Gty7m1DoEz1IV5IqL5ZDL?si=44f9c601895347f3 --- 0 --- 113.0 --- 13 - CuBox & Shiloh Dynasty - Losing Interest (feat. Lane 37).mp3
+# Soul Mate - flora cash
+Indie Folk --- https://open.spotify.com/intl-de/track/4IOXp1xFiMh5FtSEGim4CO?si=31c76053ffb34a52 --- 0 --- 126.3 --- flora cash - Soul Mate (Official Audio).mp3
+# To Hold The Sky - flora cash
+Classic --- https://open.spotify.com/intl-de/track/3GKQpGuxWDMsLrLhUDj60d?si=7c4ac63481674436 --- 0 --- 134.2 --- flora cash - To Hold the Sky (För Skylar Hagen) - Audio.mp3
+
+
+'Familiar Happy'
+# eventually add Georgy Porgy TOTO (https://open.spotify.com/intl-de/track/5jQcJ2st6yHWhUBjoDoZPH?si=fe0dd702d0594bd8)
+# Celebration - Kool & The Gang
+R&B --- https://open.spotify.com/intl-de/track/3K7Q9PHUWPTaknlbFPThn2?si=1de67cdcb5bf4a43 --- 0 --- 121.2 --- Kool & The Gang - Celebration (Lyrics).mp3
+# Espresso - Sabrina Carpenter
+Pop --- https://open.spotify.com/intl-de/track/2qSkIjg1o9h3YT9RAgYN75?si=af3d551c5c80410f --- 0 --- 104.0 --- Sabrina Carpenter - Espresso (Official Audio).mp3
+# Three Little Birds - Bob Marley & The Wailers
+Reggae --- https://open.spotify.com/intl-de/track/7vggqxNKwd6xdRoYS0pQtM?si=01d461ad1d3d465f --- 0 --- 74 --- Bob Marley & The Wailers - Three Little Birds (Official Music Video).mp3
+# Little Lies - Fleetwood Mac
+Pop Rock --- https://open.spotify.com/intl-de/track/08o75xMKmGrKny6GsXrNJW?si=4b58eba089564fb2 --- 0 --- 124.9 --- Little Lies (2018 Remaster).mp3
+# La Isla Bonita - Madonna
+Latin Pop --- https://open.spotify.com/intl-de/track/6r8k1vznHrzlEKYxL4dZEe?si=7f53dcbd39a94681 --- 0 --- 100.0 --- Madonna - La Isla Bonita (Official Video).mp3
+# Easy - Comodores
+Soul --- https://open.spotify.com/intl-de/track/1JQ6Xm1JrvHfvAqhl5pwaA?si=1f8f52f46cbd4c37 --- 0 --- 132.4 --- Commodores - Easy (Audio).mp3
+# Dancing in the Moonlight - Toploader
+Pop Rock --- https://open.spotify.com/intl-de/track/3Fzlg5r1IjhLk2qRw667od?si=0d198b1579204b5b --- 0 --- 119.5 --- Toploader - Dancing in the Moonlight (Official Video).mp3
+# I Say a Little Prayer - Aretha Franklin
+Gospel --- https://open.spotify.com/intl-de/track/3NfxSdJnVdon1axzloJgba?si=627d995d2d014c27 --- 0 --- 132.7 --- Aretha Franklin - I Say a Little Prayer (Official Audio).mp3
+# As - George Michael
+R&B --- https://open.spotify.com/intl-de/track/7r3KzVwHtr2iMZtqJvFn9A?si=e2dc48b5126a4597 --- 0 --- 123.2 --- George Michael, Mary J. Blige - As (Official Video).mp3
+# Forever - The Little Dippers (Doo-Wop genre)
+R&B --- https://open.spotify.com/intl-de/track/5rWyKJMaTXL0TArnJ8IGts?si=520550c116be4cc4 --- 0 --- 72.1 --- Forever.mp3
+# Lovely Day - Bill Withers
+Soul --- https://open.spotify.com/intl-de/track/0bRXwKfigvpKZUurwqAlEh?si=3981de1e6fd44b25 --- 0 --- 98.1 --- Bill Withers - Lovely Day (Official Audio).mp3
+# I'll Be Around - The Spinners (Philly Soul genre)
+R&B --- https://open.spotify.com/intl-de/track/2vLaES21zwbX1Rnmj56Bbb?si=042c46a724e54739 --- 0 --- 113.3 --- I'll Be Around.mp3
+# Hey Nineteen - Steely Dan
+Jazz-Rock --- https://open.spotify.com/intl-de/track/1tjK9HhmpEfk0ijyIKsoUk?si=c0bee6f197dc4ad9 --- 0 --- 119.7 --- Hey Nineteen.mp3
+# Never Too Much - Luther Vandross
+R&B --- https://open.spotify.com/intl-de/track/3nFJbZCHP4d9vduKjJLdBL?si=7cd2f794312940b4 --- 0 --- 110.2 --- Luther Vandross-Never Too Much.mp3
+
+# Sunrise - Simply Red (perhaps too groovy)
+# Dance-Pop --- https://open.spotify.com/intl-de/track/37mk7t1x4VmKmmqgRU8E2w?si=fbb9f0ebd79f4a51 --- 0 --- 106.0 --- Simply Red - Sunrise (Audio).mp3
+# Low - Lenny Kravitz  (perhaps too groovy)
+# Funk Rock --- https://open.spotify.com/intl-de/track/3zcccQe4KhGXRqRBUwGU3G?si=46a3dd415a674045 --- 0 --- 106.4 --- Lenny Kravitz - Low (Official Video).mp3
+# Another Day in Paradise - Phil Collins (mixed feelings)
+# Soft Rock --- https://open.spotify.com/intl-de/track/1NCuYqMc8hKMb4cpNTcJbD?si=7f9f1ab9291d4137 --- 30 --- 101.9 --- Phil Collins - Another Day In Paradise [Audio HQ] HD.mp3
+
+'Unfamiliar Happy'
+# Sun Is Rising - Thierry Von Der Warth
+Dance --- https://open.spotify.com/intl-de/track/0PoUwYvKs4n36lSbVgHqjC?si=c2d68d8bff3b4b0e --- 0 --- 124.0 --- Thierry von der Warth & Jack David - Sun Is Rising (Music Video).mp3
+# Paradise - Thierry Von Der Warth
+Dance --- https://open.spotify.com/intl-de/track/45Q8FBzKZSIG5KsIe7VabG?si=83e20b11cacc4c9f --- 0 --- 112.5 --- Thierry Von Der Warth feat. Modi - Paradise (Music Video).mp3
+# Lullaby - C3DRIC 
+Dance --- https://open.spotify.com/intl-de/track/3dudWvfW6hu6WlBf58M9m2?si=d9a10b0a200e4380 --- 0 --- 127.0 --- C3DRIC & MY PARADE - Lullaby (Music Video).mp3
+# Chasing The Sun - C3DRIC 
+Dance --- https://open.spotify.com/intl-de/track/7AplbBlJuyQmKkliFy25Yf?si=2e97dfbefa834aff --- 0 --- 120.2 --- C3DRIC & Carston - Chasing The Sun (Music Video).mp3
+# Sunday - Alber-K 
+Dance --- https://open.spotify.com/intl-de/track/4N1B9DdnmMXJO8Mts5G3QE?si=3c8dc0bcf377476a --- 0 --- 128.3 --- Alber-K Sunday.mp3
+
+# Happy Trails - Roy Rogers MISSING DOWNLOAD (don't know, perhaps too old)
+# Country --- https://open.spotify.com/intl-de/track/5b0YtDfsUHz5NOiErLCIK7?si=499482b666374940 --- 0
