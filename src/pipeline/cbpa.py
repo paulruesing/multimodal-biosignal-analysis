@@ -139,6 +139,19 @@ class CBPAConfig:
     save_plots: bool = True
     show_plots: bool = False
 
+    # Phase normalisation (CMC only)
+    use_phase_normalization: bool = False
+    """If True, the time axis becomes force-cycle phase (0–360°) instead of
+    clock time. Requires CMC modality and known Task Frequency per trial."""
+    n_phase_bins: int = 36
+    """Number of phase bins (default 36 → 10° resolution)."""
+    min_samples_per_cycle: int = 2
+    """Trials where a force cycle contains fewer CMC windows than this are
+    skipped — phase interpolation is unreliable below 2 samples/cycle."""
+    min_cycles_per_condition: int = 3
+    """Minimum number of valid cycles a subject must contribute per condition
+    to be included in the contrast."""
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  MNE INFO & ADJACENCY
@@ -193,6 +206,38 @@ def _build_adjacency(info: mne.Info, n_times: int) -> object:
 # ══════════════════════════════════════════════════════════════════════════════
 #  DATA LOADING — mirrors original pipeline exactly
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _get_task_freq_for_trial(
+    log_df: pd.DataFrame,
+    t_start: pd.Timestamp,
+    t_end: pd.Timestamp,
+) -> float | None:
+    """
+    Extract the Task Frequency (Hz) for a single trial from log_df.
+
+    Reads the modal non-NaN value of 'Task Frequency' within the trial span.
+    Returns None if the column is absent or entirely NaN in the span.
+
+    Parameters
+    ----------
+    log_df  : enriched log DataFrame with DatetimeIndex
+    t_start : trial start timestamp (inclusive)
+    t_end   : trial end timestamp (exclusive)
+
+    Returns
+    -------
+    float Hz value, or None if unresolvable
+    """
+    # Slice to trial span
+    mask = (log_df.index >= t_start) & (log_df.index < t_end)
+    col = log_df.loc[mask, "Task Frequency"].dropna()
+
+    if col.empty:
+        return None
+
+    # Task Frequency is constant within a trial; mode is a safe guard
+    return float(col.mode().iloc[0])
+
 
 def _load_subject_data(
     cfg: CBPAConfig, subject_ind: int
@@ -459,6 +504,113 @@ def _extract_band_power(
     return band_power
 
 
+def _band_power_per_phase(
+    cfg: CBPAConfig,
+    band_power: np.ndarray,          # (n_windows, n_channels)
+    timestamps: pd.DatetimeIndex,
+    trial_spans: dict[int, tuple],   # {trial_id: (start, end)}
+    trial_cond_map: dict[int, str],  # {trial_id: condition_label}
+    log_df: pd.DataFrame,
+) -> dict[str, list[np.ndarray]]:
+    """
+    Convert band_power time series into phase-resolved profiles per condition.
+
+    For each trial:
+      1. Retrieve task frequency from log_df.
+      2. Skip trial if samples-per-cycle < cfg.min_samples_per_cycle.
+      3. For each complete force cycle, map CMC windows to phase (0–360°)
+         and interpolate onto cfg.n_phase_bins.
+      4. Accumulate cycles by condition label.
+
+    Returns
+    -------
+    cycles_by_condition : dict mapping condition_label →
+                          list of (n_phase_bins, n_channels) arrays,
+                          one entry per valid cycle across all trials.
+    """
+    phase_grid = np.linspace(0, 360, cfg.n_phase_bins, endpoint=False)
+    cycles_by_condition: dict[str, list[np.ndarray]] = {}
+
+    for trial_id, (t_start, t_end) in trial_spans.items():
+        condition = trial_cond_map.get(int(trial_id))
+        if condition is None:
+            continue  # trial not assigned to any condition
+
+        # Retrieve task frequency for this trial
+        task_freq = _get_task_freq_for_trial(log_df, t_start, t_end)
+        if task_freq is None or task_freq <= 0:
+            warnings.warn(
+                f"  [phase] Trial {trial_id}: Task Frequency missing or zero. Skipping."
+            )
+            continue
+
+        cycle_dur_sec = 1.0 / task_freq
+
+        # Check temporal resolution: samples per cycle
+        tw_step = (cfg.cmc_time_window_sec if cfg.modality == "CMC"
+                   else cfg.psd_time_window_sec) * (1.0 - cfg.overlap_ratio)
+        samples_per_cycle = cycle_dur_sec / tw_step
+        if samples_per_cycle < cfg.min_samples_per_cycle:
+            warnings.warn(
+                f"  [phase] Trial {trial_id}: only {samples_per_cycle:.1f} "
+                f"CMC samples/cycle at {task_freq} Hz — skipping "
+                f"(min={cfg.min_samples_per_cycle})."
+            )
+            continue
+
+        # Slice spectrogram windows belonging to this trial
+        mask = (timestamps >= t_start) & (timestamps < t_end)
+        trial_bp = band_power[mask]          # (n_windows_in_trial, n_channels)
+        trial_ts = timestamps[mask]
+
+        if len(trial_ts) == 0:
+            continue
+
+        # Convert absolute timestamps to seconds relative to trial start
+        t_rel = np.array(
+            [(ts - t_start).total_seconds() for ts in trial_ts],
+            dtype=float,
+        )
+
+        # Phase of each CMC window: sine starts at 0 at trial onset
+        # phase = (t_rel * task_freq * 360) % 360
+        window_phases = (t_rel * task_freq * 360.0) % 360.0
+
+        # Split into individual complete cycles
+        trial_dur_sec = (t_end - t_start).total_seconds()
+        n_complete_cycles = int(trial_dur_sec * task_freq)
+
+        for cycle_idx in range(n_complete_cycles):
+            # Identify windows belonging to this cycle via raw time offset
+            t_cycle_start = cycle_idx * cycle_dur_sec
+            t_cycle_end = (cycle_idx + 1) * cycle_dur_sec
+            in_cycle = (t_rel >= t_cycle_start) & (t_rel < t_cycle_end)
+
+            if in_cycle.sum() < cfg.min_samples_per_cycle:
+                continue  # insufficient samples in this specific cycle
+
+            # Phase within this cycle: 0–360°
+            phases_in_cycle = window_phases[in_cycle]
+            # Clamp to [0, 360) to handle floating point edge cases
+            phases_in_cycle = np.clip(phases_in_cycle, 0.0, 360.0 - 1e-9)
+            bp_in_cycle = trial_bp[in_cycle]  # (n_in_cycle, n_channels)
+
+            # Interpolate each channel onto the shared phase grid
+            cycle_profile = np.zeros((cfg.n_phase_bins, bp_in_cycle.shape[1]))
+            for ch in range(bp_in_cycle.shape[1]):
+                cycle_profile[:, ch] = np.interp(
+                    phase_grid,
+                    phases_in_cycle,
+                    bp_in_cycle[:, ch],
+                    left=bp_in_cycle[0, ch],   # extrapolate at edges with boundary value
+                    right=bp_in_cycle[-1, ch],
+                )
+
+            cycles_by_condition.setdefault(condition, []).append(cycle_profile)
+
+    return cycles_by_condition
+
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  BUILD CONTRAST ARRAY  X: (n_subjects, n_times, n_channels)
@@ -507,6 +659,14 @@ def build_contrast_array(
             ch_indices = None
             ch_names_out = EEG_CHANNELS
 
+
+    # Phase grid is fixed and subject-independent; set it immediately
+    # when phase normalisation is requested so it is available for plotting.
+    if cfg.use_phase_normalization:
+        time_grid = np.linspace(0, 360, cfg.n_phase_bins, endpoint=False)
+        n_times_ref = cfg.n_phase_bins
+
+
     for subj in valid_subject_ids:
         print(f"  Subject {subj:02} — loading...")
         try:
@@ -543,11 +703,52 @@ def build_contrast_array(
 
         # Derive time grid from first subject:
         if time_grid is None:
-            time_grid = _common_time_grid_from_spans(cfg, trial_spans_int, overlap_ratio=CBPAConfig.overlap_ratio)
+            time_grid = _common_time_grid_from_spans(cfg, trial_spans_int, overlap_ratio=cfg.overlap_ratio)
             n_times_ref = len(time_grid)
 
         # Band power at native resolution: (n_windows, n_channels)
         band_power = _extract_band_power(cfg, spectrogram, freqs, ch_indices)
+
+        # ── Phase-normalised path ─────────────────────────────────────────
+        if cfg.use_phase_normalization:
+            cycles_by_cond = _band_power_per_phase(
+                cfg, band_power, timestamps,
+                trial_spans_int, trial_cond_map, log_df,
+            )
+
+            cycles_A = cycles_by_cond.get(cfg.condition_A, [])
+            cycles_B = cycles_by_cond.get(cfg.condition_B, [])
+
+            if len(cycles_A) < cfg.min_cycles_per_condition:
+                warnings.warn(
+                    f"Subject {subj:02}: only {len(cycles_A)} valid cycles for "
+                    f"'{cfg.condition_A}' (min={cfg.min_cycles_per_condition}). Skipping."
+                )
+                continue
+            if len(cycles_B) < cfg.min_cycles_per_condition:
+                warnings.warn(
+                    f"Subject {subj:02}: only {len(cycles_B)} valid cycles for "
+                    f"'{cfg.condition_B}' (min={cfg.min_cycles_per_condition}). Skipping."
+                )
+                continue
+
+            # Per-subject mean phase profile across all valid cycles
+            mean_A = np.nanmean(np.stack(cycles_A, axis=0), axis=0)  # (n_phase_bins, n_ch)
+            mean_B = np.nanmean(np.stack(cycles_B, axis=0), axis=0)
+            diffs.append(mean_A - mean_B)
+
+            print(
+                f"    → {len(cycles_A)} cycles '{cfg.condition_A}', "
+                f"{len(cycles_B)} cycles '{cfg.condition_B}'"
+            )
+            continue  # skip clock-time path below
+
+        # ── Clock-time path (unchanged) ───────────────────────────────────
+        if time_grid is None:
+            time_grid = _common_time_grid_from_spans(
+                cfg, trial_spans_int, overlap_ratio=cfg.overlap_ratio
+            )
+            n_times_ref = len(time_grid)
 
         # Per-trial time series: (n_trials, n_times, n_channels)
         trial_data, trial_ids_used = _band_power_per_trial(
@@ -604,6 +805,42 @@ def build_contrast_array(
 #  MAIN CBPA RUNNER
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _add_phase_wraparound(
+    adjacency: "sparse.spmatrix",
+    n_times: int,
+    n_ch: int,
+    time_grid: np.ndarray,
+) -> "sparse.spmatrix":
+    """Add circular phase wrap-around edges to a (n_times*n_ch)² adjacency matrix.
+
+    Parameters
+    ----------
+    adjacency : sparse matrix
+        Combined (n_times*n_ch × n_times*n_ch) adjacency, index convention
+        t*n_ch + ch  (C-order, matching combine_adjacency output).
+    n_times : int
+    n_ch : int
+    time_grid : np.ndarray
+        Used only for the log message (last bin label).
+
+    Returns
+    -------
+    sparse.csr_matrix with bool dtype, wrap-around edges added.
+    """
+    from scipy import sparse
+
+    wrap = sparse.lil_matrix(adjacency.shape, dtype=bool)
+    for ch in range(n_ch):
+        first = 0 * n_ch + ch
+        last  = (n_times - 1) * n_ch + ch
+        wrap[first, last] = True
+        wrap[last, first] = True
+    result = (adjacency.astype(bool) + wrap.tocsr()).astype(bool)
+    print(f"  [adjacency] Phase wrap-around edges added "
+          f"(0°↔{int(time_grid[-1])}° for {n_ch} channels)")
+    return result
+
+
 def run_cbpa(
     cfg: CBPAConfig,
     cluster_rows_accumulator: list[dict] | None = None,
@@ -638,19 +875,28 @@ def run_cbpa(
 
     rng = np.random.default_rng(cfg.seed)
 
+    # Anatomical (Delaunay) adjacency is used in both branches
+    info = _build_mne_info(ch_names)
+    adjacency = _build_adjacency(info, n_times)  # (n_times*n_ch)² combined matrix
+
+    # Phase wrap-around is always applied when phase-normalised
+    if cfg.use_phase_normalization:
+        adjacency = _add_phase_wraparound(adjacency, n_times, n_ch, time_grid)
+
     if cfg.use_spatio_temporal:
-        info = _build_mne_info(ch_names)
-        adjacency = _build_adjacency(info, n_times)
         t_obs, clusters, cluster_pv, H0 = spatio_temporal_cluster_1samp_test(
             X, n_permutations=cfg.n_permutations, threshold=t_thresh,
             tail=cfg.tail, adjacency=adjacency, n_jobs=cfg.n_jobs,
             seed=rng, out_type="mask", verbose=True,
         )
     else:
+        # Flatten to (n_subj, n_times*n_ch); adjacency index convention matches
         X_flat = X.reshape(n_subj, n_times * n_ch)
+        print(f"  [adjacency] flat: {adjacency.shape}, nnz edges: {adjacency.nnz}")
         t_obs_flat, clusters, cluster_pv, H0 = permutation_cluster_1samp_test(
             X_flat, n_permutations=cfg.n_permutations, threshold=t_thresh,
-            tail=cfg.tail, n_jobs=cfg.n_jobs, seed=rng, out_type="mask", verbose=True,
+            tail=cfg.tail, adjacency=adjacency, n_jobs=cfg.n_jobs,
+            seed=rng, out_type="mask", verbose=True,
         )
         t_obs = t_obs_flat.reshape(n_times, n_ch)
 
@@ -668,7 +914,6 @@ def run_cbpa(
         time_grid=time_grid, cfg=cfg, n_valid_subjects=n_subj,
     )
 
-    # Save per-run CSV only when running standalone (no accumulator)
     _save_results(
         results, cfg,
         cluster_rows_accumulator=cluster_rows_accumulator,
@@ -681,109 +926,158 @@ def run_cbpa(
     return results
 
 
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  VISUALISATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _plot_results(results: dict, cfg: CBPAConfig) -> None:
-    """
-    Two-panel figure per CBPA run:
-      Left  — channel × time t-statistic heatmap with cluster contours
-      Right — mean t-statistic time course averaged over significant cluster
-              channels (one line per significant cluster)
-
-    For full topomap visualisation (requires MNE Evoked / SourceEstimate),
-    extend this function with mne.viz.plot_topomap once MNE Epochs are
-    integrated into the pipeline.
-    """
-    t_obs = results["t_obs"]            # (n_times, n_channels)
-    t_thresh = results["t_thresh"]
-    clusters = results["clusters"]
-    cluster_pv = results["cluster_pv"]
-    good_inds = results["good_cluster_inds"]
-    ch_names = results["ch_names"]
-    time_grid = results["time_grid"]
+    t_obs        = results["t_obs"]
+    t_thresh     = results["t_thresh"]
+    clusters     = results["clusters"]
+    cluster_pv   = results["cluster_pv"]
+    good_inds    = results["good_cluster_inds"]
+    ch_names     = results["ch_names"]
+    time_grid    = results["time_grid"]
     n_valid_subjects = results["n_valid_subjects"]
 
     n_times, n_ch = t_obs.shape
     t_ax = time_grid if time_grid is not None else np.arange(n_times)
+
+    # Shared mask resolver — handles all formats MNE may return:
+    #   • bool ndarray shape (n_times, n_ch)       — spatio-temporal
+    #   • bool ndarray shape (n_times * n_ch,)      — flat temporal-only
+    #   • tuple of index arrays (rows, cols)        — out_type="indices"
+    def _resolve_mask(cluster) -> np.ndarray:
+        """
+        Resolve any MNE cluster format to a (n_times, n_ch) boolean mask.
+
+        MNE may return any of these formats depending on test type and version:
+          - np.ndarray bool (n_times, n_ch)      spatio-temporal, out_type="mask"
+          - np.ndarray bool (n_times * n_ch,)    flat test, out_type="mask"
+          - (np.ndarray bool,)                   flat test, bool wrapped in tuple
+          - (np.ndarray int,)                    flat test, int indices in tuple
+          - (slice,)                             flat test, slice wrapped in tuple
+          - (np.ndarray int, np.ndarray int)     2D index arrays (time, channel)
+        """
+        n_flat = n_times * n_ch
+        flat_mask = np.zeros(n_flat, dtype=bool)
+
+        # Unwrap single-element tuples to their inner value
+        if isinstance(cluster, tuple) and len(cluster) == 1:
+            cluster = cluster[0]
+
+        # --- Bare boolean array ---
+        if isinstance(cluster, np.ndarray) and cluster.dtype == bool:
+            return cluster.reshape(n_times, n_ch)
+
+        # --- Slice into flat space ---
+        if isinstance(cluster, slice):
+            flat_mask[cluster] = True
+            return flat_mask.reshape(n_times, n_ch)
+
+        # --- Tuple of two index arrays: (time_inds, ch_inds) ---
+        if (isinstance(cluster, tuple) and len(cluster) == 2
+                and isinstance(cluster[0], np.ndarray)):
+            mask = np.zeros((n_times, n_ch), dtype=bool)
+            mask[cluster[0], cluster[1]] = True
+            return mask
+
+        # --- Integer index array into flat space ---
+        if isinstance(cluster, np.ndarray):
+            idx = cluster.ravel().astype(int)
+            idx = idx[(idx >= 0) & (idx < n_flat)]  # bounds guard
+            flat_mask[idx] = True
+            return flat_mask.reshape(n_times, n_ch)
+
+        # --- Fallback: try coercing to integer indices ---
+        try:
+            idx = np.asarray(cluster).ravel().astype(int)
+            idx = idx[(idx >= 0) & (idx < n_flat)]
+            flat_mask[idx] = True
+        except Exception as e:
+            warnings.warn(f"[CBPA] _resolve_mask: unrecognised cluster format "
+                          f"{type(cluster)} — mask will be all-False. Error: {e}")
+
+        return flat_mask.reshape(n_times, n_ch)
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 5))
     fig.suptitle(
         f"{cfg.hypothesis_label}\n"
         f"Contrast: '{cfg.condition_A}' − '{cfg.condition_B}'  |  "
         f"{cfg.modality} {cfg.freq_band}  |  "
-        f"n = {n_valid_subjects} subjects, "
-        f"{cfg.n_permutations} permutations",
+        f"n = {n_valid_subjects} subjects, {cfg.n_permutations} permutations",
         fontsize=10,
     )
 
-    # ── Panel A: channel × time heatmap ──────────────────────────────────────
+    # ── Panel A: heatmap + cluster contours ──────────────────────────────────
     ax = axes[0]
-    vlim = np.nanpercentile(np.abs(t_obs), 97)
+    # Use a fixed ±3 baseline for cross-plot comparability;
+    # expand only if the observed t-values exceed it
+    vlim = max(3.0, np.nanpercentile(np.abs(t_obs), 97))
     im = ax.imshow(
-        t_obs.T,
-        aspect="auto",
-        origin="lower",
-        cmap="RdBu_r",
-        vmin=-vlim,
-        vmax=vlim,
+        t_obs.T, aspect="auto", origin="lower", cmap="RdBu_r",
+        vmin=-vlim, vmax=vlim,
         extent=[t_ax[0], t_ax[-1], -0.5, n_ch - 0.5],
     )
     plt.colorbar(im, ax=ax, label="t-statistic", shrink=0.8)
 
-    # Overlay all cluster outlines (grey = n.s., black = significant):
     for idx, cluster in enumerate(clusters):
-        if isinstance(cluster, np.ndarray) and cluster.dtype == bool:
-            mask = cluster
-        else:
-            mask = np.zeros((n_times, n_ch), dtype=bool)
-            mask[cluster] = True
+        mask = _resolve_mask(cluster)
         color = "black" if idx in good_inds else "silver"
-        lw = 1.8 if idx in good_inds else 0.8
-        ax.contour(
-            np.linspace(t_ax[0], t_ax[-1], n_times),
-            np.arange(n_ch),
-            mask.T.astype(float),
-            levels=[0.5],
-            colors=color,
-            linewidths=lw,
-        )
+        lw    = 1.8    if idx in good_inds else 0.8
+        # contour needs at least one True and one False cell to draw anything
+        if mask.any() and not mask.all():
+            ax.contour(
+                np.linspace(t_ax[0], t_ax[-1], n_times),
+                np.arange(n_ch),
+                mask.T.astype(float),
+                levels=[0.5], colors=color, linewidths=lw,
+            )
 
-    ax.set_xlabel("Time within segment (s)")
+    x_label = "Force Cycle Phase (°)" if cfg.use_phase_normalization else "Time within trial (s)"
+    ax.set_xlabel(x_label)
     ax.set_ylabel("Channel index")
     ax.set_yticks(range(n_ch))
     ax.set_yticklabels(ch_names, fontsize=6)
     ax.set_title("t-statistic map\n(black contour = significant cluster)")
 
-    # ── Panel B: time courses for significant clusters ────────────────────────
+    # ── Panel B: significant cluster time courses ─────────────────────────────
     ax2 = axes[1]
     if len(good_inds) == 0:
         ax2.text(0.5, 0.5, "No significant clusters", ha="center", va="center",
                  transform=ax2.transAxes, fontsize=12, color="grey")
     else:
         for idx in good_inds:
-            cluster = clusters[idx]
-            if isinstance(cluster, np.ndarray) and cluster.dtype == bool:
-                mask = cluster
-            else:
-                mask = np.zeros((n_times, n_ch), dtype=bool)
-                mask[cluster] = True
-            # Mean t across channels that are in the cluster at any time point:
-            ch_in_cluster = mask.any(axis=0)
-            t_course = t_obs[:, ch_in_cluster].mean(axis=1)
-            ax2.plot(t_ax, t_course, label=f"Cluster #{idx + 1}  p={cluster_pv[idx]:.3f}")
-            # Shade the significant time span:
-            t_in_cluster = mask.any(axis=1)
+            # Use shared resolver — fixes the previously unreshaped 1D mask here
+            mask = _resolve_mask(clusters[idx])
+
+            ch_in_cluster = mask.any(axis=0)   # (n_ch,) bool
+            t_in_cluster  = mask.any(axis=1)   # (n_times,) bool
+
+            if not ch_in_cluster.any():
+                continue
+
+            t_course = t_obs[:, ch_in_cluster].mean(axis=1)  # (n_times,)
+            ax2.plot(t_ax, t_course,
+                     label=f"Cluster #{idx + 1}  p={cluster_pv[idx]:.3f}")
             ax2.fill_between(t_ax, 0, t_course, where=t_in_cluster, alpha=0.2)
 
-        ax2.axhline(0, color="k", linewidth=0.8, linestyle="--")
-        ax2.axhline(t_thresh, color="red", linewidth=0.8, linestyle=":", label=f"±t_thresh ({t_thresh:.2f})")
+        ax2.axhline(0,         color="k",   linewidth=0.8, linestyle="--")
+        ax2.axhline( t_thresh, color="red", linewidth=0.8, linestyle=":",
+                     label=f"±t_thresh ({t_thresh:.2f})")
         ax2.axhline(-t_thresh, color="red", linewidth=0.8, linestyle=":")
-        ax2.set_xlabel("Time within segment (s)")
+        ax2.set_xlabel(x_label)
         ax2.set_ylabel("Mean t-statistic over cluster channels")
         ax2.set_title("Significant cluster time courses")
         ax2.legend(fontsize=8)
+
+    if cfg.use_phase_normalization:
+        for a in [ax, ax2]:
+            a.set_xticks([0, 90, 180, 270, 360])
+            a.axvline(90,  color="grey", lw=0.5, ls=":")
+            a.axvline(270, color="grey", lw=0.5, ls=":")
 
     plt.tight_layout()
     if cfg.save_plots:
@@ -793,6 +1087,7 @@ def _plot_results(results: dict, cfg: CBPAConfig) -> None:
     if cfg.show_plots:
         plt.show()
     plt.close(fig)
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -864,9 +1159,11 @@ def _save_results(
     n_times, n_ch = t_obs.shape
 
     rows: list[dict] = []
+    axis_label = "phase_deg" if cfg.use_phase_normalization else "time_s"
     for idx, (cluster, pv) in enumerate(zip(clusters, cluster_pv)):
+        # In _save_results, replace the mask resolution block with:
         if isinstance(cluster, np.ndarray) and cluster.dtype == bool:
-            mask = cluster
+            mask = cluster.reshape(n_times, n_ch) if cluster.ndim == 1 else cluster
         else:
             mask = np.zeros((n_times, n_ch), dtype=bool)
             mask[cluster] = True
@@ -894,8 +1191,8 @@ def _save_results(
             "peak_t":               round(float(np.abs(t_obs[mask]).max()) if mask.any() else 0.0, 4),
             "t_thresh":             round(float(t_thresh), 4),
             "n_time_points":        int(len(t_in)),
-            "time_start_s":         round(float(t_ax[t_in[0]]),  4) if len(t_in) > 0 else None,
-            "time_end_s":           round(float(t_ax[t_in[-1]]), 4) if len(t_in) > 0 else None,
+            f"{axis_label}_start":         round(float(t_ax[t_in[0]]),  4) if len(t_in) > 0 else None,
+            f"{axis_label}_end":           round(float(t_ax[t_in[-1]]), 4) if len(t_in) > 0 else None,
             "n_channels":           int(len(ch_in)),
             "channels":             "; ".join(ch_names[i] for i in ch_in),
         })
