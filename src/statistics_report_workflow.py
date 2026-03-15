@@ -26,33 +26,346 @@ import pandas as pd
 
 import src.utils.file_management as filemgmt
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  PATHS
-# ══════════════════════════════════════════════════════════════════════════════
-
-OMNIBUS_TESTING_RESULTS  = Path().resolve().parent / "output" / "statistics_omnibus_testing"
-POST_HOC_TESTING_RESULTS = Path().resolve().parent / "output" / "statistics_post_hoc_testing"
-REPORT_OUTPUT_DIR        = Path().resolve().parent / "output" / "statistics_reports"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  GLOBALS  (overwritten by generate_statistical_report at call time)
+#  PER-CALL CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-PRIMARY_N_SEGMENTS: int       = 1
-RESOLUTION_SEGMENTS: list[int] = [1, 5, 20]
-ALPHA_ADJUSTED: float          = 0.05
-ALPHA_UNADJUSTED: float        = 0.05
-INCLUDE_OLS: bool              = False   # whether OLS rows appear in Sections I/I.b
-TARGET_POWER: float            = 0.80   # minimum power to call an effect "well-powered"
+from dataclasses import dataclass, field
+
+@dataclass(frozen=True)
+class _ReportConfig:
+    """
+    Immutable settings bundle threaded through every section builder.
+
+    Parameters
+    ----------
+    primary_n_segments : int
+        Canonical time resolution for Sections I–IV.
+    resolution_segments : list[int]
+        All resolutions to check in cross-resolution stability (Section I.b).
+    alpha_adjusted : float
+        Family-wise significance threshold applied to p_value_adjusted.
+    include_ols : bool
+        Whether OLS rows appear alongside LME in Sections I, I.b, V.
+    cfg.target_power : float
+        Minimum Power_at_Observed_Effect to label an effect "well-powered".
+    """
+    primary_n_segments:  int        = 1
+    resolution_segments: list[int]  = field(default_factory=lambda: [1, 5, 20])
+    alpha_adjusted:      float      = 0.05
+    include_ols:         bool       = False
+    target_power:        float      = 0.80
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION VI — PREDICTOR QUALITY SUMMARY  (optional, hypothesis-group-level)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _tl(rating: str) -> str:
+    """Map rating string to display symbol."""
+    return {
+        "green":  "🟢",
+        "yellow": "🟡",
+        "red":    "🔴",
+        "na":     "—",
+    }.get(rating, "—")
+
+
+
+def _rate_power(
+    raw_params: set[str],
+    dvs: set[str],
+    power: pd.DataFrame,
+    cfg: _ReportConfig,
+) -> str:
+    """
+    Rate power for a canonical predictor across a set of DVs.
+
+    Parameters
+    ----------
+    raw_params : set[str]
+        All raw Parameter strings that map to this canonical predictor.
+    dvs : set[str]
+        Dependent variables belonging to the hypothesis group.
+    power : pd.DataFrame
+        Full power analysis frame.
+    cfg : _ReportConfig
+
+    Returns
+    -------
+    str
+        'green' | 'yellow' | 'red'
+    """
+    if power.empty:
+        return "red"
+    rows = power[
+        power["Parameter"].isin(raw_params) & power["Dependent_Variable"].isin(dvs)
+    ]
+    if rows.empty:
+        return "red"
+    n_well  = int((rows["Power_at_Observed_Effect"] >= cfg.target_power).sum())
+    n_total = len(rows)
+    if n_well == n_total:
+        return "green"
+    if n_well > 0:
+        return "yellow"
+    return "red"
+
+
+def _rate_relevance(
+    raw_params: set[str],
+    dvs: set[str],
+    res: pd.DataFrame,
+    cfg: _ReportConfig,
+) -> str:
+    """
+    Rate relevance as max |Cohen's d| across significant primary-resolution rows.
+
+    Returns
+    -------
+    str
+        'green' (≥ 0.5) | 'yellow' (≥ 0.2) | 'red' (< 0.2 or no sig. row)
+    """
+    rows = res[
+        (res["N. Segments"] == cfg.primary_n_segments)
+        & (res["Model_Type"] == "LME")
+        & (res["p_value_adjusted"] < cfg.alpha_adjusted)
+        & res["Parameter"].isin(raw_params)
+        & res["Dependent_Variable"].isin(dvs)
+    ]
+    if rows.empty:
+        return "red"
+    max_d = rows["Cohen_d"].abs().max()
+    if max_d >= 0.5:
+        return "green"
+    if max_d >= 0.2:
+        return "yellow"
+    return "red"
+
+
+def _rate_generalization(
+    raw_params: set[str],
+    dvs: set[str],
+    influence: pd.DataFrame,
+    cfg: _ReportConfig,
+) -> str:
+    """
+    Rate generalization: driven by single subjects?
+
+    Returns 'green' | 'yellow' | 'red' | 'na'.
+    'na' is returned when no influence data is available at the primary
+    resolution, so the caller can render '—' rather than a traffic light.
+    """
+    if influence.empty:
+        return "na"
+    rows = influence[
+        (influence["N_Segments"] == cfg.primary_n_segments)
+        & influence["Parameter"].isin(raw_params)
+        & influence["Dependent_Variable"].isin(dvs)
+    ]
+    if rows.empty:
+        return "na"   # ← was "yellow"
+    if rows["DFBETA_Flagged"].any():
+        return "red"
+    if rows["CooksD_Flagged"].any():
+        return "yellow"
+    return "green"
+
+
+
+def _rate_time_consistency(
+    raw_params: set[str],
+    dvs: set[str],
+    res: pd.DataFrame,
+    cfg: _ReportConfig,
+) -> str:
+    """
+    Rate time consistency: significant at primary resolution → how stable
+    across all resolution_segments?
+
+    For each (param, level, dv) triple that is significant at primary_n_segments,
+    count how many cfg.resolution_segments also show significance.
+
+    🟢 all triples robust across all resolutions
+    🟡 mixed (some robust, some partial or resolution-specific)
+    🔴 all resolution-specific (only at primary)
+
+    Returns
+    -------
+    str
+        'green' | 'yellow' | 'red'
+    """
+    primary_sig = res[
+        (res["N. Segments"] == cfg.primary_n_segments)
+        & (res["Model_Type"] == "LME")
+        & (res["p_value_adjusted"] < cfg.alpha_adjusted)
+        & res["Parameter"].isin(raw_params)
+        & res["Dependent_Variable"].isin(dvs)
+    ][["Parameter", "Comparison_Level", "Dependent_Variable"]].drop_duplicates()
+
+    if primary_sig.empty:
+        return "red"
+
+    verdicts: list[str] = []
+    for _, pr in primary_sig.iterrows():
+        level_idx = _level_int(pr["Comparison_Level"])
+        sig_at = []
+        for n_seg in cfg.resolution_segments:
+            match = res[
+                (res["N. Segments"] == n_seg)
+                & (res["Model_Type"] == "LME")
+                & (res["Parameter"] == pr["Parameter"])
+                & (res["Comparison_Level"].apply(_level_int) == level_idx)
+                & (res["Dependent_Variable"] == pr["Dependent_Variable"])
+            ]
+            if not match.empty and match.iloc[0]["p_value_adjusted"] < cfg.alpha_adjusted:
+                sig_at.append(n_seg)
+        n_avail = len([s for s in cfg.resolution_segments
+                       if not res[(res["N. Segments"] == s)
+                                  & (res["Dependent_Variable"] == pr["Dependent_Variable"])].empty])
+        if len(sig_at) == n_avail:
+            verdicts.append("green")
+        elif len(sig_at) > 1:
+            verdicts.append("yellow")
+        else:
+            verdicts.append("red")
+
+    if all(v == "green" for v in verdicts):
+        return "green"
+    if all(v == "red" for v in verdicts):
+        return "red"
+    return "yellow"
+
+
+def _section_predictor_quality(
+    hypothesis_groups: list[dict],
+    res: pd.DataFrame,
+    power: pd.DataFrame,
+    influence: pd.DataFrame,
+    cfg: _ReportConfig,
+) -> str:
+    """
+    Section VI — Predictor Quality Summary across hypothesis groups.
+
+    Produces one Markdown table per group, with one row per canonical predictor
+    (significant in ≥ 1 DV within the group at the primary resolution).
+    Each row receives four traffic-light ratings:
+    Power, Relevance, Generalization, Time Consistency.
+
+    Parameters
+    ----------
+    hypothesis_groups : list[dict]
+        Each dict must have:
+          - "label"       : str  — section heading
+          - "hypotheses"  : list[str] — values to match against res["Hypothesis"]
+    res : pd.DataFrame
+        Full omnibus results frame.
+    power : pd.DataFrame
+        Full power analysis frame.
+    influence : pd.DataFrame
+        Full influence measures frame.
+    cfg : _ReportConfig
+
+    Returns
+    -------
+    str
+        Markdown block.
+    """
+    lines = ["## Predictor Quality Summary\n"]
+    lines.append(
+        "> Traffic-light ratings per canonical predictor aggregated across "
+        "all DVs in each hypothesis group.  \n"
+        "> **Power**: ≥ target across all instances · "
+        "**Relevance**: max |d| ≥ 0.2 · "
+        "**Generalization**: no single-subject DFBETA drive · "
+        "**Time Consistency**: robust across resolutions  \n"
+        "> 🟢 Pass · 🟡 Partial/Mixed · 🔴 Fail · — Not assessable (no influence data at primary resolution)\n"
+    )
+
+    for group in hypothesis_groups:
+        label      = group.get("label", "Unnamed Group")
+        hyp_filter = group.get("hypotheses", [])
+
+        lines.append(f"### {label}\n")
+
+        # DVs belonging to this group
+        group_res = res[res["Hypothesis"].isin(hyp_filter)]
+        dvs = set(group_res["Dependent_Variable"].unique())
+
+        if group_res.empty:
+            lines.append("> ⚠️  No results found for the specified hypotheses.\n")
+            continue
+
+        # Collect all canonical predictors significant at primary resolution
+        sig_primary = group_res[
+            (group_res["N. Segments"] == cfg.primary_n_segments)
+            & (group_res["Model_Type"] == "LME")
+            & (group_res["p_value_adjusted"] < cfg.alpha_adjusted)
+            & group_res["Parameter"].apply(_is_real_param)
+        ].copy()
+
+        if sig_primary.empty:
+            lines.append(
+                f"> No significant effects in this group at "
+                f"{cfg.primary_n_segments}-seg primary resolution.\n"
+            )
+            continue
+
+        # Map cleaned → set of raw parameter strings
+        sig_primary["_canonical"] = sig_primary["Parameter"].apply(_clean_param)
+        canonical_groups = (
+            sig_primary.groupby("_canonical")["Parameter"]
+            .apply(set)
+            .to_dict()
+        )
+
+        # Best Cohen's d per canonical predictor (for sorting)
+        best_d = (
+            sig_primary.groupby("_canonical")["Cohen_d"]
+            .apply(lambda s: s.abs().max())
+            .to_dict()
+        )
+
+        sorted_predictors = sorted(
+            canonical_groups.keys(),
+            key=lambda c: best_d.get(c, 0),
+            reverse=True,
+        )
+
+        lines.append(
+            "| Predictor | Best \\|d\\| | Power | Relevance | "
+            "Generalization | Time Consistency |"
+        )
+        lines.append("|---|---|---|---|---|---|")
+
+        for canonical in sorted_predictors:
+            raw_params = canonical_groups[canonical]
+            d_val      = best_d.get(canonical, float("nan"))
+
+            pwr  = _tl(_rate_power(raw_params, dvs, power, cfg))
+            rel  = _tl(_rate_relevance(raw_params, dvs, group_res, cfg))
+            gen  = _tl(_rate_generalization(raw_params, dvs, influence, cfg))
+            tc   = _tl(_rate_time_consistency(raw_params, dvs, group_res, cfg))
+
+            lines.append(
+                f"| {canonical} "
+                f"| {_fmt_float(d_val, 3)} "
+                f"| {pwr} | {rel} | {gen} | {tc} |"
+            )
+
+        lines.append("")
+
+    return "\n".join(lines)
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SMALL UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _active_models() -> list[str]:
-    """Return the model types to show, respecting INCLUDE_OLS."""
-    return ["LME", "OLS"] if INCLUDE_OLS else ["LME"]
+def _active_models(cfg: _ReportConfig) -> list[str]:
+    """Return the model types to show, respecting cfg.include_ols."""
+    return ["LME", "OLS"] if cfg.include_ols else ["LME"]
 
 
 def _cohens_d_label(d: float) -> str:
@@ -154,10 +467,11 @@ _REQUIRED_COLUMNS: dict[str, set[str]] = {
     "cbpa_results": {
         "hypothesis", "modality", "freq_band", "condition_column",
         "condition_A", "condition_B", "cluster_index", "p_value",
-        "significant", "peak_t", "t_thresh",
-        "time_start_s", "time_end_s", "n_channels", "channels",
+        "significant", "peak_t", "t_thresh", "n_channels", "channels",
     },
 }
+
+_CBPA_DOMAIN_ALTERNATIVES: tuple[str, str] = ("time_start_s", "phase_start_deg")
 
 
 def validate_frames(frames: dict[str, pd.DataFrame]) -> list[str]:
@@ -186,6 +500,19 @@ def validate_frames(frames: dict[str, pd.DataFrame]) -> list[str]:
         missing = required - set(df.columns)
         if missing:
             out.append(f"[MISSING COLUMNS] '{name}': {sorted(missing)}")
+
+    if "cbpa_results" in frames:
+        df = frames["cbpa_results"]
+        if df is not None and not df.empty:
+            time_col, phase_col = _CBPA_DOMAIN_ALTERNATIVES
+            has_time = time_col in df.columns
+            has_phase = phase_col in df.columns
+            if not has_time and not has_phase:
+                out.append(
+                    f"[MISSING COLUMNS] 'cbpa_results': neither temporal domain "
+                    f"('{time_col}') nor phase domain ('{phase_col}') columns are present."
+                )
+
     return out
 
 
@@ -200,32 +527,17 @@ def _print_pipeline_recommendations(
     cbpa: pd.DataFrame,
     alpha: float,
     primary_n_segments: int,
+    resolution_segments: list[int],
 ) -> None:
-    """
-    Print actionable pipeline recommendations to stdout when significant
-    effects lack power analysis, influence measures, or CBPA coverage.
-
-    Called once at the start of generate_statistical_report so problems are
-    visible immediately in the run log, independently of the Markdown output.
-
-    Parameters
-    ----------
-    res : pd.DataFrame
-        Full omnibus results frame.
-    power : pd.DataFrame
-        Full power analysis frame.
-    influence : pd.DataFrame
-        Full influence measures frame.
-    cbpa : pd.DataFrame
-        Full CBPA cluster frame.
-    alpha : float
-        Significance threshold used for counting significant effects.
-    primary_n_segments : int
-        Primary resolution; influence coverage is checked at this value.
-    """
     sep = "─" * 72
 
-    # Identify all significant effects at primary resolution
+    # Guard: nothing meaningful to check if the results frame itself is empty
+    if res.empty:
+        print(f"\n{sep}")
+        print("⚠️  Omnibus results frame is empty — pipeline recommendations skipped.")
+        print(sep)
+        return
+
     sig = res[
         (res["N. Segments"] == primary_n_segments)
         & (res["Model_Type"] == "LME")
@@ -242,99 +554,90 @@ def _print_pipeline_recommendations(
     issues: list[str] = []
 
     # ── 1. Power analysis gaps ────────────────────────────────────────────────
-    power_covered = set(zip(power["Dependent_Variable"], power["Parameter"]))
-    missing_power_dvs: dict[str, list[str]] = {}
-    for _, r in sig.iterrows():
-        if (r["Dependent_Variable"], r["Parameter"]) not in power_covered:
-            missing_power_dvs.setdefault(r["Dependent_Variable"], []).append(
-                _clean_param(r["Parameter"])
+    if not power.empty:
+        power_covered = set(zip(power["Dependent_Variable"], power["Parameter"]))
+        missing_power_dvs: dict[str, list[str]] = {}
+        for _, r in sig.iterrows():
+            if (r["Dependent_Variable"], r["Parameter"]) not in power_covered:
+                missing_power_dvs.setdefault(r["Dependent_Variable"], []).append(
+                    _clean_param(r["Parameter"])
+                )
+        if missing_power_dvs:
+            issues.append(
+                f"⚠️  POWER ANALYSIS missing for {len(missing_power_dvs)} DV(s) "
+                f"({sum(len(v) for v in missing_power_dvs.values())} significant parameters):"
             )
-
-    if missing_power_dvs:
-        issues.append(
-            f"⚠️  POWER ANALYSIS missing for {len(missing_power_dvs)} DV(s) "
-            f"({sum(len(v) for v in missing_power_dvs.values())} significant parameters):"
-        )
-        # List every missing parameter explicitly — no truncation
-        for dv, params in sorted(missing_power_dvs.items()):
-            issues.append(f"   {dv}  →  {len(params)} parameter(s):")
-            for p in params:
-                issues.append(f"      · {p}")
-        issues.append(
-            "   → Re-run the power analysis pipeline for all DVs and segment counts."
-        )
+            for dv, params in sorted(missing_power_dvs.items()):
+                issues.append(f"   {dv}  →  {len(params)} parameter(s):")
+                for p in params:
+                    issues.append(f"      · {p}")
+            issues.append(
+                "   → Re-run the power analysis pipeline for all DVs and segment counts."
+            )
+    else:
+        issues.append("⚠️  POWER ANALYSIS frame is empty — coverage check skipped.")
 
     # ── 2. Influence measure gaps ─────────────────────────────────────────────
-    inf_at_primary = influence[influence["N_Segments"] == primary_n_segments]
-    dvs_with_inf   = set(inf_at_primary["Dependent_Variable"].unique())
-    dvs_need_inf   = set(sig["Dependent_Variable"].unique())
-    missing_inf    = sorted(dvs_need_inf - dvs_with_inf)
-
-    if missing_inf:
-        issues.append(
-            f"\n⚠️  INFLUENCE MEASURES missing at {primary_n_segments}-seg "
-            f"for {len(missing_inf)} DV(s):"
-        )
-        for dv in missing_inf:
-            issues.append(f"   {dv}")
-        # Detect whether influence data exists at a different segment count
-        other_segs = sorted(influence["N_Segments"].dropna().unique().astype(int))
-        other_segs = [s for s in other_segs if s != primary_n_segments]
-        if other_segs:
+    if not influence.empty:
+        inf_at_primary = influence[influence["N_Segments"] == primary_n_segments]
+        dvs_with_inf   = set(inf_at_primary["Dependent_Variable"].unique())
+        dvs_need_inf   = set(sig["Dependent_Variable"].unique())
+        missing_inf    = sorted(dvs_need_inf - dvs_with_inf)
+        if missing_inf:
             issues.append(
-                f"   → Influence data found at segment(s) {other_segs} but NOT at "
-                f"{primary_n_segments}-seg. Either re-run influence analysis at "
-                f"{primary_n_segments}-seg, or change PRIMARY_N_SEGMENTS to match."
+                f"\n⚠️  INFLUENCE MEASURES missing at {primary_n_segments}-seg "
+                f"for {len(missing_inf)} DV(s):"
             )
-        else:
+            for dv in missing_inf:
+                issues.append(f"   {dv}")
+            other_segs = sorted(influence["N_Segments"].dropna().unique().astype(int))
+            other_segs = [s for s in other_segs if s != primary_n_segments]
+            if other_segs:
+                issues.append(
+                    f"   → Influence data found at segment(s) {other_segs} but NOT at "
+                    f"{primary_n_segments}-seg. Either re-run influence analysis at "
+                    f"{primary_n_segments}-seg, or change primary_n_segments to match."
+                )
+            else:
+                issues.append(
+                    f"   → Re-run the influence analysis pipeline at {primary_n_segments}-seg."
+                )
+    else:
+        issues.append("\n⚠️  INFLUENCE MEASURES frame is empty — coverage check skipped.")
+
+    # ── 3. CBPA gaps ──────────────────────────────────────────────────────────
+    if not cbpa.empty:
+        missing_cbpa_dvs: dict[str, str] = {}
+        for _, r in sig[["Hypothesis", "Dependent_Variable"]].drop_duplicates().iterrows():
+            hyp_p = _hypothesis_prefix(r["Hypothesis"])
+            dv    = r["Dependent_Variable"]
+            cbpa_hyp = cbpa[cbpa["hypothesis"].apply(_hypothesis_prefix) == hyp_p]
+            if cbpa_hyp.empty:
+                missing_cbpa_dvs[dv] = f"no CBPA data at all for {hyp_p}"
+                continue
+            modality_key, band_key, muscle_key = _dv_to_cbpa_keys(dv)
+            mask = pd.Series(True, index=cbpa_hyp.index)
+            if modality_key is not None:
+                mask &= cbpa_hyp["modality"].str.upper() == modality_key.upper()
+            if band_key is not None:
+                mask &= cbpa_hyp["freq_band"].str.lower() == band_key.lower()
+            if muscle_key is not None:
+                mask &= cbpa_hyp["hypothesis"].str.contains(muscle_key, case=False)
+            if not mask.any():
+                keys = f"modality={modality_key}, band={band_key}, muscle={muscle_key}"
+                missing_cbpa_dvs[dv] = f"no rows match {keys} within {hyp_p}"
+        if missing_cbpa_dvs:
             issues.append(
-                "   → Re-run the influence analysis pipeline at "
-                f"{primary_n_segments}-seg."
+                f"\n⚠️  CBPA missing for {len(missing_cbpa_dvs)} DV(s) with significant effects:"
             )
-
-    # ── 3. CBPA gaps — checked at DV granularity, mirroring _section_cbpa ────
-    # A hypothesis prefix having *some* CBPA data does not mean every DV under
-    # it is covered (e.g. H1 has Flexor-beta but not Extensor-beta or any gamma).
-    # Replicate the same 3-key filter (_hypothesis_prefix + modality + band +
-    # muscle) so the recommendation is actionable at the pipeline level.
-    missing_cbpa_dvs: dict[str, str] = {}  # dv → human-readable reason
-
-    for _, r in sig[["Hypothesis", "Dependent_Variable"]].drop_duplicates().iterrows():
-        hyp_p = _hypothesis_prefix(r["Hypothesis"])
-        dv = r["Dependent_Variable"]
-
-        # Step 1 — hypothesis prefix
-        cbpa_hyp = cbpa[cbpa["hypothesis"].apply(_hypothesis_prefix) == hyp_p]
-        if cbpa_hyp.empty:
-            missing_cbpa_dvs[dv] = f"no CBPA data at all for {hyp_p}"
-            continue
-
-        # Steps 2+3 — same narrowing logic as _section_cbpa
-        modality_key, band_key, muscle_key = _dv_to_cbpa_keys(dv)
-        mask = pd.Series(True, index=cbpa_hyp.index)
-        if modality_key is not None:
-            mask &= cbpa_hyp["modality"].str.upper() == modality_key.upper()
-        if band_key is not None:
-            mask &= cbpa_hyp["freq_band"].str.lower() == band_key.lower()
-        if muscle_key is not None:
-            mask &= cbpa_hyp["hypothesis"].str.contains(muscle_key, case=False)
-
-        if not mask.any():
-            keys = f"modality={modality_key}, band={band_key}, muscle={muscle_key}"
-            missing_cbpa_dvs[dv] = f"no rows match {keys} within {hyp_p}"
-
-    if missing_cbpa_dvs:
-        issues.append(
-            f"\n⚠️  CBPA missing for {len(missing_cbpa_dvs)} DV(s) with significant effects:"
-        )
-        for dv, reason in sorted(missing_cbpa_dvs.items()):
-            issues.append(f"   {dv}  — {reason}")
-        issues.append(
-            "   → Run the CBPA pipeline for the listed DVs / hypotheses."
-        )
+            for dv, reason in sorted(missing_cbpa_dvs.items()):
+                issues.append(f"   {dv}  — {reason}")
+            issues.append("   → Run the CBPA pipeline for the listed DVs / hypotheses.")
+    else:
+        issues.append("\n⚠️  CBPA frame is empty — coverage check skipped.")
 
     # ── 4. Cross-resolution gap ───────────────────────────────────────────────
-    target_segs = [s for s in RESOLUTION_SEGMENTS if s != primary_n_segments]
+    target_segs = [s for s in resolution_segments if s != primary_n_segments]
     for target_seg in target_segs:
         hits = sum(
             1 for _, r in sig.iterrows()
@@ -344,7 +647,7 @@ def _print_pipeline_recommendations(
                 & (res["Parameter"] == r["Parameter"])
                 & (res["Comparison_Level"].apply(_level_int) == _level_int(r["Comparison_Level"]))
                 & (res["Dependent_Variable"] == r["Dependent_Variable"])
-                ].empty
+            ].empty
         )
         if hits == 0:
             issues.append(
@@ -368,6 +671,7 @@ def _print_pipeline_recommendations(
     else:
         print("✅  All significant effects have power, influence, and CBPA coverage.")
     print(sep + "\n")
+
 
 
 
@@ -445,45 +749,20 @@ def _section_level_definitions(level_defs: list[dict]) -> str:
 def _section_overview_table(
     res: pd.DataFrame,
     power: pd.DataFrame,
-    alpha: float,
-    target_power: float,
+    cfg: _ReportConfig,
 ) -> str:
-    """
-    Pre-hypothesis summary: one row per Hypothesis showing how many
-    significant effects exist and how many of those are well-powered.
-
-    Counts are taken at PRIMARY_N_SEGMENTS, active model types only,
-    real parameters only (no sentinels / intercepts).
-
-    Parameters
-    ----------
-    res : pd.DataFrame
-        Full omnibus results frame.
-    power : pd.DataFrame
-        Full power analysis frame.
-    alpha : float
-        Significance threshold.
-    target_power : float
-        Minimum Power_at_Observed_Effect to be "well-powered".
-
-    Returns
-    -------
-    str
-        Markdown table block.
-    """
     lines = [
         "## Overview\n",
-        f"*Counts at primary resolution ({PRIMARY_N_SEGMENTS}-seg), "
-        f"models: {', '.join(_active_models())}, "
-        f"α = {alpha}, target power = {target_power:.0%}*\n",
+        f"*Counts at primary resolution ({cfg.primary_n_segments}-seg), "
+        f"models: {', '.join(_active_models(cfg))}, "
+        f"α = {cfg.alpha_adjusted}, target power = {cfg.target_power:.0%}*\n",
         "| Hypothesis | DV | Sig. effects | Well-powered | Underpowered | No power data |",
         "|---|---|---|---|---|---|",
     ]
 
-    # Subset results to primary resolution + active models + real params
     res_primary = res[
-        (res["N. Segments"] == PRIMARY_N_SEGMENTS)
-        & (res["Model_Type"].isin(_active_models()))
+        (res["N. Segments"] == cfg.primary_n_segments)
+        & (res["Model_Type"].isin(_active_models(cfg)))
         & res["Parameter"].apply(_is_real_param)
     ]
 
@@ -500,7 +779,7 @@ def _section_overview_table(
         sig_rows = res_primary[
             (res_primary["Hypothesis"] == hyp)
             & (res_primary["Dependent_Variable"] == dv)
-            & (res_primary["p_value_adjusted"] < alpha)
+            & (res_primary["p_value_adjusted"] < cfg.alpha_adjusted)
         ]
         n_sig = len(sig_rows)
 
@@ -508,7 +787,13 @@ def _section_overview_table(
             lines.append(f"| {hyp} | `{dv}` | 0 | — | — | — |")
             continue
 
-        # Match each significant parameter to power frame
+        # Power frame may be empty if the pipeline has not been run yet
+        if power.empty:
+            lines.append(
+                f"| {hyp} | `{dv}` | **{n_sig}** | — | — | — {n_sig} |"
+            )
+            continue
+
         n_well_powered = 0
         n_underpowered = 0
         n_no_data      = 0
@@ -522,7 +807,7 @@ def _section_overview_table(
                 n_no_data += 1
             else:
                 pwr_val = pwr_match.iloc[0]["Power_at_Observed_Effect"]
-                if pd.notna(pwr_val) and pwr_val >= target_power:
+                if pd.notna(pwr_val) and pwr_val >= cfg.target_power:
                     n_well_powered += 1
                 else:
                     n_underpowered += 1
@@ -536,12 +821,13 @@ def _section_overview_table(
         )
 
     lines.append(
-        "\n> **Sig. effects** = adjusted p < α at primary resolution. "
-        f"**Well-powered** = Power_at_Observed_Effect ≥ {target_power:.0%}. "
+        f"\n> **Sig. effects** = adjusted p < α at primary resolution. "
+        f"**Well-powered** = Power_at_Observed_Effect ≥ {cfg.target_power:.0%}. "
         "**No power data** = parameter not covered by power analysis.\n"
     )
     lines.append("---\n")
     return "\n".join(lines)
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -552,12 +838,12 @@ def _section_findings(
     hyp: str,
     dv: str,
     res: pd.DataFrame,
-    alpha: float,
+    cfg: _ReportConfig,
 ) -> str:
     """
     Section I — What is the finding?
 
-    Shows all significant fixed-effect parameters at PRIMARY_N_SEGMENTS,
+    Shows all significant fixed-effect parameters at cfg.primary_n_segments,
     for active model types, ranked by |Cohen's d|.
     Includes Comparison Level and Model Type columns to disambiguate
     duplicate parameter names across levels.
@@ -570,22 +856,24 @@ def _section_findings(
         Omnibus results, already filtered to this hyp × dv.
     alpha : float
     """
+    alpha = cfg.alpha_adjusted
+
     lines = ["### I. Finding\n"]
 
     mask = (
-        (res["N. Segments"] == PRIMARY_N_SEGMENTS)
-        & (res["Model_Type"].isin(_active_models()))
+        (res["N. Segments"] == cfg.primary_n_segments)
+        & (res["Model_Type"].isin(_active_models(cfg)))
         & res["Parameter"].apply(_is_real_param)
     )
     sub = res[mask].copy()
     sig = sub[sub["p_value_adjusted"] < alpha].copy()
 
-    model_label = "/".join(_active_models())
+    model_label = "/".join(_active_models(cfg))
 
     if sig.empty:
         lines.append(
             f"> **No significant effects** found for `{dv}` at "
-            f"adjusted α = {alpha} ({model_label}, {PRIMARY_N_SEGMENTS}-seg).\n"
+            f"adjusted α = {alpha} ({model_label}, {cfg.primary_n_segments}-seg).\n"
         )
         near = sub[sub["p_value_adjusted"] < 0.10].sort_values("p_value_adjusted")
         if not near.empty:
@@ -609,7 +897,7 @@ def _section_findings(
 
     lines.append(
         f"**{len(sig)} significant effect(s)** for `{dv}` "
-        f"({model_label}, {PRIMARY_N_SEGMENTS}-seg, adjusted α = {alpha}):\n"
+        f"({model_label}, {cfg.primary_n_segments}-seg, adjusted α = {alpha}):\n"
     )
     lines.append(
         "| Parameter | Level | Model | β | SE (adj) | p (adj) | Cohen's d | Magnitude |"
@@ -632,9 +920,9 @@ def _section_findings(
 
     all_segs = sorted(res["N. Segments"].dropna().unique())
     if len(all_segs) > 1:
-        other = ", ".join(str(int(s)) for s in all_segs if s != PRIMARY_N_SEGMENTS)
+        other = ", ".join(str(int(s)) for s in all_segs if s != cfg.primary_n_segments)
         lines.append(
-            f"> **Time-resolution robustness:** primary = {PRIMARY_N_SEGMENTS}-seg. "
+            f"> **Time-resolution robustness:** primary = {cfg.primary_n_segments}-seg. "
             f"Also tested: {other}-seg — see cross-resolution table below.\n"
         )
 
@@ -649,14 +937,14 @@ def _section_cross_resolution(
     hyp: str,
     dv: str,
     res: pd.DataFrame,
-    alpha: float,
+    cfg: _ReportConfig,
 ) -> str:
     """
     Section I.b — Cross-resolution stability of significant parameters.
 
-    For every parameter significant at PRIMARY_N_SEGMENTS (LME, always),
+    For every parameter significant at cfg.primary_n_segments (LME, always),
     shows β / SE_adj / p_adj / Cohen_d at each resolution in
-    RESOLUTION_SEGMENTS.  One table per parameter.
+    cfg.resolution_segments.  One table per parameter.
 
     Always uses LME for the cross-resolution comparison regardless of
     INCLUDE_OLS, because the goal is temporal stability of the same model.
@@ -669,11 +957,13 @@ def _section_cross_resolution(
         Omnibus results, already filtered to this hyp × dv.
     alpha : float
     """
+    alpha = cfg.alpha_adjusted
+
     lines = ["#### Cross-Resolution Stability (LME)\n"]
 
     # Significant parameters at the primary resolution — always LME
     primary_sig = res[
-        (res["N. Segments"] == PRIMARY_N_SEGMENTS)
+        (res["N. Segments"] == cfg.primary_n_segments)
         & (res["Model_Type"] == "LME")
         & (res["p_value_adjusted"] < alpha)
         & res["Parameter"].apply(_is_real_param)
@@ -686,8 +976,8 @@ def _section_cross_resolution(
         )
         return "\n".join(lines)
 
-    available_segs = sorted(s for s in RESOLUTION_SEGMENTS if s in res["N. Segments"].values)
-    missing_segs   = [s for s in RESOLUTION_SEGMENTS if s not in res["N. Segments"].values]
+    available_segs = sorted(s for s in cfg.resolution_segments if s in res["N. Segments"].values)
+    missing_segs   = [s for s in cfg.resolution_segments if s not in res["N. Segments"].values]
     if missing_segs:
         lines.append(
             f"> ⚠️  Resolutions absent from data: "
@@ -725,7 +1015,7 @@ def _section_cross_resolution(
             cohen_d        = r.get("Cohen_d")
             mag            = _cohens_d_label(cohen_d) if pd.notna(cohen_d) else "—"
             sig_ico        = "✅" if (pd.notna(p_adj) and p_adj < alpha) else "⚠️"
-            primary_marker = " ← primary" if n_seg == PRIMARY_N_SEGMENTS else ""
+            primary_marker = " ← primary" if n_seg == cfg.primary_n_segments else ""
 
             lines.append(
                 f"| **{n_seg}-seg**{primary_marker} "
@@ -795,14 +1085,15 @@ def _section_trust(
     res: pd.DataFrame,
     power: pd.DataFrame,
     influence: pd.DataFrame,
-    alpha: float,
-    target_power: float,
+    cfg: _ReportConfig,
 ) -> str:
     """
     Section II — Can you trust the finding?
 
-    Power verdict uses target_power rather than reading the Interpretation
-    string, so it respects whatever threshold was passed at call time.
+    Subsections:
+    - 2a. Power analysis verdict per parameter at Level 1.
+    - 2b. Influence analysis: per-subject summary table, with parameter-level
+          detail collapsed behind a <details> toggle for flagged rows only.
 
     Parameters
     ----------
@@ -811,90 +1102,129 @@ def _section_trust(
     res : pd.DataFrame
         Omnibus results filtered to this hyp × dv.
     power : pd.DataFrame
-        Full power analysis frame.
+        Full power analysis frame (may be empty if not yet run).
     influence : pd.DataFrame
-        Full influence frame.
-    alpha : float
-    target_power : float
+        Full influence frame (may be empty if not yet run).
+    cfg : _ReportConfig
     """
     lines = ["### II. Trustworthiness\n"]
 
     # ── 2a. Power ─────────────────────────────────────────────────────────────
     lines.append("#### Power Analysis\n")
 
-    pwr_sub = power[
-        (power["Dependent_Variable"] == dv)
-        & (power["Comparison_Level"].apply(lambda x: _level_int(x) == 1))
-    ].copy()
-
-    if pwr_sub.empty:
-        lines.append("> ⚠️  No power analysis available for this DV / Level 1.\n")
+    if power.empty:
+        lines.append("> ⚠️  Power analysis frame is empty — not yet run for this pipeline.\n")
     else:
-        lines.append(
-            f"| Parameter | Power @ effect | MDE ({target_power:.0%}) | Verdict |"
-        )
-        lines.append("|---|---|---|---|")
-        for _, r in pwr_sub.iterrows():
-            pwr_val = r.get("Power_at_Observed_Effect")
-            mde     = r.get("MDE_at_80%_power")   # column name is fixed in the frame
-            well    = pd.notna(pwr_val) and pwr_val >= target_power
-            verdict = "✅ Well-powered" if well else "⚠️  Under-powered"
+        pwr_sub = power[
+            power["Dependent_Variable"] == dv
+            ].copy()
+
+        if pwr_sub.empty:
+            lines.append("> ⚠️  No power analysis available for this DV.\n")
+        else:
+            # Sort by level index then parameter for readability
+            pwr_sub["_lvl"] = pwr_sub["Comparison_Level"].apply(_level_int)
+            pwr_sub = pwr_sub.sort_values(["_lvl", "Parameter"])
+
             lines.append(
-                f"| {_clean_param(r['Parameter'])} "
-                f"| {_fmt_float(pwr_val, 3)} "
-                f"| {_fmt_float(mde, 6) if pd.notna(mde) else '—'} "
-                f"| {verdict} |"
+                f"| Level | Parameter | Power @ effect | MDE ({cfg.target_power:.0%}) | Verdict |"
             )
-        lines.append("")
+            lines.append("|---|---|---|---|---|")
+            for _, r in pwr_sub.iterrows():
+                pwr_val = r.get("Power_at_Observed_Effect")
+                mde = r.get("MDE_at_80%_power")
+                well = pd.notna(pwr_val) and pwr_val >= cfg.target_power
+                verdict = "✅ Well-powered" if well else "⚠️  Under-powered"
+                lines.append(
+                    f"| {_short_level(r['Comparison_Level'])} "
+                    f"| {_clean_param(r['Parameter'])} "
+                    f"| {_fmt_float(pwr_val, 3)} "
+                    f"| {_fmt_float(mde, 6) if pd.notna(mde) else '—'} "
+                    f"| {verdict} |"
+                )
+            lines.append("")
 
     # ── 2b. Influence ─────────────────────────────────────────────────────────
     lines.append("#### Influence Analysis (Cook's D & DFBETA)\n")
 
-    inf_sub = influence[
-        (influence["Dependent_Variable"] == dv)
-        & (influence["N_Segments"] == PRIMARY_N_SEGMENTS)
-    ].copy()
-
-    if inf_sub.empty:
-        lines.append(
-            f"> ⚠️  No influence measures for this DV at {PRIMARY_N_SEGMENTS}-seg.\n"
-        )
+    if influence.empty:
+        lines.append("> ⚠️  Influence measures frame is empty — not yet run for this pipeline.\n")
     else:
-        cooksd_flag = inf_sub[inf_sub["CooksD_Flagged"]  == True]
-        dfbeta_flag = inf_sub[inf_sub["DFBETA_Flagged"]  == True]
-        n_subj      = inf_sub["Subject_ID"].nunique()
+        inf_sub = influence[
+            (influence["Dependent_Variable"] == dv)
+            & (influence["N_Segments"] == cfg.primary_n_segments)
+        ].copy()
 
-        lines.append(f"- Subjects analysed: **{n_subj}**")
-        lines.append(
-            f"- Cook's D flags: **{cooksd_flag['Subject_ID'].nunique()}** subject(s) "
-            f"across {len(cooksd_flag)} parameter-subject combinations"
-        )
-        lines.append(
-            f"- DFBETA flags: **{dfbeta_flag['Subject_ID'].nunique()}** subject(s) "
-            f"across {len(dfbeta_flag)} parameter-subject combinations\n"
-        )
+        if inf_sub.empty:
+            lines.append(
+                f"> ⚠️  No influence measures for this DV at {cfg.primary_n_segments}-seg.\n"
+            )
+        else:
+            n_subj         = inf_sub["Subject_ID"].nunique()
+            n_params       = inf_sub["Parameter"].nunique()
+            cooksd_flag    = inf_sub[inf_sub["CooksD_Flagged"] == True]
+            dfbeta_flag    = inf_sub[inf_sub["DFBETA_Flagged"] == True]
+            n_flagged_subj = len(
+                set(cooksd_flag["Subject_ID"]) | set(dfbeta_flag["Subject_ID"])
+            )
 
-        if not cooksd_flag.empty or not dfbeta_flag.empty:
-            flagged_all = pd.concat([cooksd_flag, dfbeta_flag]).drop_duplicates()
-            lines.append("**Flagged observations:**\n")
-            lines.append("| Subject | Parameter | Cook's D | DFBETA | Flags |")
-            lines.append("|---|---|---|---|---|")
-            for _, r in flagged_all.sort_values("Subject_ID").iterrows():
-                flags = []
-                if r.get("CooksD_Flagged"): flags.append("CooksD")
-                if r.get("DFBETA_Flagged"): flags.append("DFBETA")
+            # Overall verdict line
+            if n_flagged_subj == 0:
                 lines.append(
-                    f"| S{int(r['Subject_ID']):02d} "
-                    f"| {_clean_param(r['Parameter'])} "
-                    f"| {_fmt_float(r['CooksD'], 4)} "
-                    f"| {_fmt_float(r['DFBETA'], 4)} "
-                    f"| {', '.join(flags)} |"
+                    f"> ✅ **No influential observations** — "
+                    f"{n_subj} subjects × {n_params} parameters checked, none flagged.\n"
+                )
+            else:
+                lines.append(
+                    f"> ⚠️  **{n_flagged_subj} / {n_subj} subject(s) flagged** across "
+                    f"{n_params} parameters — see subject summary below.\n"
+                )
+
+            # Per-subject summary table (one row per subject)
+            lines.append("**Per-subject influence summary:**\n")
+            lines.append("| Subject | Cook's D (max) | Cook's D flags | DFBETA flags | Verdict |")
+            lines.append("|---|---|---|---|---|")
+
+            for subj_id in sorted(inf_sub["Subject_ID"].unique()):
+                subj_rows   = inf_sub[inf_sub["Subject_ID"] == subj_id]
+                max_cooksd  = subj_rows["CooksD"].max()
+                n_cd_flags  = int(subj_rows["CooksD_Flagged"].sum())
+                n_db_flags  = int(subj_rows["DFBETA_Flagged"].sum())
+                any_flagged = n_cd_flags > 0 or n_db_flags > 0
+                verdict     = "⚠️  Influential" if any_flagged else "✅ OK"
+                lines.append(
+                    f"| S{int(subj_id):02d} "
+                    f"| {_fmt_float(max_cooksd, 4)} "
+                    f"| {n_cd_flags} "
+                    f"| {n_db_flags} "
+                    f"| {verdict} |"
                 )
             lines.append("")
-        else:
-            lines.append("> ✅ No influential observations flagged.\n")
+
+            # Parameter-level detail — collapsed, shown only when flags exist
+            flagged_all = pd.concat([cooksd_flag, dfbeta_flag]).drop_duplicates()
+            if not flagged_all.empty:
+                lines.append(
+                    "<details><summary>Parameter-level detail (flagged rows only)</summary>\n"
+                )
+                lines.append("| Subject | Parameter | Cook's D | DFBETA | Flags |")
+                lines.append("|---|---|---|---|---|")
+                for _, r in flagged_all.sort_values(["Subject_ID", "Parameter"]).iterrows():
+                    flags = []
+                    if r.get("CooksD_Flagged"): flags.append("CooksD")
+                    if r.get("DFBETA_Flagged"): flags.append("DFBETA")
+                    lines.append(
+                        f"| S{int(r['Subject_ID']):02d} "
+                        f"| {_clean_param(r['Parameter'])} "
+                        f"| {_fmt_float(r['CooksD'], 4)} "
+                        f"| {_fmt_float(r['DFBETA'], 4)} "
+                        f"| {', '.join(flags)} |"
+                    )
+                lines.append("\n</details>\n")
 
     return "\n".join(lines)
+
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -951,40 +1281,19 @@ def _dv_to_cbpa_keys(dv: str) -> tuple[str | None, str | None, str | None]:
 
 
 def _section_cbpa(hyp: str, dv: str, cbpa: pd.DataFrame) -> str:
-    """
-    Section III — Where and when does it occur?
-
-    Filters the CBPA frame in three successive steps to scope results precisely
-    to the current DV without showing clusters from the wrong muscle or band:
-
-      1. Hypothesis prefix (H1, H2, …)
-      2. modality column  (CMC / PSD)  and  freq_band column  (beta, gamma, …)
-      3. Muscle substring in hypothesis label (Flexor / Extensor), where present.
-         Max vs Mean is not distinguished — CBPA operates on the full time-series.
-
-    If narrowing produces an empty set, an explicit warning is emitted rather
-    than silently falling back to a broader match.
-
-    Parameters
-    ----------
-    hyp : str
-    dv : str
-        Used to derive (modality, freq_band, muscle) via _dv_to_cbpa_keys.
-    cbpa : pd.DataFrame
-        Full CBPA cluster frame.
-    """
     lines = ["### III. Spatio-Temporal Localisation (CBPA)\n"]
 
-    hyp_prefix = _hypothesis_prefix(hyp)
+    if cbpa.empty:
+        lines.append("> ⚠️  CBPA frame is empty — not yet run for this pipeline.\n")
+        return "\n".join(lines)
 
-    # Step 1 — filter by hypothesis prefix
+    hyp_prefix = _hypothesis_prefix(hyp)
     cbpa_hyp = cbpa[cbpa["hypothesis"].apply(_hypothesis_prefix) == hyp_prefix].copy()
 
     if cbpa_hyp.empty:
         lines.append("> No CBPA results found for this hypothesis.\n")
         return "\n".join(lines)
 
-    # Step 2 — narrow by modality, freq_band (columns), and muscle (hypothesis label)
     modality_key, band_key, muscle_key = _dv_to_cbpa_keys(dv)
 
     if modality_key is not None or band_key is not None or muscle_key is not None:
@@ -993,14 +1302,12 @@ def _section_cbpa(hyp: str, dv: str, cbpa: pd.DataFrame) -> str:
             mask &= cbpa_hyp["modality"].str.upper() == modality_key.upper()
         if band_key is not None:
             mask &= cbpa_hyp["freq_band"].str.lower() == band_key.lower()
-        # Muscle is encoded in the hypothesis label string for H1 CMC DVs
         if muscle_key is not None:
             mask &= cbpa_hyp["hypothesis"].str.contains(muscle_key, case=False)
 
         if mask.any():
             cbpa_sub = cbpa_hyp[mask].copy()
         else:
-            # CBPA was not run for this exact modality / band / muscle combination
             other_combos = (
                 cbpa_hyp[["modality", "freq_band"]]
                 .drop_duplicates()
@@ -1016,8 +1323,19 @@ def _section_cbpa(hyp: str, dv: str, cbpa: pd.DataFrame) -> str:
             )
             return "\n".join(lines)
     else:
-        # Unrecognised DV pattern — fall back to hypothesis-only
         cbpa_sub = cbpa_hyp.copy()
+
+    # Detect axis column name and display label — phase vs clock time
+    # Prefer phase_deg columns when present (phase-normalised CMC runs);
+    # fall back to time_start_s / time_end_s for clock-time runs.
+    if "phase_deg_start" in cbpa_sub.columns:
+        axis_start_col = "phase_deg_start"
+        axis_end_col   = "phase_deg_end"
+        axis_label     = "Phase span (°)"
+    else:
+        axis_start_col = "time_start_s"
+        axis_end_col   = "time_end_s"
+        axis_label     = "Time span (s)"
 
     sig_clusters = cbpa_sub[cbpa_sub["significant"] == True]
     lines.append(
@@ -1034,7 +1352,7 @@ def _section_cbpa(hyp: str, dv: str, cbpa: pd.DataFrame) -> str:
         top = cbpa_sub.nsmallest(3, "p_value")
         if not top.empty:
             lines.append("**Strongest non-significant clusters (exploratory):**\n")
-            lines.append("| Contrast | Modality | Band | Cluster | p | peak-t | Time (s) | Channels |")
+            lines.append(f"| Contrast | Modality | Band | Cluster | p | peak-t | {axis_label} | Channels |")
             lines.append("|---|---|---|---|---|---|---|---|")
             for _, r in top.iterrows():
                 lines.append(
@@ -1043,7 +1361,7 @@ def _section_cbpa(hyp: str, dv: str, cbpa: pd.DataFrame) -> str:
                     f"| #{int(r['cluster_index'])} "
                     f"| {_fmt_p(r['p_value'])} "
                     f"| {_fmt_float(r['peak_t'], 2)} "
-                    f"| {_fmt_float(r['time_start_s'], 2)}–{_fmt_float(r['time_end_s'], 2)} "
+                    f"| {_fmt_float(r[axis_start_col], 2)}–{_fmt_float(r[axis_end_col], 2)} "
                     f"| {r['channels']} |"
                 )
             lines.append("")
@@ -1053,7 +1371,7 @@ def _section_cbpa(hyp: str, dv: str, cbpa: pd.DataFrame) -> str:
         ["condition_column", "condition_A", "condition_B", "modality", "freq_band"]
     ):
         lines.append(f"**{cA} vs {cB}  ({cond_col}) | {mod} {band}**\n")
-        lines.append("| Cluster | p | peak-t | t-thresh | Time span (s) | N ch | Channels |")
+        lines.append(f"| Cluster | p | peak-t | t-thresh | {axis_label} | N ch | Channels |")
         lines.append("|---|---|---|---|---|---|---|")
         for _, r in grp.sort_values("p_value").iterrows():
             lines.append(
@@ -1061,13 +1379,14 @@ def _section_cbpa(hyp: str, dv: str, cbpa: pd.DataFrame) -> str:
                 f"| {_fmt_p(r['p_value'])} "
                 f"| {_fmt_float(r['peak_t'], 3)} "
                 f"| {_fmt_float(r['t_thresh'], 3)} "
-                f"| {_fmt_float(r['time_start_s'], 3)}–{_fmt_float(r['time_end_s'], 3)} "
+                f"| {_fmt_float(r[axis_start_col], 3)}–{_fmt_float(r[axis_end_col], 3)} "
                 f"| {int(r['n_channels'])} "
                 f"| {r['channels']} |"
             )
         lines.append("")
 
     return "\n".join(lines)
+
 
 
 
@@ -1081,23 +1400,14 @@ def _section_heterogeneity(
     dv: str,
     subj: pd.DataFrame,
     influence: pd.DataFrame,
+    cfg: _ReportConfig,
 ) -> str:
-    """
-    Section IV — Population heterogeneity.
-
-    Responder rates and per-subject normalised contrasts at Level 1
-    (falls back to any available level).  Cross-references influence flags.
-
-    Parameters
-    ----------
-    hyp : str
-    dv : str
-    subj : pd.DataFrame
-        Subject heterogeneity frame, already filtered to hyp × dv.
-    influence : pd.DataFrame
-        Full influence frame.
-    """
     lines = ["### IV. Population Heterogeneity\n"]
+
+    # Guard: frame is empty when subject heterogeneity has not been computed
+    if subj.empty:
+        lines.append("> ⚠️  Subject heterogeneity frame is empty — not applicable for this pipeline.\n")
+        return "\n".join(lines)
 
     sub = subj[subj["Comparison_Level"] == "lvl_1"].copy()
     if sub.empty:
@@ -1154,7 +1464,7 @@ def _section_heterogeneity(
     # Cross-reference influence flags
     inf_flagged = influence[
         (influence["Dependent_Variable"] == dv)
-        & (influence["N_Segments"] == PRIMARY_N_SEGMENTS)
+        & (influence["N_Segments"] == cfg.primary_n_segments)
         & ((influence["CooksD_Flagged"] == True) | (influence["DFBETA_Flagged"] == True))
     ]
     flagged_ids = set(inf_flagged["Subject_ID"].unique())
@@ -1172,7 +1482,8 @@ def _section_heterogeneity(
 #  SECTION V — DIAGNOSTICS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _section_diagnostics(hyp: str, dv: str, diag: pd.DataFrame) -> str:
+def _section_diagnostics(hyp: str, dv: str, diag: pd.DataFrame,
+    cfg: _ReportConfig,) -> str:
     """
     Section V — Model diagnostics.
 
@@ -1192,7 +1503,7 @@ def _section_diagnostics(hyp: str, dv: str, diag: pd.DataFrame) -> str:
         lines.append("> ⚠️  No diagnostics found.\n")
         return "\n".join(lines)
 
-    sub = diag[diag["Model_Type"].isin(_active_models())].copy()
+    sub = diag[diag["Model_Type"].isin(_active_models(cfg))].copy()
     sub["_Level"] = sub["Comparison_Level"].apply(_short_level)
 
     lines.append(
@@ -1246,11 +1557,15 @@ def generate_statistical_report(
     influence_measures_frame:     pd.DataFrame,
     subject_heterogeneity_frame:  pd.DataFrame,
     cbpa_results_frame:           pd.DataFrame,
-    output_dir:                   Path  = REPORT_OUTPUT_DIR,
-    primary_n_segments:           int   = PRIMARY_N_SEGMENTS,
-    include_ols:                  bool  = False,
-    target_power:                 float = 0.80,
-    level_definitions:            list[dict] | None = None,
+    output_dir:                   Path,
+    primary_n_segments:           int        = 1,
+    resolution_segments:          list[int]  = (1, 5, 20),
+    alpha_adjusted:               float = 0.05,
+        include_ols: bool = False,
+        target_power: float = 0.80,
+        level_definitions: list[dict] | None = None,
+    hypothesis_groups:   list[dict] | None = None,
+        file_identifier_suffix: str | None = None,
 ) -> Path:
     """
     Generate a Markdown report from the six statistical output frames.
@@ -1267,9 +1582,13 @@ def generate_statistical_report(
         Directory where the .md file is saved.
     primary_n_segments : int
         Canonical time resolution for Sections I–IV.
+    resolution_segments : list[int]
+        All resolutions checked in cross-resolution stability (Section I.b).
+    alpha_adjusted : float
+        Family-wise significance threshold applied to p_value_adjusted.
     include_ols : bool
-        If True, OLS rows appear alongside LME in Sections I, I.b, and V
-        (diagnostics). When False, only LME rows are shown throughout.
+        If True, OLS rows appear alongside LME in Sections I, I.b, and V.
+        When False, only LME rows are shown throughout.
     target_power : float
         Minimum Power_at_Observed_Effect to label an effect "well-powered"
         in the overview table and Section II. Default 0.80.
@@ -1283,20 +1602,24 @@ def generate_statistical_report(
     Path
         Path to the saved report file.
     """
-    # Propagate call-time settings to module globals used by all section builders
-    global PRIMARY_N_SEGMENTS, INCLUDE_OLS, TARGET_POWER
-    PRIMARY_N_SEGMENTS = primary_n_segments
-    INCLUDE_OLS        = include_ols
-    TARGET_POWER       = target_power
+    # Build the immutable per-call config — no global mutation
+    cfg = _ReportConfig(
+        primary_n_segments  = primary_n_segments,
+        resolution_segments = list(resolution_segments),
+        alpha_adjusted      = alpha_adjusted,
+        include_ols         = include_ols,
+        target_power        = target_power,
+    )
 
     # Print pipeline coverage gaps to stdout before writing the report
     _print_pipeline_recommendations(
-        res=omnibus_results_frame,
-        power=power_analysis_results_frame,
-        influence=influence_measures_frame,
-        cbpa=cbpa_results_frame,
-        alpha=ALPHA_ADJUSTED,
-        primary_n_segments=primary_n_segments,
+        res                 = omnibus_results_frame,
+        power               = power_analysis_results_frame,
+        influence           = influence_measures_frame,
+        cbpa                = cbpa_results_frame,
+        alpha               = cfg.alpha_adjusted,
+        primary_n_segments  = cfg.primary_n_segments,
+        resolution_segments = cfg.resolution_segments,
     )
 
     frames = {
@@ -1312,9 +1635,9 @@ def generate_statistical_report(
     lines: list[str] = [
         "# Statistical Analysis Report",
         f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*  ",
-        f"*Primary resolution: {primary_n_segments}-seg | "
-        f"Models: {', '.join(_active_models())} | "
-        f"α = {ALPHA_ADJUSTED} | target power = {target_power:.0%}*\n",
+        f"*Primary resolution: {cfg.primary_n_segments}-seg | "
+        f"Models: {', '.join(_active_models(cfg))} | "
+        f"α = {cfg.alpha_adjusted} | target power = {cfg.target_power:.0%}*\n",
         "---\n",
     ]
 
@@ -1326,7 +1649,7 @@ def generate_statistical_report(
     else:
         lines.append("> ✅ All six frames validated — no missing columns.\n\n---\n")
 
-    # describe comparison levels:
+    # Describe comparison levels
     if level_definitions is not None:
         lines.append(_section_level_definitions(level_definitions))
 
@@ -1335,10 +1658,20 @@ def generate_statistical_report(
         _section_overview_table(
             omnibus_results_frame,
             power_analysis_results_frame,
-            ALPHA_ADJUSTED,
-            target_power,
+            cfg,
         )
     )
+
+    if hypothesis_groups is not None:
+        lines.append(
+            _section_predictor_quality(
+                hypothesis_groups=hypothesis_groups,
+                res=omnibus_results_frame,
+                power=power_analysis_results_frame,
+                influence=influence_measures_frame,
+                cfg=cfg,
+            )
+        )
 
     # Per-hypothesis × DV blocks
     hyp_dv_pairs = (
@@ -1362,31 +1695,37 @@ def generate_statistical_report(
             (omnibus_diagnostics_frame["Hypothesis"] == hyp)
             & (omnibus_diagnostics_frame["Dependent_Variable"] == dv)
         ]
-        subj_sub = subject_heterogeneity_frame[
-            (subject_heterogeneity_frame["Hypothesis"] == hyp)
-            & (subject_heterogeneity_frame["Dependent_Variable"] == dv)
-        ]
+        # Guard: subject_heterogeneity_frame may be an empty pd.DataFrame()
+        # with no columns when not applicable for this pipeline
+        subj_sub = (
+            subject_heterogeneity_frame[
+                (subject_heterogeneity_frame["Hypothesis"] == hyp)
+                & (subject_heterogeneity_frame["Dependent_Variable"] == dv)
+                ]
+            if not subject_heterogeneity_frame.empty
+            else pd.DataFrame()
+        )
 
-        lines.append(_section_findings(hyp, dv, res_sub, ALPHA_ADJUSTED))
-        lines.append(_section_cross_resolution(hyp, dv, res_sub, ALPHA_ADJUSTED))
+        lines.append(_section_findings(hyp, dv, res_sub, cfg))
+        lines.append(_section_cross_resolution(hyp, dv, res_sub, cfg))
         lines.append(
             _section_trust(
                 hyp, dv, res_sub,
                 power_analysis_results_frame,
                 influence_measures_frame,
-                ALPHA_ADJUSTED,
-                target_power,
+                cfg,
             )
         )
         lines.append(_section_cbpa(hyp, dv, cbpa_results_frame))
-        lines.append(_section_heterogeneity(hyp, dv, subj_sub, influence_measures_frame))
-        lines.append(_section_diagnostics(hyp, dv, diag_sub))
+        lines.append(_section_heterogeneity(hyp, dv, subj_sub, influence_measures_frame, cfg))
+        lines.append(_section_diagnostics(hyp, dv, diag_sub, cfg))
 
     filemgmt.assert_dir(output_dir)
-    out_path = output_dir / filemgmt.file_title("Statistical Report", ".md")
+    out_path = output_dir / filemgmt.file_title(f"Statistical Report{f'_{file_identifier_suffix}' if file_identifier_suffix is not None else ''}", ".md")
     out_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"\n✅ Report written → {out_path}")
     return out_path
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1394,41 +1733,93 @@ def generate_statistical_report(
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    from src.statistics_omnibus_testing_workflow import fetch_level_definitions
 
-    omnibus_results_frame = pd.read_csv(
-        filemgmt.most_recent_file(OMNIBUS_TESTING_RESULTS, ".csv",
-                                  ["All Time Resolutions Results"])
-    )
-    omnibus_diagnostics_frame = pd.read_csv(
-        filemgmt.most_recent_file(OMNIBUS_TESTING_RESULTS, ".csv",
-                                  ["All Time Resolutions Diagnostics"])
-    )
-    power_analysis_results_frame = pd.read_csv(
-        filemgmt.most_recent_file(OMNIBUS_TESTING_RESULTS, ".csv",
-                                  ["Power Analysis MDE Summary"])
-    )
-    influence_measures_frame = pd.read_csv(
-        filemgmt.most_recent_file(OMNIBUS_TESTING_RESULTS, ".csv",
-                                  ["Influence Analysis Combined"])
-    )
-    subject_heterogeneity_frame = pd.read_csv(
-        filemgmt.most_recent_file(OMNIBUS_TESTING_RESULTS, ".csv",
-                                  ["Subject Effect Summary Combined"])
-    )
-    cbpa_results_frame = pd.read_csv(
-        filemgmt.most_recent_file(POST_HOC_TESTING_RESULTS, ".csv",
-                                  ["CBPA Combined Cluster Summary"])
-    )
+    def _load_csv(directory: Path, suffixes: list[str]) -> pd.DataFrame:
+        """
+        Attempt to load the most recent CSV matching suffixes from directory.
+
+        Returns an empty DataFrame and prints a warning if no matching file
+        is found or the read fails, so the report can still be generated with
+        validate_frames() emitting the appropriate warnings.
+
+        Parameters
+        ----------
+        directory : Path
+            Directory passed to filemgmt.most_recent_file.
+        suffixes : list[str]
+            Filename keyword filters passed to filemgmt.most_recent_file.
+        """
+        try:
+            path = filemgmt.most_recent_file(directory, ".csv", suffixes)
+            return pd.read_csv(path)
+        except (ValueError, FileNotFoundError, Exception) as e:
+            print(f"  ⚠️  Could not load {suffixes} from {directory}: {type(e).__name__}: {e}")
+            return pd.DataFrame()
+
+    ########## RESEARCH QUESTION A ##########
+    from src.statistics_RQ_A_omnibus_testing_workflow import fetch_level_definitions
+
+    RQ_A_DIR             = Path().resolve().parent / "output" / "statistics_RQ_A"
+    RQ_A_OMNIBUS_RESULTS = RQ_A_DIR / "omnibus_testing"
+    RQ_A_POST_HOC_RESULTS = RQ_A_DIR / "post_hoc_testing"
+    RQ_A_REPORT_DIR      = RQ_A_DIR / "report"
 
     generate_statistical_report(
-        omnibus_results_frame=omnibus_results_frame,
-        omnibus_diagnostics_frame=omnibus_diagnostics_frame,
-        power_analysis_results_frame=power_analysis_results_frame,
-        influence_measures_frame=influence_measures_frame,
-        subject_heterogeneity_frame=subject_heterogeneity_frame,
-        cbpa_results_frame=cbpa_results_frame,
-        include_ols=False,
+        omnibus_results_frame        = _load_csv(RQ_A_OMNIBUS_RESULTS,  ["All Time Resolutions Results"]),
+        omnibus_diagnostics_frame    = _load_csv(RQ_A_OMNIBUS_RESULTS,  ["All Time Resolutions Diagnostics"]),
+        power_analysis_results_frame = _load_csv(RQ_A_OMNIBUS_RESULTS,  ["Power Analysis MDE Summary"]),
+        influence_measures_frame     = _load_csv(RQ_A_OMNIBUS_RESULTS,  ["Influence Analysis Combined"]),
+        subject_heterogeneity_frame  = _load_csv(RQ_A_OMNIBUS_RESULTS,  ["Subject Effect Summary Combined"]),
+        cbpa_results_frame           = _load_csv(RQ_A_POST_HOC_RESULTS, ["CBPA Combined Cluster Summary"]),
+        output_dir           = RQ_A_REPORT_DIR,
+        file_identifier_suffix='RQ_A',
+
+        primary_n_segments   = 1,
+        resolution_segments  = [1, 5, 10],
+
+        alpha_adjusted       = 0.05,
+        include_ols          = False,
         target_power=0.80,
+
         level_definitions=fetch_level_definitions(multi_segments_per_trial=True),
+
+        hypothesis_groups=[
+            {
+                "label": "H1 – CMC Music Effects (all DVs)",
+                "hypotheses": [h for h in _load_csv(RQ_A_OMNIBUS_RESULTS,  ["All Time Resolutions Results"])["Hypothesis"].unique()
+                               if h.startswith("H1")],
+            },
+        ],
+    )
+
+    ########## RESEARCH QUESTION B ##########
+    from src.statistics_RQ_B_omnibus_testing_workflow import fetch_accuracy_level_definitions
+
+    RQ_B_DIR             = Path().resolve().parent / "output" / "statistics_RQ_B"
+    RQ_B_OMNIBUS_RESULTS = RQ_B_DIR / "omnibus_testing"
+    RQ_B_REPORT_DIR      = RQ_B_DIR / "report"
+
+    # Subject heterogeneity: not applicable (no categorical condition contrasts in RQ2)
+    # CBPA: not applicable (non-spatial pipeline only)
+    generate_statistical_report(
+        omnibus_results_frame        = _load_csv(RQ_B_OMNIBUS_RESULTS, ["RQ2 All Time Resolutions Results"]),
+        omnibus_diagnostics_frame    = _load_csv(RQ_B_OMNIBUS_RESULTS, ["RQ2 All Time Resolutions Diagnostics"]),
+        power_analysis_results_frame = _load_csv(RQ_B_OMNIBUS_RESULTS, ["Power Analysis MDE Summary"]),
+        influence_measures_frame     = _load_csv(RQ_B_OMNIBUS_RESULTS, ["Influence Analysis Combined"]),
+        subject_heterogeneity_frame  = pd.DataFrame(),
+        cbpa_results_frame           = pd.DataFrame(),
+
+        output_dir           = RQ_B_REPORT_DIR,
+        file_identifier_suffix='RQ_B',
+
+        primary_n_segments   = 5,
+        resolution_segments  = [2, 5, 10],
+
+        alpha_adjusted       = 0.05,
+        include_ols          = False,
+        target_power         = 0.80,
+
+        level_definitions    = fetch_accuracy_level_definitions(
+            include_emg_psd=True, multi_segments_per_trial=True
+        ),
     )
