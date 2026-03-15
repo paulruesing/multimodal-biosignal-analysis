@@ -292,62 +292,6 @@ def apply_window_operator(
     return result
 
 
-def old_only_pandas_target_apply_window_operator(
-        window_time_steps: np.ndarray,
-        is_time_center: bool,
-        window_size: float,
-        target_series: pd.Series,
-        operation: Literal['min', 'max', 'mean', 'median', 'mode', 'std'] = 'mean',
-) -> list:
-    """ Target series needs to have time index (seconds or absolute). """
-
-    # convert data to numeric only for non-mode operations:
-    if operation != 'mode' and target_series.dtype == 'object':
-        target_series = pd.to_numeric(target_series, errors='coerce')
-
-    # derive time in seconds from time index:
-    if isinstance(target_series.index, pd.DatetimeIndex):
-        time_seconds = (target_series.index - target_series.index[0]).total_seconds().values
-    else:
-        time_seconds = target_series.index.values.astype(float)
-
-    # create window boundaries:
-    if is_time_center:
-        starts = window_time_steps - window_size / 2
-        ends = window_time_steps + window_size / 2
-    else:
-        starts = window_time_steps
-        ends = window_time_steps + window_size
-
-    # For each time point, find which window it belongs to
-    window_indices = np.full(len(time_seconds), np.nan, dtype=float)
-
-    for i, (start, end) in enumerate(zip(starts, ends)):
-        mask = (time_seconds >= start) & (time_seconds < end)
-        window_indices[mask] = i
-
-    # Create dataframe with both the data and window indices
-    df_with_windows = pd.DataFrame({
-        'data': target_series.values,
-        '_window': window_indices
-    })
-
-    # Filter out NaN groups BEFORE groupby
-    df_with_windows_filtered = df_with_windows[df_with_windows['_window'].notna()]
-    grouped = df_with_windows_filtered.groupby('_window', sort=False)['data']
-
-    # Handle mode separately, use agg for others
-    if operation == 'mode':
-        result = grouped.apply(lambda x: x.mode()[0] if len(x.mode()) > 0 else np.nan)
-    else:
-        result = grouped.agg(operation)
-
-    all_windows = pd.RangeIndex(len(window_time_steps), name='_window')
-    result = result.reindex(all_windows)  # ensures all windows present
-    result = result.fillna(0)  # or ffill(), but now consistent
-    return result.tolist()
-
-
 def interpolate_per_window(
         window_time_steps: np.ndarray,
         target_series: pd.Series,
