@@ -85,7 +85,7 @@ class BiosignalPreprocessor:
     mne_raw_data : mne.io.Raw
         Raw input data as MNE object.
     """
-    def __init__(self,
+    def  __init__(self,
                  np_input_data: np.ndarray,  # shape: (timesteps, channels)
                  sampling_freq: int,  # Hz
                  modality: Literal['eeg', 'emg'],

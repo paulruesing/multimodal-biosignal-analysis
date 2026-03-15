@@ -34,7 +34,7 @@ if __name__=="__main__":
 
     ### WORKFLOW CONTROL
     # select subject:
-    for subject_ind in range(11):  # only new
+    for subject_ind in range(12):  # only new
         handedness: Literal['left', 'right'] = 'right' if subject_ind != 3 else 'left'
 
 
@@ -44,7 +44,7 @@ if __name__=="__main__":
 
 
         # PSD computation:
-        do_compute_psd: bool = False  # todo: change
+        do_compute_psd: bool = False
         fetch_precomputed_psd: bool = False
         psd_window_size_sec: float = .25  # -> 4 Hz resolution
         save_psd: bool = True
@@ -52,7 +52,7 @@ if __name__=="__main__":
 
 
         # CMC computation:
-        do_compute_cmc: bool = True
+        do_compute_cmc: bool = False
         only_extensor: bool = False
         fetch_precomputed_cmc: bool = False
         cmc_eeg_channel_subset = [  # will be mirrored for left-handed subject
@@ -71,7 +71,7 @@ if __name__=="__main__":
 
 
         # Compute Heart Rate (HR), HR Variability and Task-wise Scaled Force -> aka. "Enriched Serial Frame"
-        compute_enriched_serial_frame: bool = False  # todo: change!
+        compute_enriched_serial_frame: bool = True
         heart_refractory_period: str = '300ms'
         min_bpm: float = 30.0
         max_bpm: float = 200.0
@@ -445,14 +445,18 @@ if __name__=="__main__":
             # keep GSR:
             gsr_series = within_qtc_serial_frame['gsr']
 
+            # keep absolute force:
+            absolute_force_series = within_qtc_serial_frame['fsr'].rename('Unscaled Force [% MVC]')
+
             # merge to dataframe:
             bpm_series = data_analysis.make_timezone_aware(bpm_series)
             hrv_series = data_analysis.make_timezone_aware(hrv_series)
             scaled_force_series = data_analysis.make_timezone_aware(scaled_force_series)
             gsr_series = data_analysis.make_timezone_aware(gsr_series)
+            absolute_force_series = data_analysis.make_timezone_aware(absolute_force_series)
 
             enriched_serial_df = pd.concat(
-                [bpm_series, hrv_series, scaled_force_series, gsr_series],
+                [bpm_series, hrv_series, scaled_force_series, gsr_series, absolute_force_series],
                 axis=1  # concatenate as columns
             )
 

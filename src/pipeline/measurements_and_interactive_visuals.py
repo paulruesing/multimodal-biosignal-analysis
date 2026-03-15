@@ -2124,7 +2124,7 @@ def qtc_control_master_view(shared_dict: dict[str, float],  # shared memory from
                             shared_song_info_dict['Category'] = music_master.current_category
                             shared_song_info_dict['Category Index'] = music_master.category_counter_dict[music_master.current_category]
 
-                except ValueError:  # no music playing currently
+                except (ValueError, RuntimeError):  # no music playing currently
                     song_info_text.set_text("No track playing currently.")
 
             global current_rating_result

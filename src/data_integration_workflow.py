@@ -28,7 +28,7 @@ if __name__=="__main__":
     EXPERIMENT_DATA = ROOT / "data" / "experiment_results"
 
     ### WORKFLOW CONTROL
-    subject_ind = 10
+    subject_ind = 11
     save_result: bool = True  # only set to True if manual adjustments finalized
 
     # experiment results import behaviour:
@@ -310,6 +310,22 @@ if __name__=="__main__":
         # idle state:
         enriched_log_frame.loc[pd.Timestamp("2026-02-19 19:20:00"):, 'Phase'] = 'Idle State'
 
+
+    elif subject_ind == 11:
+        # song start wasn't immediately registered:
+        log_frame = data_integration.remove_single_row_by_timestamp(log_frame, "2026-03-02 20:35:03.293652")
+        log_frame = data_integration.remove_single_row_by_timestamp(log_frame, "2026-03-02 20:48:04.561328")
+        log_frame = data_integration.remove_single_row_by_timestamp(log_frame, "2026-03-02 21:01:32.201205")
+
+        enriched_log_frame = data_integration.prepare_log_frame(log_frame, )
+
+        # mark some trials:
+        enriched_log_frame = data_integration.annotate_trial(enriched_log_frame,
+                                                             "Lights in the Room Turned Off but Task was Fine",
+                                                             False, trial_id=8)
+
+        # idle state:
+        enriched_log_frame.loc[pd.Timestamp("2026-03-03 21:10:00"):, 'Phase'] = 'Idle State'
 
 
     task_start_ends = data_integration.get_all_task_start_ends(enriched_log_frame, 'list')
