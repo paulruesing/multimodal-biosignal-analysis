@@ -1969,6 +1969,30 @@ def run_influence_analysis(
                  Subject_ID, DFBETA, DFBETA_Flagged, CooksD, CooksD_Flagged,
                  CooksD_Threshold.
     """
+    # --- Validate config homogeneity before any computation ---
+    unique_n_segments = {n for _, _, n in configs}
+    unique_comp_lvls = {lvl for _, lvl, _ in configs}
+
+    # Hard assertion: mixing segment counts produces a CSV that the report
+    # only partially uses — the caller should restrict to primary_n_segments.
+    if len(unique_n_segments) > 1:
+        raise ValueError(
+            f"run_influence_analysis received configs with multiple N_Segments values: "
+            f"{sorted(unique_n_segments)}. "
+            f"Restrict all configs to a single segment count (your primary resolution) "
+            f"so the combined influence CSV is unambiguous."
+        )
+
+    # Warning: multiple comparison levels are valid per-model but are currently
+    # merged without a Level column in _section_trust — review report output carefully.
+    if len(unique_comp_lvls) > 1:
+        print(
+            f"  ⚠️  run_influence_analysis: configs span {len(unique_comp_lvls)} comparison "
+            f"levels ({sorted(unique_comp_lvls)}). Results will be merged into one CSV. "
+            f"Ensure _section_trust in the report distinguishes levels, or restrict to "
+            f"one level per call."
+        )
+
     all_rows: list[dict] = []
 
     for dep_var, comp_lvl, n_segments in configs:
