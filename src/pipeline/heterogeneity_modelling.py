@@ -237,30 +237,56 @@ def _assign_tercile_band(grp: pd.DataFrame) -> pd.Series:
     return scores.apply(lambda s: "High" if s >= t67 else ("Medium" if s >= t33 else "Low"))
 
 
-def build_mi_summary(mi_df: pd.DataFrame, dep_var_col: str = "Dependent_Variable") -> pd.DataFrame:
-    """Add tercile band + moderator candidate flags; return aggregated summary."""
-    mi_df = mi_df.copy()
-    mi_df["MI_Band"] = (
-        mi_df
-        .groupby([dep_var_col, "Level", "Condition", "Target"], group_keys=False)
-        .apply(_assign_tercile_band)
-    )
-    high_features = set(mi_df.loc[mi_df["MI_Band"] == "High", "Feature"].unique())
-    mi_df["Moderator_Candidate"] = mi_df["Feature"].isin(high_features)
+def build_mi_summary(
+    mi_df: pd.DataFrame,
+    min_mi_score: float = 0.05,
+) -> pd.DataFrame:
+    """Pivot MI scores into a (Condition × Target) × Feature matrix.
 
-    summary = (
+    Filters out scores below ``min_mi_score``, takes the max across DVs per
+    cell, and appends a summary column listing features that exceed the
+    threshold in at least one combination.
+    """
+    mi_df = mi_df.copy()
+
+    # ── Apply absolute minimum threshold ─────────────────────────────────────
+    mi_df = mi_df.loc[mi_df["MI_Score"] >= min_mi_score]
+    if mi_df.empty:
+        warnings.warn(f"  [MI Summary] No scores >= {min_mi_score} — returning empty frame.")
+        return pd.DataFrame()
+
+    # ── Aggregate: max MI score across DVs per (Condition, Target, Feature) ──
+    agg = (
         mi_df
-        .groupby(["Feature", "Level", "Condition", "Target"])
-        .apply(lambda g: pd.Series({
-            "Max_MI_Score": g["MI_Score"].max(),
-            "Band_at_Max": g.loc[g["MI_Score"].idxmax(), "MI_Band"],
-            "N_High_across_DVs": int((g["MI_Band"] == "High").sum()),
-            "Moderator_Candidate": g["Moderator_Candidate"].any(),
-        }))
-        .reset_index()
-        .sort_values(["Level", "Condition", "Max_MI_Score"], ascending=[True, True, False])
+        .groupby(["Condition", "Target", "Feature"], as_index=False)["MI_Score"]
+        .max()
     )
-    return summary
+
+    # ── Pivot: rows = (Condition, Target), columns = Feature ─────────────────
+    pivoted = agg.pivot_table(
+        index=["Condition", "Target"],
+        columns="Feature",
+        values="MI_Score",
+        aggfunc="max",
+    ).round(3)
+    pivoted.columns.name = None
+    pivoted = pivoted.reset_index()
+
+    # ── Sort rows: Condition alphabetically, Target alphabetically ────────────
+    pivoted = pivoted.sort_values(["Condition", "Target"]).reset_index(drop=True)
+
+    # ── Summary column: features exceeding threshold in this row ─────────────
+    feature_cols = [c for c in pivoted.columns if c not in ("Condition", "Target")]
+    pivoted["Moderating_Candidates"] = pivoted[feature_cols].apply(
+        lambda row: ", ".join(
+            f"{feat} ({val:.2f})"
+            for feat, val in row.items()
+            if pd.notna(val)
+        ),
+        axis=1,
+    )
+
+    return pivoted
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -460,7 +486,59 @@ def run_clustering(
     output_dir: Path,
     subj_col: str = "Subject_ID",
 ) -> tuple[pd.DataFrame, dict[int, float]]:
-    """Fit clustering, save outputs, return (cluster_assign_df, silhouette_scores)."""
+    """Fit Ward-linkage agglomerative clustering and save all outputs.
+
+    Computes a Ward linkage matrix, selects the optimal number of clusters k
+    via silhouette score (see :func:`select_best_k`), fits the final clustering,
+    and delegates figure rendering to :func:`plot_clustering`. Three files are
+    written to ``output_dir``:
+
+    - ``Heterogeneity Subject Clusters`` (.csv) — one row per subject with
+      cluster assignment and all personal attribute columns joined from
+      ``personal_df``. Sorted by cluster label.
+    - ``Heterogeneity Silhouette Scores`` (.csv) — silhouette score for each
+      valid k that met the minimum cluster size constraint.
+    - ``Heterogeneity Combined Clustering`` (.png) — Ward dendrogram +
+      standardised feature heatmap (see :func:`plot_clustering`).
+
+    Parameters
+    ----------
+    combined_pivot : pd.DataFrame
+        Subject × feature matrix produced by :func:`build_combined_pivot`.
+        Rows are subjects (indexed by ``subj_col`` values), columns are
+        standardised heterogeneity features. Must have at least 4 rows and
+        2 columns.
+    personal_df : pd.DataFrame
+        Personal attribute table with one row per subject, used to enrich the
+        cluster assignment output. Must contain ``subj_col``.
+    clustering_measures : list[str]
+        Measure blocks present in ``combined_pivot`` (e.g.
+        ``["contrast", "cooks_d"]``). Passed through to :func:`plot_clustering`
+        for legend construction only — does not affect the clustering itself.
+    dep_vars : list[str]
+        Dependent variable names included in the analysis. Passed through to
+        :func:`plot_clustering` for the figure title only.
+    min_cluster_size : int
+        Minimum number of subjects that every cluster must contain. k values
+        that produce any smaller cluster are excluded from k selection.
+    output_dir : Path
+        Directory to which all three output files are written.
+    subj_col : str, optional
+        Subject identifier column name. Must be present as the index name of
+        ``combined_pivot`` and as a column in ``personal_df``. Default
+        ``"Subject_ID"``.
+
+    Returns
+    -------
+    cluster_df : pd.DataFrame
+        Cluster assignment table sorted by cluster label. Contains ``subj_col``,
+        ``"Cluster"`` (integer label, 0-indexed), and all columns from
+        ``personal_df``.
+    sil_scores : dict[int, float]
+        Silhouette score for each k that passed the minimum cluster size
+        constraint. Empty if no valid k was found (in which case ``best_k``
+        falls back to 2).
+    """
     X = combined_pivot.values
     Z = linkage(X, method="ward", metric="euclidean")
     k_range = range(2, min(6, combined_pivot.shape[0]))
@@ -500,12 +578,19 @@ def plot_moderator_scatters(
     dep_var_col: str = "Dependent_Variable",
 ) -> None:
     """Scatter top-MI moderators against mean normalised contrast, coloured by cluster."""
+    # Derive top moderators: mean score across all (Condition × Target) rows,
+    # ignoring NaN (i.e. below-threshold) cells.
+    feature_cols = [c for c in mi_summary.columns if c not in ("Condition", "Target", "Moderating_Candidates")]
     top_moderators = (
-        mi_summary.loc[mi_summary["Moderator_Candidate"]]
-        .sort_values("Max_MI_Score", ascending=False)
-        ["Feature"].unique()[:top_n]
+        mi_summary[feature_cols]
+        .mean(skipna=True)
+        .dropna()
+        .sort_values(ascending=False)
+        .head(top_n)
+        .index
+        .tolist()
     )
-    print(f"\n  [Scatter] Top moderators: {list(top_moderators)}")
+    print(f"\n  [Scatter] Top moderators: {top_moderators}")
 
     lvl1_cond_var, lvl1_conditions = conditions_to_evaluate["lvl_1"]
     mean_contrast = (
@@ -554,21 +639,126 @@ def run_heterogeneity_modelling(
     output_dir: Path,
     omnibus_results_dir: Path,
     experiment_results_dir: Path,
-    n_subjects: int,
     analyse_mi_for_dfbetas: bool = True,
     alpha_omnibus: float = 0.05,
     subj_col: str = "Subject_ID",
     dep_var_col: str = "Dependent_Variable",
+exclude_subjects: list[int] = [],
 ) -> None:
-    """Run the full heterogeneity pipeline end-to-end."""
+    """Run the full subject-heterogeneity modelling pipeline end-to-end.
+
+    Executes five sequential analysis blocks:
+
+        1. Responder Rate Summary — counts subjects whose normalised contrast
+           exceeds zero (i.e. a positive response) per condition and DV,
+           and saves a tidy summary CSV.
+
+        2. Mutual Information (MI) Analysis — quantifies the association between
+           each personal attribute (e.g. dancing habit, musical skill, age) and
+           three targets: Cook's D influence, per-parameter DFBETA influence, and
+           per-condition normalised contrast / responder flag. Results are saved
+           as a raw long-format CSV and, optionally, as bar-plot figures.
+
+        3. MI Summary with Tercile Ranking — aggregates raw MI scores across DVs,
+           assigns within-group High / Medium / Low tercile bands, and flags
+           features that reach "High" in at least one DV × condition combination
+           as moderator candidates.
+
+        4. Combined Subject Clustering — builds a subject × feature matrix from
+           the selected measure blocks (contrast, DFBETA, and/or Cook's D),
+           standardises each block independently, selects the optimal number of
+           Ward-linkage clusters via silhouette score (subject to a minimum
+           cluster size constraint), and renders a dendrogram + heatmap figure.
+
+        5. Moderator Scatter Plots — for the top-N MI-ranked moderator candidates,
+           plots each moderator against each subject's mean normalised contrast
+           across all level-1 conditions, with points coloured by cluster
+           assignment.
+
+    All intermediate and final outputs are written to `output_dir` with
+    timestamped filenames via `filemgmt.file_title`.
+
+    Parameters
+    ----------
+    dep_vars : list[str]
+        Dependent variable column names to analyse
+        (e.g. ``["CMC_Flexor_mean_beta", "CMC_Extensor_mean_gamma"]``).
+    conditions_to_evaluate : dict[str, tuple[str, list[str]]]
+        Mapping of level key → (condition variable name, list of non-reference
+        condition labels). Example::
+
+            {
+                "lvl_0": ("Music Listening", ["True"]),
+                "lvl_1": ("Category or Silence", ["Happy", "Groovy", "Sad", "Classic"]),
+            }
+
+    clustering_measures : list[str]
+        Subset of ``["contrast", "dfbeta", "cooks_d"]`` — determines which
+        feature blocks are included in the clustering matrix.
+    plot_mi_categories : list[PlotKey]
+        Which MI targets to render as bar plots. Any subset of
+        ``["contrast", "dfbeta", "cooks_d"]``. Pass an empty list to suppress
+        all MI plots.
+    top_n_moderators : int
+        Number of highest-MI-ranked moderator candidates to carry into the
+        cluster → scatter plots (Block 5).
+    min_cluster_size : int
+        Minimum number of subjects required in every cluster. Solutions with
+        any cluster smaller than this are skipped during k selection.
+    output_dir : Path
+        Directory for all output files (figures and CSVs).
+    omnibus_results_dir : Path
+        Directory containing the pre-computed omnibus testing CSVs:
+        ``"Influence Analysis Combined"``, ``"All Time Resolutions Results"``,
+        and ``"Subject Effect Summary Combined"``.
+    experiment_results_dir : Path
+        Root directory of per-subject experiment folders, used to load personal
+        attribute data via ``data_integration.fetch_personal_data``.
+    n_subjects : int
+        Total number of subjects; controls the range of subject folders loaded.
+    analyse_mi_for_dfbetas : bool, optional
+        If ``True`` (default), runs MI analysis for each significant LME
+        parameter's DFBETA values in addition to Cook's D.
+    alpha_omnibus : float, optional
+        Significance threshold applied when selecting parameters for DFBETA MI
+        analysis and for building the clustering feature matrix. Default 0.05.
+    subj_col : str, optional
+        Subject identifier column name. Default ``"Subject_ID"``.
+    dep_var_col : str, optional
+        Dependent variable column name. Default ``"Dependent_Variable"``.
+
+    Returns
+    -------
+    None
+        All outputs are written to disk; nothing is returned.
+
+    Raises
+    ------
+    FileNotFoundError
+        If any of the required CSVs are absent from ``omnibus_results_dir``.
+    warnings.warn
+        Emitted (rather than raised) when clustering is skipped due to
+        insufficient data, or when a scatter moderator has too few valid rows.
+    """
     import src.pipeline.data_integration as data_integration
 
     # ── Load data ─────────────────────────────────────────────────────────────
+    subject_dirs = sorted(experiment_results_dir.glob("subject_*"))
+    subject_ids = [int(d.name.split("_")[1]) for d in subject_dirs]
+
+    # Apply exclusions
+    subject_dirs = [d for d, i in zip(subject_dirs, subject_ids) if i not in exclude_subjects]
+    subject_ids = [i for i in subject_ids if i not in exclude_subjects]
+
+    if exclude_subjects:
+        print(f"\n  [Exclusions] Skipping subjects: {exclude_subjects}")
+
     personal_df = pd.DataFrame([
-        data_integration.fetch_personal_data(experiment_results_dir / f"subject_{i:02d}")
-        for i in range(n_subjects)
+        data_integration.fetch_personal_data(d) for d in subject_dirs
     ])
-    personal_df.insert(0, subj_col, list(range(n_subjects)))
+    personal_df.insert(0, subj_col, subject_ids)
+
+    # binary flags:
     personal_df["Is_Right-handed"] = (personal_df["Dominant hand"] == "Right").astype(int)
     personal_df["Is_Male"] = (personal_df["Gender"] == "Male").astype(int)
 
@@ -602,9 +792,8 @@ def run_heterogeneity_modelling(
     print(f"\n✓ Raw MI results saved  ({len(mi_df)} rows)")
 
     # ── Block 3 ───────────────────────────────────────────────────────────────
-    mi_summary = build_mi_summary(mi_df, dep_var_col)
-    print("\n  MI Summary — Moderator Candidates:\n",
-          mi_summary.loc[mi_summary["Moderator_Candidate"]].to_string(index=False))
+    mi_summary = build_mi_summary(mi_df)
+    print("\n  MI Summary:\n", mi_summary.to_string(index=False))
     mi_summary.to_csv(output_dir / filemgmt.file_title("Heterogeneity MI Summary", ".csv"), index=False)
 
     # ── Block 4 ───────────────────────────────────────────────────────────────
