@@ -9,13 +9,16 @@ import src.utils.file_management as filemgmt
 
 def fetch_level_definitions(multi_segments_per_trial: bool) -> list[dict]:
     return [
+        ######### CONFIRMATORY ANALYSES ############
         # Level 0 — all data, music vs. silence
         {
             'df_filter': None,
             'condition_vars': {'Music Listening': 'categorical'},
             'reference_categories': {'Music Listening': 'False'},
-            'explanatory_vars': ['Median Scaled Force [0-1]', 'Median Unscaled Force [% MVC]'] + (
-                ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
+            'explanatory_vars': (['Median Scaled Force [0-1]',
+                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial else [
+                'Median Unscaled Force [% MVC]']) + (
+                                    ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
             'moderation_pairs': [('Music Listening', 'Musical skill [0-7]_centered'),
                                  ('Music Listening', 'Dancing habit [0-7]_centered')],
         },
@@ -24,43 +27,36 @@ def fetch_level_definitions(multi_segments_per_trial: bool) -> list[dict]:
             'df_filter': None,
             'condition_vars': {'Category or Silence': 'categorical'},
             'reference_categories': {'Category or Silence': 'Silence'},
-            'explanatory_vars': ['Median Scaled Force [0-1]', 'Median Unscaled Force [% MVC]'] + (
-                ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
+            'explanatory_vars': (['Median Scaled Force [0-1]',
+                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial else [
+                'Median Unscaled Force [% MVC]']) + (
+                                    ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
             'moderation_pairs': [('Category or Silence', 'Musical skill [0-7]_centered'),
                                  ('Category or Silence', 'Dancing habit [0-7]_centered')],
         },
+
+        ######### EXPLORATORY ANALYSES #########
         # Level 2 — music trials only, subjective features
         {
             'df_filter': lambda df: df.loc[df['Music Listening']],
             'condition_vars': {'Perceived Category': 'categorical', 'Familiarity [0-7]': 'ordinal'},
             'reference_categories': {'Perceived Category': 'Classic'},
-            'explanatory_vars': ['Median Scaled Force [0-1]', 'Median Unscaled Force [% MVC]', 'Liking [0-7]'] + (
-                ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
-            'moderation_pairs': [('Perceived Category', 'Musical skill [0-7]_centered'),
-                                 ('Perceived Category', 'Dancing habit [0-7]_centered')],
-        },
-        # Level 3 — music trials only, add emotional state + biomarkers
-        {
-            'df_filter': lambda df: df.loc[df['Music Listening']],
-            'condition_vars': {'Perceived Category': 'categorical', 'Familiarity [0-7]': 'ordinal'},
-            'reference_categories': {'Perceived Category': 'Classic'},
-            'explanatory_vars': ['Median Scaled Force [0-1]', 'Median Unscaled Force [% MVC]', 'Liking [0-7]',
-                                 'Emotional State [0-7]', 'Median Heart Rate [bpm]', 'Median HRV [sec]',
-                                 'GSR [0-3.3]'] + (
+            'explanatory_vars': (['Median Scaled Force [0-1]',
+                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial else [
+                'Median Unscaled Force [% MVC]']) + ['Liking [0-7]'] + (
                                     ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
             'moderation_pairs': [('Perceived Category', 'Musical skill [0-7]_centered'),
                                  ('Perceived Category', 'Dancing habit [0-7]_centered')],
         },
-        # Level 4 — music trials only, add objective music features
+        # Level 3 — music trials only, objective features
         {
             'df_filter': lambda df: df.loc[df['Music Listening']],
-            'condition_vars': {'Perceived Category': 'categorical', 'Familiarity [0-7]': 'ordinal'},
-            'reference_categories': {'Perceived Category': 'Classic'},
-            'explanatory_vars': ['Median Scaled Force [0-1]', 'Median Unscaled Force [% MVC]', 'Liking [0-7]',
-                                 'Emotional State [0-7]', 'Median Heart Rate [bpm]', 'Median HRV [sec]',
-                                 'GSR [0-3.3]',
-                                 'BPM_manual', 'Spectral Flux Mean', 'Spectral Centroid Mean',
-                                 'IOI Variance Coeff', 'Syncopation Ratio'] + (
+            'condition_vars': {'Familiarity [0-7]': 'ordinal'},
+            'explanatory_vars': (['Median Scaled Force [0-1]',
+                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial else [
+                'Median Unscaled Force [% MVC]']) + ['Liking [0-7]',
+                                                     'BPM_manual', 'Spectral Flux Mean', 'Spectral Centroid Mean',
+                                                     'IOI Variance Coeff', 'Syncopation Ratio'] + (
                                     ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
             'moderation_pairs': [('Perceived Category', 'Musical skill [0-7]_centered'),
                                  ('Perceived Category', 'Dancing habit [0-7]_centered')],
@@ -83,7 +79,10 @@ if __name__ == '__main__':
 
     ##### PARAMETERS
     ## Time Resolution
-    n_within_trial_segments_list: list[int] = [1,2, 5, 10]  # of ~40sec trials
+    n_within_trial_segments_list: list[int] = [1, 2, 5, 10]  # of ~40sec trials
+
+    # Subjects to exclude from all analyses (e.g. outliers or incomplete data)
+    exclude_subjects: list[int] = [7, 8]
 
 
     ## Data Exploration
@@ -122,6 +121,13 @@ if __name__ == '__main__':
         # Validation Hypotheses (EMG PSD):
         ('VALIDATION: EMG Flexor PSD Increases with Force', 'PSD_emg_1_flexor_Global_all'),
         ('VALIDATION: EMG Extensor PSD Increases with Force', 'PSD_emg_2_extensor_Global_all'),
+
+        # Possible Mediators:
+        ('MEDIATION: Heart Rate', 'Median_Heart_Rate_[bpm]'),
+        ('MEDIATION: HRV', 'Median_HRV_[sec]'),
+        ('MEDIATION: GSR', 'GSR_[0-3.3]'),
+        ('MEDIATION: Emotional Modulation', 'Emotional_State_[0-7]'),
+
     ]
     save_single_time_res_summaries: bool = False
 
@@ -402,7 +408,6 @@ if __name__ == '__main__':
                 "C(Q('Perceived Category'))[T.Groovy]:Q('Musical skill [0-7]_centered')",
                 "C(Q('Perceived Category'))[T.Happy]",
                 "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
-                "Q('Median Scaled Force [0-1]')",
                 "Q('Median Unscaled Force [% MVC]')",
             ],
         ),
@@ -425,7 +430,6 @@ if __name__ == '__main__':
             comp_lvl=0,
             n_segments=1,
             target_parameters=[
-                "Q('Median Scaled Force [0-1]')",
                 "Q('Median Unscaled Force [% MVC]')",
             ],
         ),
@@ -436,7 +440,6 @@ if __name__ == '__main__':
             comp_lvl=1,
             n_segments=1,
             target_parameters=[
-                "Q('Median Scaled Force [0-1]')",
                 "Q('Median Unscaled Force [% MVC]')",
             ],
         ),
@@ -449,7 +452,6 @@ if __name__ == '__main__':
             target_parameters=[
                 "C(Q('Perceived Category'))[T.Happy]",
                 "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
-                "Q('Median Scaled Force [0-1]')",
                 "Q('Median Unscaled Force [% MVC]')",
             ],
         ),
@@ -464,10 +466,100 @@ if __name__ == '__main__':
                 "C(Q('Perceived Category'))[T.Happy]",
                 "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
                 "C(Q('Perceived Category'))[T.Sad]:Q('Musical skill [0-7]_centered')",
-                "Q('Median Scaled Force [0-1]')",
                 "Q('Median Unscaled Force [% MVC]')",
             ],
         ),
+
+
+
+        ######### N_segments = 2 interactions for Segment ID and Scaled Force:
+
+        statistics.PowerConfig(
+            dependent_var="CMC_Flexor_mean_gamma",
+            comp_lvl=1,
+            n_segments=1,
+            target_parameters=[
+                "Q('Median Scaled Force [0-1]')",
+                "Q('Segment ID')"
+            ],
+        ),
+
+
+        statistics.PowerConfig(
+            dependent_var="CMC_Flexor_max_gamma",
+            comp_lvl=1,
+            n_segments=1,
+            target_parameters=[
+                "Q('Median Scaled Force [0-1]')",
+                "Q('Segment ID')"
+            ],
+        ),
+
+
+        statistics.PowerConfig(
+            dependent_var="CMC_Flexor_mean_beta",
+            comp_lvl=1,
+            n_segments=1,
+            target_parameters=[
+                "Q('Median Scaled Force [0-1]')",
+                "Q('Segment ID')"
+            ],
+        ),
+
+
+        statistics.PowerConfig(
+            dependent_var="CMC_Flexor_max_beta",
+            comp_lvl=1,
+            n_segments=1,
+            target_parameters=[
+                "Q('Median Scaled Force [0-1]')",
+                "Q('Segment ID')"
+            ],
+        ),
+
+
+        statistics.PowerConfig(
+            dependent_var="CMC_Extensor_mean_gamma",
+            comp_lvl=1,
+            n_segments=1,
+            target_parameters=[
+                "Q('Median Scaled Force [0-1]')",
+                "Q('Segment ID')"
+            ],
+        ),
+
+
+        statistics.PowerConfig(
+            dependent_var="CMC_Extensor_max_gamma",
+            comp_lvl=1,
+            n_segments=1,
+            target_parameters=[
+                "Q('Median Scaled Force [0-1]')",
+                "Q('Segment ID')"
+            ],
+        ),
+
+
+        statistics.PowerConfig(
+            dependent_var="CMC_Extensor_mean_beta",
+            comp_lvl=1,
+            n_segments=1,
+            target_parameters=[
+                "Q('Median Scaled Force [0-1]')",
+                "Q('Segment ID')"
+            ],
+        ),
+
+        statistics.PowerConfig(
+            dependent_var="CMC_Extensor_max_beta",
+            comp_lvl=1,
+            n_segments=1,
+            target_parameters=[
+                "Q('Median Scaled Force [0-1]')",
+                "Q('Segment ID')"
+            ],
+        ),
+
     ]
 
 
@@ -496,7 +588,14 @@ if __name__ == '__main__':
             all_subject_data_frame = pd.read_csv(filemgmt.most_recent_file(FEATURE_OUTPUT_DATA, ".csv", [f"Combined Statistics {n_within_trial_segments}seg"]))  # pd.read_csv(FEATURE_OUTPUT_DATA / "statistics_temp_eeg_alpha.csv")  # set to None to run computation
             print(f"Fetching existing statistical data frame for n_segments {n_within_trial_segments}...\n")
 
-
+            # ── Apply subject exclusions ──────────────────────────────────────────────
+            if exclude_subjects:
+                before = all_subject_data_frame["Subject ID"].nunique()
+                all_subject_data_frame = all_subject_data_frame.loc[
+                    ~all_subject_data_frame["Subject ID"].isin(exclude_subjects)
+                ].reset_index(drop=True)
+                after = all_subject_data_frame["Subject ID"].nunique()
+                print(f"  [Exclusions] Removed subjects {exclude_subjects}: {before} → {after} subjects remaining.\n")
 
 
 
@@ -609,6 +708,18 @@ if __name__ == '__main__':
 
             results_frame = pd.DataFrame(all_model_results)
             diagnostics_frame = pd.DataFrame(all_diagnostics)
+
+            # ── FDR correction for exploratory levels (per time resolution) ───────────
+            # Applied here so forest plots reflect corrected significance.
+            # Levels 0–1 are confirmatory (pre-specified, directional) — no correction.
+            # Levels 2–3 are exploratory — BH correction within each Level × DV stratum.
+            results_frame = statistics.apply_fdr_correction(
+                results_df=results_frame,
+                levels_to_correct=[2, 3],
+                alpha=0.05,
+                group_by_dv=True,
+            )
+
             # Generate all summary tables with one function call
             if save_single_time_res_summaries:
                 statistics.generate_all_summary_tables(
@@ -651,34 +762,34 @@ if __name__ == '__main__':
             if render_ols_effect_plots:
                 visualizations.plot_hypothesis_forest_mosaic(results_frame, cmc_flexor_hypotheses, output_dir=STATISTICS_OUTPUT_DATA,
                                                              file_identifier_suffix=f"H1_Flexor_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                                             model_type='OLS', hidden=not show_effect_plots)
+                                                             model_type='OLS', hidden=not show_effect_plots, significance_source='auto')
                 visualizations.plot_hypothesis_forest_mosaic(results_frame, cmc_extensor_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
                                                              file_identifier_suffix=f"H1_Extensor_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                                             model_type='OLS', hidden=not show_effect_plots)
+                                                             model_type='OLS', hidden=not show_effect_plots, significance_source='auto')
                 visualizations.plot_hypothesis_forest_mosaic(results_frame, psd_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
                                                              file_identifier_suffix=f"H2-5_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                                             model_type='OLS', hidden=not show_effect_plots)
+                                                             model_type='OLS', hidden=not show_effect_plots, significance_source='auto')
                 visualizations.plot_hypothesis_forest_mosaic(results_frame, validation_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
                                                              file_identifier_suffix=f"VAL_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                                             model_type='OLS', hidden=not show_effect_plots)
+                                                             model_type='OLS', hidden=not show_effect_plots, significance_source='auto')
 
             # LME Results:
             if render_lme_effect_plots:
                 visualizations.plot_hypothesis_forest_mosaic(results_frame, cmc_flexor_hypotheses, output_dir=STATISTICS_OUTPUT_DATA,
                                                              file_identifier_suffix=f"H1_Flexor_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                                             model_type='LME', hidden=not show_effect_plots)
+                                                             model_type='LME', hidden=not show_effect_plots, significance_source='auto')
 
                 visualizations.plot_hypothesis_forest_mosaic(results_frame, cmc_extensor_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
                                                              file_identifier_suffix=f"H1_Extensor_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                                             model_type='LME', hidden=not show_effect_plots)
+                                                             model_type='LME', hidden=not show_effect_plots, significance_source='auto')
 
                 visualizations.plot_hypothesis_forest_mosaic(results_frame, psd_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
                                                              file_identifier_suffix=f"H2-5_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                                             model_type='LME', hidden=not show_effect_plots)
+                                                             model_type='LME', hidden=not show_effect_plots, significance_source='auto')
 
                 visualizations.plot_hypothesis_forest_mosaic(results_frame, validation_hypotheses, output_dir = STATISTICS_OUTPUT_DATA,
                                                              file_identifier_suffix=f"VAL_{n_within_trial_segments}seg_{"_".join(lvls_to_include)}",
-                                                             model_type='LME', hidden=not show_effect_plots)
+                                                             model_type='LME', hidden=not show_effect_plots, significance_source='auto')
 
 
 
@@ -703,6 +814,8 @@ if __name__ == '__main__':
     if conduct_analysis:  # only then save results, otherwise will be loaded below
         # save all time resolutions' results
         all_time_resolutions_results_frame = pd.concat(all_time_resolutions_results_list)
+
+        # save as CSVs
         all_time_resolutions_results_frame.to_csv(
             STATISTICS_OUTPUT_DATA / filemgmt.file_title("All Time Resolutions Results", ".csv")
         )
@@ -735,6 +848,7 @@ if __name__ == '__main__':
                     result_frame=all_time_resolutions_results_frame, hypotheses=hypotheses,
                     parameter=parameter, comparison_level=comparison_level,
                     model_type='LME', output_dir=STATISTICS_OUTPUT_DATA,
+                    significance_source='auto',  # falls back to non-FDR for lvl 0 and 1
                 )
 
 

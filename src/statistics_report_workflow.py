@@ -1,6 +1,4 @@
 """
-statistical_report.py
-─────────────────────────────────────────────────────────────────────────────
 Generates a human-readable Markdown report from the six statistical output
 frames produced by the omnibus + post-hoc pipeline.
 
@@ -18,7 +16,6 @@ Structure:
 
 from __future__ import annotations
 from pathlib import Path
-import pandas as pd
 
 from src.pipeline.statistical_reporting import *
 import src.utils.file_management as filemgmt
@@ -68,6 +65,8 @@ if __name__ == "__main__":
         influence_measures_frame     = _load_csv(RQ_A_OMNIBUS_RESULTS,  ["Influence Analysis Combined"]),
         subject_heterogeneity_frame  = _load_csv(RQ_A_OMNIBUS_RESULTS,  ["Subject Effect Summary Combined"]),
         cbpa_results_frame           = _load_csv(RQ_A_POST_HOC_RESULTS, ["CBPA Combined Cluster Summary"]),
+        mi_summary_frame             = _load_csv(RQ_A_POST_HOC_RESULTS, ["MI Summary"]),
+        subject_clusters_frame       = _load_csv(RQ_A_POST_HOC_RESULTS, ["Subject Clusters"]),
         output_dir           = RQ_A_REPORT_DIR,
         file_identifier_suffix='RQ_A',
 
@@ -78,6 +77,10 @@ if __name__ == "__main__":
         include_ols          = False,
         target_power=0.80,
 
+        # FDR Correction for multiple comparisons:
+        fdr_levels_to_correct= [2, 3],
+        fdr_group_by_dv=True,
+
         level_definitions=fetch_level_definitions(multi_segments_per_trial=True),
 
         hypothesis_groups=[
@@ -86,6 +89,18 @@ if __name__ == "__main__":
                 "hypotheses": [h for h in _load_csv(RQ_A_OMNIBUS_RESULTS,  ["All Time Resolutions Results"])["Hypothesis"].unique()
                                if h.startswith("H1")],
             },
+            {
+                "label": "H2-H5: EEG PSD Effects (all DVs)",
+                "hypotheses": [h for h in _load_csv(RQ_A_OMNIBUS_RESULTS, ["All Time Resolutions Results"])["Hypothesis"].unique()
+                               if (h.startswith("H2") or h.startswith("H3") or h.startswith("H4") or h.startswith("H5"))],
+            },
+            {
+                "label": "MEDIATION VARS: Biomarkers (all DVs)",
+                "hypotheses": [h for h in
+                               _load_csv(RQ_A_OMNIBUS_RESULTS, ["All Time Resolutions Results"])["Hypothesis"].unique()
+                               if
+                               (h.startswith("MEDIATION"))],
+            }
         ],
     )
 
@@ -107,6 +122,8 @@ if __name__ == "__main__":
         influence_measures_frame     = _load_csv(RQ_B_OMNIBUS_RESULTS, ["Influence Analysis Combined"]),
         subject_heterogeneity_frame  = pd.DataFrame(),
         cbpa_results_frame           = pd.DataFrame(),
+        mi_summary_frame             = pd.DataFrame(),
+        subject_clusters_frame       = pd.DataFrame(),
 
         output_dir           = RQ_B_REPORT_DIR,
         file_identifier_suffix='RQ_B',
