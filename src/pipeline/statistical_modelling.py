@@ -898,6 +898,102 @@ def fit_both_models(
     }
 
 
+def apply_fdr_correction(
+    results_df: pd.DataFrame,
+    levels_to_correct: list[int],
+    alpha: float = 0.05,
+    group_by_dv: bool = True,
+) -> pd.DataFrame:
+    """Apply Benjamini-Hochberg FDR correction within each comparison level.
+
+    Correction is applied separately per level, and optionally per DV within
+    each level, to keep the test family conceptually coherent. Confirmatory
+    levels (0, 1) are typically excluded; exploratory levels (2, 3) corrected.
+
+    Sentinel rows (__residual_std__, __re_std__, Intercept) are excluded from
+    the correction family and receive NaN in the FDR column.
+
+    Parameters
+    ----------
+    results_df : pd.DataFrame
+        Full results frame with p_value_adjusted column.
+    levels_to_correct : list[int]
+        Level indices to apply BH correction to, e.g. [2, 3].
+    alpha : float
+        FDR threshold. Default 0.05.
+    group_by_dv : bool
+        If True, correct within each (Level × DV) stratum — smaller, more
+        conservative families. If False, correct across all DVs within a level
+        — larger family, more power but mixes hypotheses. Default True.
+
+    Returns
+    -------
+    pd.DataFrame
+        Input frame with two new columns added:
+        - p_value_fdr     : BH-corrected p-value (NaN for excluded rows)
+        - significant_fdr : bool, p_value_fdr < alpha
+    """
+    from statsmodels.stats.multitest import multipletests
+
+    df = results_df.copy()
+    df["p_value_fdr"] = np.nan
+    df["significant_fdr"] = False
+
+    # Rows eligible for correction: real parameters only, LME only
+    _SENTINEL = {"__residual_std__", "__re_std__"}
+    eligible_mask = (
+        (df["Model_Type"] == "LME")
+        & df["Parameter"].apply(lambda p: p not in _SENTINEL and not p.startswith("Intercept"))
+        & df["Comparison_Level"].apply(
+            lambda lvl: any(lvl.startswith(f"Level {i} ") for i in levels_to_correct)
+        )
+    )
+
+    if not eligible_mask.any():
+        print("  [FDR] No eligible rows found for the specified levels.")
+        return df
+
+    eligible = df[eligible_mask].copy()
+
+    # Define grouping keys
+    group_cols = ["Comparison_Level", "N. Segments"]
+    if group_by_dv:
+        group_cols.append("Dependent_Variable")
+
+    n_corrected = 0
+    for group_keys, grp in eligible.groupby(group_cols):
+        p_vals = grp["p_value_adjusted"].values
+        valid = ~np.isnan(p_vals)
+
+        if valid.sum() < 2:
+            continue  # BH undefined for single test
+
+        reject, p_fdr, _, _ = multipletests(
+            p_vals[valid], alpha=alpha, method="fdr_bh"
+        )
+
+        # Write back to the full df using original index
+        valid_idx = grp.index[valid]
+        df.loc[valid_idx, "p_value_fdr"] = p_fdr
+        df.loc[valid_idx, "significant_fdr"] = reject
+        n_corrected += valid.sum()
+
+    n_sig_before = eligible_mask.sum() and (df.loc[eligible_mask, "p_value_adjusted"] < alpha).sum()
+    n_sig_after  = df.loc[eligible_mask, "significant_fdr"].sum()
+
+    level_str = ", ".join(f"Level {i}" for i in levels_to_correct)
+    group_str  = "per DV" if group_by_dv else "pooled across DVs"
+    print(
+        f"\n  [FDR] BH correction applied to {level_str} ({group_str}):\n"
+        f"    {n_corrected} parameters corrected\n"
+        f"    Significant before: {n_sig_before} → after: {n_sig_after} "
+        f"(α_FDR = {alpha})"
+    )
+
+    # add fallback column:
+    df["p_value_for_plot"] = df["p_value_fdr"].fillna(df["p_value_adjusted"])
+    return df
+
 
 def store_model_results(
         model_results: dict,

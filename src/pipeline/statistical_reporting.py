@@ -4,9 +4,10 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
-
+from statsmodels.stats.multitest import multipletests
 import numpy as np
 import pandas as pd
+from typing import Literal
 
 import src.utils.file_management as filemgmt
 
@@ -37,6 +38,7 @@ class _ReportConfig:
     alpha_adjusted:      float      = 0.05
     include_ols:         bool       = False
     target_power:        float      = 0.80
+    p_col: Literal['p_value_adjusted', 'p_value_for_plot'] = "p_value_adjusted"
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SECTION VI — PREDICTOR QUALITY SUMMARY  (optional, hypothesis-group-level)
@@ -179,7 +181,7 @@ def _rate_time_consistency(
     primary_sig = res[
         (res["N. Segments"] == cfg.primary_n_segments)
         & (res["Model_Type"] == "LME")
-        & (res["p_value_adjusted"] < cfg.alpha_adjusted)
+        & (res[cfg.p_col] < cfg.alpha_adjusted)
         & res["Parameter"].isin(raw_params)
         & res["Dependent_Variable"].isin(dvs)
     ][["Parameter", "Comparison_Level", "Dependent_Variable"]].drop_duplicates()
@@ -199,7 +201,7 @@ def _rate_time_consistency(
                 & (res["Comparison_Level"].apply(_level_int) == level_idx)
                 & (res["Dependent_Variable"] == pr["Dependent_Variable"])
             ]
-            if not match.empty and match.iloc[0]["p_value_adjusted"] < cfg.alpha_adjusted:
+            if not match.empty and match.iloc[0]['p_value_adjusted'] < cfg.alpha_adjusted:
                 sig_at.append(n_seg)
         n_avail = len([s for s in cfg.resolution_segments
                        if not res[(res["N. Segments"] == s)
@@ -281,7 +283,7 @@ def _section_predictor_quality(
         sig_primary = group_res[
             (group_res["N. Segments"] == cfg.primary_n_segments)
             & (group_res["Model_Type"] == "LME")
-            & (group_res["p_value_adjusted"] < cfg.alpha_adjusted)
+            & (group_res[cfg.p_col] < cfg.alpha_adjusted)
             & group_res["Parameter"].apply(_is_real_param)
         ].copy()
 
@@ -421,7 +423,7 @@ def _is_real_param(p: str) -> bool:
 _REQUIRED_COLUMNS: dict[str, set[str]] = {
     "omnibus_results": {
         "Hypothesis", "Dependent_Variable", "Model_Type", "Comparison_Level",
-        "Parameter", "Coefficient", "SE_adjusted", "p_value_adjusted",
+        "Parameter", "Coefficient", "SE_adjusted", 'p_value_adjusted',
         "Cohen_d", "N. Segments",
     },
     "omnibus_diagnostics": {
@@ -452,7 +454,7 @@ _REQUIRED_COLUMNS: dict[str, set[str]] = {
     },
 }
 
-_CBPA_DOMAIN_ALTERNATIVES: tuple[str, str] = ("time_start_s", "phase_start_deg")
+_CBPA_DOMAIN_ALTERNATIVES: tuple[str, str] = ("time_s_start", "phase_deg_start")
 
 
 def validate_frames(frames: dict[str, pd.DataFrame]) -> list[str]:
@@ -497,6 +499,60 @@ def validate_frames(frames: dict[str, pd.DataFrame]) -> list[str]:
     return out
 
 
+# ── FDR correction ────────────────────────────────────────────────────────────
+
+def _apply_fdr_to_results(
+    res: pd.DataFrame,
+    levels_to_correct: list[int],
+    alpha: float = 0.05,
+    group_by_dv: bool = True,
+) -> pd.DataFrame:
+    """Apply BH-FDR within each (Level × DV) stratum for exploratory levels.
+
+    Adds two columns:
+    - p_value_fdr       : BH-adjusted p-value (NaN for uncorrected rows)
+    - p_value_for_plot  : p_value_fdr where available, else p_value_adjusted
+    """
+    _SENTINEL = {"__residual_std__", "__re_std__"}
+    df = res.copy()
+    df["p_value_fdr"] = np.nan
+
+    eligible_mask = (
+        (df["Model_Type"] == "LME")
+        & df["Parameter"].apply(lambda p: p not in _SENTINEL and not p.startswith("Intercept"))
+        & df["Comparison_Level"].apply(
+            lambda lvl: any(lvl.startswith(f"Level {i} ") for i in levels_to_correct)
+        )
+    )
+
+    group_cols = ["Comparison_Level", "N. Segments"]
+    if group_by_dv:
+        group_cols.append("Dependent_Variable")
+
+    for _, grp in df[eligible_mask].groupby(group_cols):
+        p_vals = grp['p_value_adjusted'].values
+        valid  = ~np.isnan(p_vals)
+        if valid.sum() < 2:
+            continue
+        _, p_fdr, _, _ = multipletests(p_vals[valid], alpha=alpha, method="fdr_bh")
+        df.loc[grp.index[valid], "p_value_fdr"] = p_fdr
+
+    # Fallback column: FDR where available, autocorr-adjusted elsewhere
+    df["p_value_for_plot"] = df["p_value_fdr"].fillna(df['p_value_adjusted'])
+
+    n_corrected = eligible_mask.sum()
+    n_sig_before = int((df.loc[eligible_mask, 'p_value_adjusted'] < alpha).sum())
+    n_sig_after  = int((df.loc[eligible_mask, "p_value_for_plot"]  < alpha).sum())
+    level_str = ", ".join(f"Level {i}" for i in levels_to_correct)
+    print(
+        f"\n  [Report FDR] BH correction applied to {level_str} "
+        f"({'per DV' if group_by_dv else 'pooled'}):\n"
+        f"    {n_corrected} parameters corrected\n"
+        f"    Significant before: {n_sig_before} → after: {n_sig_after} (α = {alpha})"
+    )
+    return df
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  PIPELINE COVERAGE DIAGNOSTICS  (printed to stdout, not in report)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -509,6 +565,7 @@ def _print_pipeline_recommendations(
     alpha: float,
     primary_n_segments: int,
     resolution_segments: list[int],
+        cfg: _ReportConfig,
 ) -> None:
     sep = "─" * 72
 
@@ -522,7 +579,7 @@ def _print_pipeline_recommendations(
     sig = res[
         (res["N. Segments"] == primary_n_segments)
         & (res["Model_Type"] == "LME")
-        & (res["p_value_adjusted"] < alpha)
+        & (res[cfg.p_col] < alpha)
         & res["Parameter"].apply(_is_real_param)
     ].copy()
 
@@ -720,8 +777,7 @@ def _section_level_definitions(level_defs: list[dict]) -> str:
         )
 
     lines.append(
-        "\n> Trial ID and Segment ID are included as explanatory variables "
-        "in all levels (exact set depends on `multi_segments_per_trial`). "
+        "\n> Median Scaled Force [0-1] and Segment ID are included only for multiple segments per trial."
         "Ordinal variables are treated as continuous.\n"
     )
     return "\n".join(lines)
@@ -760,7 +816,7 @@ def _section_overview_table(
         sig_rows = res_primary[
             (res_primary["Hypothesis"] == hyp)
             & (res_primary["Dependent_Variable"] == dv)
-            & (res_primary["p_value_adjusted"] < cfg.alpha_adjusted)
+            & (res_primary[cfg.p_col] < cfg.alpha_adjusted)
         ]
         n_sig = len(sig_rows)
 
@@ -847,7 +903,7 @@ def _section_findings(
         & res["Parameter"].apply(_is_real_param)
     )
     sub = res[mask].copy()
-    sig = sub[sub["p_value_adjusted"] < alpha].copy()
+    sig = sub[sub[cfg.p_col] < alpha].copy()
 
     model_label = "/".join(_active_models(cfg))
 
@@ -856,20 +912,23 @@ def _section_findings(
             f"> **No significant effects** found for `{dv}` at "
             f"adjusted α = {alpha} ({model_label}, {cfg.primary_n_segments}-seg).\n"
         )
-        near = sub[sub["p_value_adjusted"] < 0.10].sort_values("p_value_adjusted")
+        near = sub[sub[cfg.p_col] < 0.10].sort_values(cfg.p_col)
         if not near.empty:
             lines.append("**Near-significant (0.05 < p < 0.10):**\n")
-            lines.append("| Parameter | Level | Model | β | SE (adj) | p (adj) | Cohen's d |")
-            lines.append("|---|---|---|---|---|---|---|")
-            for _, r in near.iterrows():
+            lines.append(
+                "| Parameter | Level | Model | β | SE (adj) | p (autocorr) | p (FDR) | Cohen's d | Magnitude |")
+            lines.append("|---|---|---|---|---|---|---|---|---|")
+            for _, r in sig.iterrows():
+                p_fdr_str = _fmt_p(r.get("p_value_fdr")) if "p_value_fdr" in r.index else "—"
                 lines.append(
-                    f"| {_clean_param(r['Parameter'])} "
+                    f"| {_clean_param(r['Parameter'])}{_stars(r[cfg.p_col])} "
                     f"| {_short_level(r['Comparison_Level'])} "
                     f"| {r['Model_Type']} "
                     f"| {_fmt_float(r['Coefficient'])} "
                     f"| {_fmt_float(r['SE_adjusted'])} "
                     f"| {_fmt_p(r['p_value_adjusted'])} "
-                    f"| {_fmt_float(r.get('Cohen_d'))} |"
+                    f"| {p_fdr_str} "  # ← new column
+                    f"| {_fmt_float(r.get('Cohen_d'))} "
                 )
             lines.append("")
         return "\n".join(lines)
@@ -888,12 +947,12 @@ def _section_findings(
         d   = r.get("Cohen_d")
         mag = _cohens_d_label(d) if pd.notna(d) else "—"
         lines.append(
-            f"| {_clean_param(r['Parameter'])}{_stars(r['p_value_adjusted'])} "
+            f"| {_clean_param(r['Parameter'])}{_stars(r[cfg.p_col])} "
             f"| {_short_level(r['Comparison_Level'])} "
             f"| {r['Model_Type']} "
             f"| {_fmt_float(r['Coefficient'])} "
             f"| {_fmt_float(r['SE_adjusted'])} "
-            f"| {_fmt_p(r['p_value_adjusted'])} "
+            f"| {_fmt_p(r[cfg.p_col])} "
             f"| {_fmt_float(d)} "
             f"| {mag} |"
         )
@@ -946,7 +1005,7 @@ def _section_cross_resolution(
     primary_sig = res[
         (res["N. Segments"] == cfg.primary_n_segments)
         & (res["Model_Type"] == "LME")
-        & (res["p_value_adjusted"] < alpha)
+        & (res['p_value_adjusted'] < alpha)
         & res["Parameter"].apply(_is_real_param)
     ][["Parameter", "Comparison_Level"]].drop_duplicates().values.tolist()
 
@@ -992,7 +1051,7 @@ def _section_cross_resolution(
                 continue
 
             r              = row_match.iloc[0]
-            p_adj          = r["p_value_adjusted"]
+            p_adj          = r['p_value_adjusted']
             cohen_d        = r.get("Cohen_d")
             mag            = _cohens_d_label(cohen_d) if pd.notna(cohen_d) else "—"
             sig_ico        = "✅" if (pd.notna(p_adj) and p_adj < alpha) else "⚠️"
@@ -1021,7 +1080,7 @@ def _section_cross_resolution(
                 ]
             if match.empty:
                 continue
-            p = match.iloc[0]["p_value_adjusted"]
+            p = match.iloc[0]['p_value_adjusted']
             if pd.notna(p) and p < alpha:
                 sig_at.append(n)
 
@@ -1308,14 +1367,14 @@ def _section_cbpa(hyp: str, dv: str, cbpa: pd.DataFrame) -> str:
 
     # Detect axis column name and display label — phase vs clock time
     # Prefer phase_deg columns when present (phase-normalised CMC runs);
-    # fall back to time_start_s / time_end_s for clock-time runs.
+    # fall back to time_s_start / time_s_end for clock-time runs.
     if "phase_deg_start" in cbpa_sub.columns:
         axis_start_col = "phase_deg_start"
         axis_end_col   = "phase_deg_end"
         axis_label     = "Phase span (°)"
     else:
-        axis_start_col = "time_start_s"
-        axis_end_col   = "time_end_s"
+        axis_start_col = "time_s_start"
+        axis_end_col   = "time_s_end"
         axis_label     = "Time span (s)"
 
     sig_clusters = cbpa_sub[cbpa_sub["significant"] == True]
@@ -1526,27 +1585,223 @@ def _section_diagnostics(hyp: str, dv: str, diag: pd.DataFrame,
     )
     return "\n".join(lines)
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION — SUBJECT HETEROGENEITY CLUSTERING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _section_subject_clusters(cluster_df: pd.DataFrame) -> str:
+    """Render the subject cluster assignment table with personal attributes."""
+    lines = ["## Subject Heterogeneity Clustering\n"]
+
+    if cluster_df.empty:
+        lines.append("> ⚠️  No cluster data available.\n")
+        return "\n".join(lines)
+
+    # ── Cluster composition summary ───────────────────────────────────────────
+    n_clusters = cluster_df["Cluster"].nunique()
+    lines.append(
+        f"Ward-linkage agglomerative clustering identified **k = {n_clusters}** "
+        f"clusters across {len(cluster_df)} subjects based on normalised condition "
+        f"contrasts and Cook's D influence measures. Cluster labels are 0-indexed.\n"
+    )
+
+    for k, grp in cluster_df.groupby("Cluster"):
+        subj_ids = ", ".join(f"S{int(s):02d}" for s in sorted(grp["Subject_ID"]))
+        lines.append(f"- **Cluster {k}** (n={len(grp)}): {subj_ids}")
+    lines.append("")
+
+    # ── Full attribute table ──────────────────────────────────────────────────
+    # Select personal attribute columns — drop string cols and ID
+    skip_cols = {"Subject_ID", "Cluster", "Instrument", "Motor Symptoms",
+                 "Gender", "Dominant hand", "Listening habit"}
+    attr_cols = [c for c in cluster_df.columns if c not in skip_cols]
+
+    header_cols = ["Subject", "Cluster", "Gender", "Dominant hand"] + attr_cols
+    lines.append("| " + " | ".join(header_cols) + " |")
+    lines.append("|" + "---|" * len(header_cols))
+
+    for _, r in cluster_df.sort_values(["Cluster", "Subject_ID"]).iterrows():
+        vals = [
+            f"S{int(r['Subject_ID']):02d}",
+            str(int(r["Cluster"])),
+            str(r.get("Gender", "—")),
+            str(r.get("Dominant hand", "—")),
+        ] + [
+            _fmt_float(r[c], 1) if pd.notna(r.get(c)) else "—"
+            for c in attr_cols
+        ]
+        lines.append("| " + " | ".join(vals) + " |")
+
+    lines.append(
+        "\n> Clustering is exploratory and subordinate to the LME confirmatory results. "
+        "k was selected by silhouette score subject to a minimum cluster size constraint. "
+        "With n=12, cluster boundaries should be interpreted with caution.\n"
+    )
+    lines.append("---\n")
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION — MI MODERATOR SUMMARY
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _clean_condition_label(raw: str) -> str:
+    """Shorten statsmodels-style condition strings for display."""
+    # Extract condition level from e.g. C(Q('Category or Silence'))[T.Happy]
+    m = re.search(r"\[T\.(.+?)\]", raw)
+    condition = m.group(1) if m else raw
+
+    # Detect interaction suffix e.g. :Q('Dancing habit [0-7]_centered')
+    interaction = re.search(r":Q\('(.+?)'\)", raw)
+    if interaction:
+        mod_name = re.sub(r"\s*\[.*?\]", "", interaction.group(1)).replace("_centered", "").strip()
+        return f"{condition} × {mod_name}"
+
+    # Plain parameter names (Intercept, force covariates, etc.)
+    clean = re.sub(r"C\(Q\('(.+?)'\)\)\[T\.(.+?)\]", r"\2", raw)
+    clean = re.sub(r"Q\('(.+?)'\)", r"\1", clean)
+    clean = re.sub(r"\s*\[.*?\]", "", clean).replace("_centered", "").strip()
+    return clean
+
+
+def _section_mi_summary(
+    mi_summary: pd.DataFrame,
+    include_targets: list[Literal["DFBETA", "Normalised_Contrast", "Responder_Flag"]] = None,
+) -> str:
+    """
+    Render MI summary transposed: one row per personal attribute (feature),
+    columns show which (Condition × Target) combinations it predicts.
+
+    Parameters
+    ----------
+    mi_summary : pd.DataFrame
+        Output of build_mi_summary() — pivoted (Condition × Target) × Feature frame.
+    include_targets : list of {'DFBETA', 'Normalised_Contrast', 'Responder_Flag'}, optional
+        Which Target types to include as columns. Defaults to
+        ['Normalised_Contrast'] only, since DFBETA and Responder_Flag are
+        largely redundant with Normalised_Contrast at n=12 and add visual noise.
+    """
+    if include_targets is None:
+        include_targets = ["Normalised_Contrast"]
+
+    lines = ["## Mutual Information — Moderator Summary\n"]
+
+    if mi_summary.empty:
+        lines.append("> ⚠️  No MI summary data available.\n")
+        return "\n".join(lines)
+
+    feature_cols = [
+        c for c in mi_summary.columns
+        if c not in ("Condition", "Target", "Moderating_Candidates")
+    ]
+    if not feature_cols:
+        lines.append("> ⚠️  No feature columns found in MI summary.\n")
+        return "\n".join(lines)
+
+    # ── Filter to requested targets ───────────────────────────────────────────
+    mi_filtered = mi_summary.loc[mi_summary["Target"].isin(include_targets)].copy()
+    if mi_filtered.empty:
+        lines.append(
+            f"> ⚠️  No rows match the requested targets: {include_targets}.\n"
+        )
+        return "\n".join(lines)
+
+    # ── Legend block ──────────────────────────────────────────────────────────
+    target_descriptions = {
+        "Normalised_Contrast": "**Normalised_Contrast** — association with the magnitude of a subject's CMC response to each condition (continuous; higher = stronger personal attribute → response link)",
+        "Responder_Flag":      "**Responder_Flag** — association with whether a subject showed any positive response at all (binary; higher = attribute predicts responder status)",
+        "DFBETA":              "**DFBETA** — association with how much a subject shifts the LME coefficient when left out (continuous; higher = attribute predicts model influence)",
+    }
+    lines.append("**Included targets:**\n")
+    for t in include_targets:
+        lines.append(f"- {target_descriptions.get(t, t)}")
+    lines.append("")
+    lines.append(
+        "MI scores (≥ 0.05) between each personal attribute and the listed targets. "
+        "Each cell shows the maximum MI score across all four CMC dependent variables. "
+        "Empty cells indicate MI < 0.05.\n"
+    )
+
+    # ── Build col_label and pivot ─────────────────────────────────────────────
+    mi_filtered["col_label"] = (
+        mi_filtered["Condition"].apply(_clean_condition_label)
+        + " / " + mi_filtered["Target"]
+    )
+
+    melted = mi_filtered.melt(
+        id_vars=["col_label"],
+        value_vars=feature_cols,
+        var_name="Feature",
+        value_name="MI_Score",
+    ).dropna(subset=["MI_Score"])
+
+    if melted.empty:
+        lines.append("> No MI scores above threshold for any feature.\n")
+        return "\n".join(lines)
+
+    transposed = melted.pivot_table(
+        index="Feature",
+        columns="col_label",
+        values="MI_Score",
+        aggfunc="max",
+    ).round(3)
+    transposed.columns.name = None
+    transposed = transposed.reset_index()
+
+    col_cells = [c for c in transposed.columns if c != "Feature"]
+    transposed["_n"] = transposed[col_cells].notna().sum(axis=1)
+    transposed = transposed.sort_values("_n", ascending=False).drop(columns="_n")
+
+    # ── Render table ──────────────────────────────────────────────────────────
+    def _escape(s: str) -> str:
+        return s.replace("|", "\\|")
+
+    lines.append("| Feature | " + " | ".join(_escape(c) for c in col_cells) + " | Predicts |")
+    lines.append("|" + "---|" * (len(col_cells) + 2))
+
+    for _, r in transposed.iterrows():
+        cells = [f"{r[c]:.2f}" if pd.notna(r.get(c)) else "" for c in col_cells]
+        predicts = ", ".join(
+            col.split(" / ")[0]
+            for col in col_cells
+            if pd.notna(r.get(col))
+        )
+        lines.append(f"| **{r['Feature']}** | " + " | ".join(cells) + f" | {predicts} |")
+
+    lines.append(
+        "\n> Scores reflect mutual information between the personal attribute and "
+        "the target, aggregated as the maximum across DVs. MI is not a significance "
+        "test — treat values < 0.10 as weak signals only.\n"
+    )
+    lines.append("---\n")
+    return "\n".join(lines)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
 def generate_statistical_report(
-    omnibus_results_frame:        pd.DataFrame,
-    omnibus_diagnostics_frame:    pd.DataFrame,
-    power_analysis_results_frame: pd.DataFrame,
-    influence_measures_frame:     pd.DataFrame,
-    subject_heterogeneity_frame:  pd.DataFrame,
-    cbpa_results_frame:           pd.DataFrame,
-    output_dir:                   Path,
-    primary_n_segments:           int        = 1,
-    resolution_segments:          list[int]  = (1, 5, 20),
-    alpha_adjusted:               float = 0.05,
+        omnibus_results_frame: pd.DataFrame,
+        omnibus_diagnostics_frame: pd.DataFrame,
+        power_analysis_results_frame: pd.DataFrame,
+        influence_measures_frame: pd.DataFrame,
+        subject_heterogeneity_frame: pd.DataFrame,
+        cbpa_results_frame: pd.DataFrame,
+        mi_summary_frame: pd.DataFrame,
+        subject_clusters_frame: pd.DataFrame,
+
+        output_dir: Path,
+        mi_include_targets: list[Literal["DFBETA", "Normalised_Contrast", "Responder_Flag"]] | None = None,
+        primary_n_segments: int = 1,
+        resolution_segments: list[int] = (1, 5, 20),
+        alpha_adjusted: float = 0.05,
         include_ols: bool = False,
         target_power: float = 0.80,
         level_definitions: list[dict] | None = None,
-    hypothesis_groups:   list[dict] | None = None,
+        hypothesis_groups: list[dict] | None = None,
         file_identifier_suffix: str | None = None,
+        fdr_levels_to_correct: list[int] | None = None,
+        fdr_group_by_dv: bool = True,
 ) -> Path:
     """
     Generate a Markdown report from the six statistical output frames.
@@ -1583,6 +1838,18 @@ def generate_statistical_report(
     Path
         Path to the saved report file.
     """
+    # ── Apply FDR correction if requested ────────────────────────────────────
+    if fdr_levels_to_correct:
+        omnibus_results_frame = _apply_fdr_to_results(
+            omnibus_results_frame,
+            levels_to_correct=fdr_levels_to_correct,
+            alpha=alpha_adjusted,
+            group_by_dv=fdr_group_by_dv,
+        )
+        p_col = "p_value_for_plot"
+    else:
+        p_col = "p_value_adjusted"
+
     # Build the immutable per-call config — no global mutation
     cfg = _ReportConfig(
         primary_n_segments  = primary_n_segments,
@@ -1590,6 +1857,7 @@ def generate_statistical_report(
         alpha_adjusted      = alpha_adjusted,
         include_ols         = include_ols,
         target_power        = target_power,
+        p_col               = p_col,
     )
 
     # Print pipeline coverage gaps to stdout before writing the report
@@ -1601,6 +1869,7 @@ def generate_statistical_report(
         alpha               = cfg.alpha_adjusted,
         primary_n_segments  = cfg.primary_n_segments,
         resolution_segments = cfg.resolution_segments,
+        cfg=cfg,
     )
 
     frames = {
@@ -1653,6 +1922,13 @@ def generate_statistical_report(
                 cfg=cfg,
             )
         )
+
+    # ── Subject clustering + MI moderator summary ─────────────────────────────
+    if subject_clusters_frame is not None and not subject_clusters_frame.empty:
+        lines.append(_section_subject_clusters(subject_clusters_frame))
+
+    if mi_summary_frame is not None and not mi_summary_frame.empty:
+        lines.append(_section_mi_summary(mi_summary_frame, include_targets=mi_include_targets))
 
     # Per-hypothesis × DV blocks
     hyp_dv_pairs = (
