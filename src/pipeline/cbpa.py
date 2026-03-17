@@ -93,7 +93,6 @@ class CBPAConfig:
     I/O
     ---
     data_root             : project root (parent of data/ and output/)
-    n_subjects            : number of subjects to include
     psd_time_window_sec   : window size used during PSD computation (seconds)
     cmc_time_window_sec   : window size used during CMC computation (seconds)
     psd_is_log_scaled     : whether PSD was log-scaled during feature extraction
@@ -117,6 +116,9 @@ class CBPAConfig:
     # Segmentation
     n_within_trial_segs: int = 1
 
+    # Subject Subset
+    exclude_subjects: list[int] = None
+
     # CBPA
     alpha_cluster_forming: float = 0.05
     n_permutations: int = 1000
@@ -127,7 +129,6 @@ class CBPAConfig:
 
     # I/O
     data_root: Path = field(default_factory=lambda: Path().resolve().parent)
-    n_subjects: int = 11
     psd_time_window_sec: float = 0.25
     cmc_time_window_sec: float = 2.0
     overlap_ratio: float = .5
@@ -631,9 +632,13 @@ def build_contrast_array(
     # Derive valid subject IDs directly from the stats frame.
     # This automatically excludes subjects 9/10 (not yet collected)
     # and any future gaps, without requiring manual n_subjects updates.
-    valid_subject_ids: list[int] = sorted(stats_df["Subject ID"].astype(int).unique())
-    print(f"  [subjects] Running on {len(valid_subject_ids)} subjects "
-          f"from stats frame: {valid_subject_ids}")
+    valid_subject_ids = sorted(stats_df["Subject ID"].astype(int).unique())
+
+    if cfg.exclude_subjects:
+        print(f"  [Exclusions] Skipping subjects: {cfg.exclude_subjects}")
+        valid_subject_ids = [s for s in valid_subject_ids if s not in cfg.exclude_subjects]
+
+    print(f"  [subjects] Running on {len(valid_subject_ids)} subjects: {valid_subject_ids}")
 
 
     diffs: list[np.ndarray] = []
