@@ -1,4 +1,5 @@
 import numpy as np
+import warnings
 from pathlib import Path
 import pandas as pd
 import matplotlib as mpl
@@ -1696,6 +1697,35 @@ def _plot_line_with_ci(
     if lower_ci is not None and upper_ci is not None:
         ax.fill_between(time, lower_ci, upper_ci, alpha=ci_alpha, color=color)
 
+def _resolve_p_column(
+    df: pd.DataFrame,
+    significance_source: Literal["autocorr", "fdr", "auto"] = "auto",
+    fdr_col: str = "p_value_fdr",
+    autocorr_col: str = "p_value_adjusted",
+    fallback_col: str = "p_value_for_plot",
+) -> str:
+    """Return the name of the p-value column to use for significance colouring.
+
+    'auto'     → use p_value_for_plot if present (FDR where available,
+                 autocorr-adjusted elsewhere), else p_value_adjusted
+    'fdr'      → use p_value_fdr; warn if column is absent or all-NaN
+    'autocorr' → always use p_value_adjusted
+    """
+    if significance_source == "autocorr":
+        return autocorr_col
+    if significance_source == "fdr":
+        if fdr_col not in df.columns or df[fdr_col].isna().all():
+            warnings.warn(
+                f"[Forest plot] significance_source='fdr' but '{fdr_col}' is "
+                f"absent or all-NaN. Falling back to '{autocorr_col}'."
+            )
+            return autocorr_col
+        return fdr_col
+    # 'auto'
+    if fallback_col in df.columns and not df[fallback_col].isna().all():
+        return fallback_col
+    return autocorr_col
+
 
 def draw_forest_plot(ax, effects_frame: pd.DataFrame,
                      hypothesis_column: str = 'Hypothesis',
@@ -2121,6 +2151,7 @@ def plot_time_resolution_forest_mosaic(
         hidden: bool = False,
         plot_size: tuple[int, int] | Literal['auto'] = 'auto',
         show_legend: bool = False,
+        significance_source: Literal["autocorr", "fdr", "auto"] = "auto",
 ):
     """
     Mosaic of time-resolution forest plots — one column per hypothesis,
@@ -2178,6 +2209,10 @@ def plot_time_resolution_forest_mosaic(
         axs = [axs]
 
     for col_ind, hypothesis in enumerate(hypotheses):
+
+        hyp_subset = df[df["Hypothesis"] == hypothesis]
+        p_col = _resolve_p_column(hyp_subset, significance_source)
+
         print(f"Plotting time-resolution forest plot ({col_ind}) for hypothesis: {hypothesis}")
 
         draw_time_resolution_forest_plot(
@@ -2187,6 +2222,7 @@ def plot_time_resolution_forest_mosaic(
             comparison_level=comparison_level,
             time_resolution_column=time_resolution_column,
             hypothesis=hypothesis,
+            p_column=p_col,
             y_axis_label=y_axis_label if col_ind == 0 else '',
             include_y_labels=(col_ind == 0),  # only label y-axis on first column
             show_significance_legend=(col_ind == 0) and show_legend,
@@ -2207,17 +2243,17 @@ def plot_time_resolution_forest_mosaic(
         plt.show()
 
 
-def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
-                                  hypotheses: list[str],
-                                  exclude_intercepts: bool = True,
-                                  model_type: str | None  = 'LME',
-                                  output_dir: Path = None,
-                                  file_identifier_suffix: str | None = None,
-                                  hidden: bool = False,
-                                  plot_size: tuple[int, int] | Literal['auto'] = 'auto',
-                                  ):
-    # ... (docstring unchanged) ...
-
+def plot_hypothesis_forest_mosaic(
+    result_frame: pd.DataFrame,
+    hypotheses: list[str],
+    exclude_intercepts: bool = True,
+    model_type: str | None = "LME",
+    output_dir: Path = None,
+    file_identifier_suffix: str | None = None,
+    hidden: bool = False,
+    plot_size: tuple[int, int] | Literal["auto"] = "auto",
+    significance_source: Literal["autocorr", "fdr", "auto"] = "auto",
+):
     # slice results_frame:
     results_frame_subset = result_frame.copy()
     if exclude_intercepts:
@@ -2250,12 +2286,16 @@ def plot_hypothesis_forest_mosaic(result_frame: pd.DataFrame,
 
     # plot hypothesis forest plots:
     for col_ind, hypothesis in enumerate(hypotheses):
-        print(f"Plotting forest plot ({col_ind}) for hypothesis: {hypothesis}")
+        hyp_subset = results_frame_subset.loc[
+            results_frame_subset["Hypothesis"] == hypothesis
+            ]
+        p_col = _resolve_p_column(hyp_subset, significance_source)
 
         axs[col_ind], _ = draw_forest_plot(
             axs[col_ind],
-            effects_frame=results_frame_subset.loc[results_frame_subset['Hypothesis'] == hypothesis, :],
-            include_y_labels=(col_ind == 0)
+            effects_frame=hyp_subset,
+            p_column=p_col,
+            include_y_labels=(col_ind == 0),
         )
 
     fig_title = f"Effect Size Overview{f' ({model_type} models)' if model_type is not None else ''}{f' ({file_identifier_suffix})' if file_identifier_suffix is not None else ''}"
