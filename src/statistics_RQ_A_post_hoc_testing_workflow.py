@@ -18,12 +18,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
-import pandas as pd
-
-from src.pipeline.visualizations import EEG_CHANNEL_IND_DICT, EEG_CHANNELS_BY_AREA, EEG_CHANNELS
+from src.pipeline.visualizations import EEG_CHANNELS_BY_AREA, EEG_CHANNELS
 from src.pipeline.cbpa import CBPAConfig, run_batch
-import src.pipeline.data_integration as data_integration
-import src.utils.file_management as filemgmt
 from src.pipeline.heterogeneity_modelling import run_heterogeneity_modelling
 
 
@@ -34,7 +30,9 @@ if __name__ == "__main__":
     OUTPUT = ROOT / "output" / "statistics_RQ_A" / "post_hoc_testing"
     EXPERIMENT_RESULTS = ROOT / "data" / "experiment_results"
     OMNIBUS_TESTING_RESULTS = ROOT / "output" / "statistics_RQ_A" / "omnibus_testing"
-    N_SUBJECTS = 12  # needs to match statistical summary frame in pre-computed features.
+
+    # run on subset?
+    exclude_subjects: list[int] = []
 
     # workflow control:
     analyse_cbp: bool = False
@@ -92,8 +90,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_beta_Classic_vs_Silence",
             ),
 
@@ -112,8 +109,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_beta_Happy_vs_Classic",
             ),
 
@@ -132,8 +128,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_beta_Groovy_vs_Classic",
             ),
 
@@ -153,8 +148,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H1_CMC_Flexor_beta_Happy_vs_Silence",
             ),
 
@@ -173,8 +167,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_beta_Happy_vs_Silence",
             ),
 
@@ -194,8 +187,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_gamma_Happy_vs_Silence",
             ),
 
@@ -214,8 +206,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H1_CMC_Flexor_gamma_Happy_vs_Silence",
             ),
 
@@ -235,8 +226,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H1_CMC_Flexor_beta_Groovy_vs_Silence",
             ),
 
@@ -255,8 +245,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_beta_Groovy_vs_Silence",
             ),
 
@@ -275,8 +264,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_gamma_Groovy_vs_Silence",
             ),
 
@@ -295,8 +283,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H1_CMC_Flexor_gamma_Groovy_vs_Silence",
             ),
 
@@ -320,8 +307,7 @@ if __name__ == "__main__":
                 n_permutations=1000,
                 use_spatio_temporal=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H2_theta_FC_CP_T_Happy_vs_Silence",
             ),
 
@@ -340,8 +326,7 @@ if __name__ == "__main__":
                 n_permutations=1000,
                 use_spatio_temporal=True,
                 data_root=ROOT,
-                n_subjects=N_SUBJECTS,
-                output_dir=OUTPUT,
+                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
                 hypothesis_label="H5_gamma_Global_Happy_vs_Silence",
             ),
         ]
@@ -368,5 +353,5 @@ if __name__ == "__main__":
             output_dir=OUTPUT,
             omnibus_results_dir=OMNIBUS_TESTING_RESULTS,
             experiment_results_dir=EXPERIMENT_RESULTS,
-            n_subjects=N_SUBJECTS,
+            exclude_subjects=exclude_subjects,
         )

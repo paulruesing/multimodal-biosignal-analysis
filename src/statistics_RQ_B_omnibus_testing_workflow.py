@@ -112,6 +112,9 @@ if __name__ == '__main__':
     ##### PARAMETERS
     n_within_trial_segments_list: list[int] = [1, 2, 3, 4, 5, 8, 10, 20]
 
+    # operate on subset of subjects?
+    exclude_subjects: list[int] = []
+
     # Accuracy column name as written by statistics_data_preparation.py
     ACCURACY_COL: str = 'RMS_Accuracy'
 
@@ -216,6 +219,16 @@ if __name__ == '__main__':
         )
         print(f"Loaded summary frame for n_segments={n_within_trial_segments} "
               f"({len(all_subject_data_frame)} rows)\n")
+
+        # ── Apply subject exclusions ──────────────────────────────────────────────
+        if exclude_subjects:
+            before = all_subject_data_frame["Subject ID"].nunique()
+            all_subject_data_frame = all_subject_data_frame.loc[
+                ~all_subject_data_frame["Subject ID"].isin(exclude_subjects)
+            ].reset_index(drop=True)
+            after = all_subject_data_frame["Subject ID"].nunique()
+            print(f"  [Exclusions] Removed subjects {exclude_subjects}: {before} → {after} subjects remaining.\n")
+
 
         # Skip frame silently if accuracy column absent (pre-dates RQ2 addition)
         if ACCURACY_COL not in all_subject_data_frame.columns:
