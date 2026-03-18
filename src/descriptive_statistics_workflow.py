@@ -18,10 +18,10 @@ _DKBLUE   = "#1F4E79"   # hand: Left
 _SALMON   = "#FF9999"   # trials: Silence
 
 # ── Per-subplot base colours (kept clearly distinct from bars above) ──────────
-_COLOR_SUBJECT  = "#4472C4"   # blue   — subject-level trait scores
-_COLOR_TRIAL    = "#70AD47"   # green  — trial-level subjective scores
-_COLOR_CMC      = "#E8743B"   # orange — CMC coherence values
-_COLOR_ACCURACY = "#7B2D8B"   # purple — RMS error
+_COLOR_SUBJECT  = "white" # "#4472C4"   # blue   — subject-level trait scores
+_COLOR_TRIAL    = "white" # "#70AD47"   # green  — trial-level subjective scores
+_COLOR_CMC      = "white" # "#E8743B"   # orange — CMC coherence values
+_COLOR_ACCURACY = "white" #"#7B2D8B"   # purple — RMS error
 
 # ── Bar colour mappings ───────────────────────────────────────────────────────
 _GENDER_COLORS = {"Male": _BABYBLUE, "Female": _PINK}
@@ -41,6 +41,7 @@ def _compute_scatter_x(
     center: float,
     spread: float = 0.12,
     max_spread_group_size: int = 10,
+        jitter: float = .0,
 ) -> np.ndarray:
     """
     Compute x-positions for scatter overlay on a boxplot.
@@ -65,6 +66,10 @@ def _compute_scatter_x(
     np.ndarray
         X-positions, same length as `data`.
     """
+    if jitter > 0:
+        rng = np.random.default_rng(seed=42)
+        return rng.uniform(center - jitter, center + jitter, size=len(data))
+
     groups: dict[float, list[int]] = defaultdict(list)
     for i, v in enumerate(data):
         groups[round(float(v), 6)].append(i)
@@ -137,53 +142,74 @@ def _draw_multi_boxplot(
     panels: list[tuple[str, pd.Series]],
     color: str,
     ylabel: str = "",
+        boxwidth: float = 0.8,
     alpha_range: tuple[float, float] = (0.45, 0.85),
     max_spread_group_size: int = 10,
+    subject_metadata: pd.DataFrame | None = None,
+    # subject_metadata: DataFrame indexed by Subject ID,
+    # must contain 'Gender' and 'Dominant hand' columns
+        jitter: float = 0.0,
 ) -> None:
-    """
-    Draw multiple boxplots on a single axes at integer x-positions 1, 2, 3, …
+    _HAND_COLOR  = {"Right": "#C00000", "Left": "#1F4E79"}
+    _GENDER_MARK = {"Male": "^", "Female": "o"}
+    _FALLBACK_COLOR  = "#1A1A2E"
+    _FALLBACK_MARKER = "o"
 
-    All boxes share the same base colour; alpha increases linearly across
-    panels from `alpha_range[0]` to `alpha_range[1]` to add visual separation
-    without introducing a second colour dimension.
-
-    Parameters
-    ----------
-    ax : plt.Axes
-        Target axes.
-    panels : list of (label, series)
-        Each tuple defines one boxplot.
-    color : str
-        Base face colour applied to all boxes in this axes.
-    ylabel : str, optional
-        Shared y-axis label.
-    alpha_range : tuple of (float, float), optional
-        (min_alpha, max_alpha) spread evenly across panels.
-    max_spread_group_size : int, optional
-        Threshold controlling spread-vs-jitter scatter strategy.
-    """
     n = len(panels)
-    # evenly spaced alpha values; single panel gets the midpoint
     alphas = (np.linspace(alpha_range[0], alpha_range[1], n)
               if n > 1 else [sum(alpha_range) / 2])
 
+    legend_handles: dict[str, plt.Artist] = {}
+
     for pos, ((title, series), alpha) in enumerate(zip(panels, alphas), start=1):
-        data = series.dropna().values
+        data       = series.dropna()
+        values     = data.values
+        subj_ids   = data.index      # Series index must be Subject ID
+
         ax.boxplot(
-            data,
+            values,
             positions=[pos],
             patch_artist=True,
-            widths=0.5,
+            widths=boxwidth,
             showfliers=False,
             medianprops=dict(color="#E74C3C", linewidth=2.5),
             boxprops=dict(facecolor=color, alpha=alpha),
             whiskerprops=dict(linewidth=1.2, color="#555555"),
             capprops=dict(linewidth=1.2, color="#555555"),
         )
+
         x_scatter = _compute_scatter_x(
-            data, center=pos, max_spread_group_size=max_spread_group_size
+            values, center=pos, max_spread_group_size=max_spread_group_size, jitter=jitter,
         )
-        ax.scatter(x_scatter, data, alpha=0.55, color="#1A1A2E", s=22, zorder=3)
+
+        if subject_metadata is not None:
+            # Group by (hand, gender) to batch scatter calls — one call per combo
+            for (hand, gender), group_idx in (
+                pd.Series(subj_ids)
+                .to_frame("sid")
+                .assign(
+                    hand   = lambda d: d["sid"].map(subject_metadata["Dominant hand"]),
+                    gender = lambda d: d["sid"].map(subject_metadata["Gender"]),
+                )
+                .groupby(["hand", "gender"]).groups.items()
+            ):
+                c  = _HAND_COLOR.get(hand,   _FALLBACK_COLOR)
+                mk = _GENDER_MARK.get(gender, _FALLBACK_MARKER)
+                sc = ax.scatter(
+                    x_scatter[group_idx], values[group_idx],
+                    alpha=0.75, color=c, marker=mk, s=32,
+                    zorder=3, edgecolors="white", linewidths=0.4,
+                )
+                # Collect one handle per unique combo for the legend
+                legend_key = f"{gender} / {hand}"
+                if legend_key not in legend_handles:
+                    legend_handles[legend_key] = plt.scatter(
+                        [], [], color=c, marker=mk, s=32,
+                        label=legend_key, edgecolors="white", linewidths=0.4,
+                    )
+        else:
+            ax.scatter(x_scatter, values, alpha=0.55,
+                       color=_FALLBACK_COLOR, s=22, zorder=3)
 
     ax.set_xlim(0.35, n + 0.65)
     ax.set_xticks(range(1, n + 1))
@@ -193,6 +219,13 @@ def _draw_multi_boxplot(
     ax.tick_params(axis="x", length=0)
     ax.spines[["top", "right"]].set_visible(False)
     ax.spines[["left", "bottom"]].set_color("#AAAAAA")
+
+    if legend_handles:
+        ax.legend(
+            handles=list(legend_handles.values()),
+            fontsize=7, loc="best", framealpha=0.7,
+            handletextpad=0.4, borderpad=0.5,
+        )
 
 
 
@@ -217,6 +250,7 @@ def plot_combined_descriptive_mosaic(
     accuracy_series: pd.Series,
     save_path: Path | None = None,
         suptitle: str | None = None,
+        subject_metadata: pd.DataFrame | None = None,
 
 ) -> plt.Figure:
     """
@@ -310,24 +344,31 @@ def plot_combined_descriptive_mosaic(
         ("Dancing Habit",  dancing_habit_series),
         ("Total Fatigue",   fatigue_series),
         ("Total Pleasure",  pleasure_series),
-    ], color=_COLOR_SUBJECT, ylabel="Score [0-7]")
+    ], color=_COLOR_SUBJECT, ylabel="Score [0-7]", boxwidth=.5,  # width slightly reduced here, since subplot is wider
+                        subject_metadata=subject_metadata)
 
     # ── DRAW ROW 2 ───────────────────────────────────────────────────────────
     _draw_multi_boxplot(ax_ratings, [
         ("Liking",      liking_series),
         ("Familiarity", familiarity_series),
-    ], color=_COLOR_TRIAL, ylabel="Score [0-7]")
+    ], color=_COLOR_TRIAL, ylabel="Score [0-7]", subject_metadata=subject_metadata)
 
     _draw_multi_boxplot(ax_cmc, [
         ("Flexor β", cmc_flexor_beta_series),
         ("Flexor γ", cmc_flexor_gamma_series),
-        ("Extensor β",  cmc_extensor_beta_series),
-        ("Extensor γ",  cmc_extensor_gamma_series),
-    ], color=_COLOR_CMC, ylabel="Coherence")
+        ("Extensor β", cmc_extensor_beta_series),
+        ("Extensor γ", cmc_extensor_gamma_series),
+    ], color=_COLOR_CMC, ylabel="Coherence", subject_metadata=subject_metadata,
+                        jitter=.05,
+                        # add jitter here, because continuous y-axis prevents coinciding samples (no width spreading)
+                        )
 
     _draw_multi_boxplot(ax_acc, [
         ("Accuracy", accuracy_series),
-    ], color=_COLOR_ACCURACY, ylabel="RMS Error")
+    ], color=_COLOR_ACCURACY, ylabel="RMS Error", subject_metadata=subject_metadata,
+                        jitter=.1,
+                        # same jitter argumentation here
+                        )
 
     # ── SECTION LABELS ───────────────────────────────────────────────────────
     for y_fig, label in [(0.955, "Participant Characteristics"),
@@ -378,11 +419,15 @@ if __name__ == "__main__":
         })
 
     personal_df          = pd.DataFrame(personal_records)
-    musical_skill_series = personal_df["Musical skill"]
-    athleticism_series   = personal_df["Athleticism"]
-    dancing_habit_series = personal_df["Dancing habit"]
-    fatigue_series       = personal_df["Total fatigue"]    # ← added
-    pleasure_series      = personal_df["Total pleasure"]   # ← added
+    # subject_metadata indexed by Subject ID
+    subject_metadata = personal_df.set_index("Subject ID")[["Gender", "Dominant hand"]]
+
+    # Subject-level series — index them by Subject ID
+    musical_skill_series = personal_df.set_index("Subject ID")["Musical skill"]
+    athleticism_series = personal_df.set_index("Subject ID")["Athleticism"]
+    dancing_habit_series = personal_df.set_index("Subject ID")["Dancing habit"]
+    fatigue_series = personal_df.set_index("Subject ID")["Total fatigue"]
+    pleasure_series = personal_df.set_index("Subject ID")["Total pleasure"]
 
     print("\n── Personal data ───────────────────────────────────────────")
     print(personal_df.to_string(index=False))
@@ -392,21 +437,40 @@ if __name__ == "__main__":
         filemgmt.most_recent_file(FEATURE_OUTPUT_DATA, ".csv", ["Combined Statistics 1seg"])
     )
 
-    music_df           = stats_df.loc[stats_df["Music Listening"].astype(bool)]
+    # Trial-level series — index by Subject ID so each row maps to a subject
+    cmc_flexor_beta_series = stats_df.set_index("Subject ID")["CMC_Flexor_mean_beta"].dropna()
+    cmc_flexor_gamma_series = stats_df.set_index("Subject ID")["CMC_Flexor_mean_gamma"].dropna()
+    cmc_extensor_beta_series = stats_df.set_index("Subject ID")["CMC_Extensor_mean_beta"].dropna()
+    cmc_extensor_gamma_series = stats_df.set_index("Subject ID")["CMC_Extensor_mean_gamma"].dropna()
+
+    music_df = stats_df.loc[stats_df["Music Listening"].astype(bool)]
+    liking_series = music_df.set_index("Subject ID")["Liking [0-7]"].dropna()
+    familiarity_series = music_df.set_index("Subject ID")["Familiarity [0-7]"].dropna()
+    accuracy_series = stats_df.set_index("Subject ID")["RMS_Accuracy"].dropna()
+
+    """musical_skill_series = personal_df["Musical skill"]
+    athleticism_series   = personal_df["Athleticism"]
+    dancing_habit_series = personal_df["Dancing habit"]
+    fatigue_series       = personal_df["Total fatigue"]
+    pleasure_series      = personal_df["Total pleasure"]
+
+    
+
+    
     liking_series      = music_df["Liking [0-7]"].dropna()
-    familiarity_series = music_df["Familiarity [0-7]"].dropna()
+    familiarity_series = music_df["Familiarity [0-7]"].dropna()"""
 
     print("\n── Trial counts ────────────────────────────────────────────")
     print(f"  Total:   {len(stats_df)}")
     print(f"  Music:   {stats_df['Music Listening'].astype(bool).sum()}")
     print(f"  Silence: {(~stats_df['Music Listening'].astype(bool)).sum()}")
 
-    # ── Study results ────────────────────────────────────────────────────────
+    """# ── Study results ────────────────────────────────────────────────────────
     cmc_flexor_beta_series    = stats_df["CMC_Flexor_mean_beta"].dropna()
     cmc_flexor_gamma_series   = stats_df["CMC_Flexor_mean_gamma"].dropna()
     cmc_extensor_beta_series  = stats_df["CMC_Extensor_mean_beta"].dropna()
     cmc_extensor_gamma_series = stats_df["CMC_Extensor_mean_gamma"].dropna()
-    accuracy_series           = stats_df["RMS_Accuracy"].dropna()
+    accuracy_series           = stats_df["RMS_Accuracy"].dropna()"""
 
     # ── Render ───────────────────────────────────────────────────────────────
     plot_combined_descriptive_mosaic(
@@ -419,6 +483,7 @@ if __name__ == "__main__":
         cmc_extensor_beta_series,  cmc_extensor_gamma_series,
         accuracy_series,
         save_path=DESCRIPTIVE_OUTPUT / "descriptive_statistics_mosaic.png",
+        subject_metadata=subject_metadata,
     )
 
     plt.show()
