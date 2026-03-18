@@ -916,10 +916,13 @@ def _section_findings(
         if not near.empty:
             lines.append("**Near-significant (0.05 < p < 0.10):**\n")
             lines.append(
-                "| Parameter | Level | Model | β | SE (adj) | p (autocorr) | p (FDR) | Cohen's d | Magnitude |")
+                "| Parameter | Level | Model | β | SE (adj) | p (autocorr) | p (FDR) | Cohen's d | Magnitude |"
+            )
             lines.append("|---|---|---|---|---|---|---|---|---|")
             for _, r in sig.iterrows():
-                p_fdr_str = _fmt_p(r.get("p_value_fdr")) if "p_value_fdr" in r.index else "—"
+                d = r.get("Cohen_d")
+                mag = _cohens_d_label(d) if pd.notna(d) else "—"
+                p_fdr_str = _fmt_p(r["p_value_fdr"]) if "p_value_fdr" in r.index and pd.notna(r["p_value_fdr"]) else "—"
                 lines.append(
                     f"| {_clean_param(r['Parameter'])}{_stars(r[cfg.p_col])} "
                     f"| {_short_level(r['Comparison_Level'])} "
@@ -927,10 +930,15 @@ def _section_findings(
                     f"| {_fmt_float(r['Coefficient'])} "
                     f"| {_fmt_float(r['SE_adjusted'])} "
                     f"| {_fmt_p(r['p_value_adjusted'])} "
-                    f"| {p_fdr_str} "  # ← new column
-                    f"| {_fmt_float(r.get('Cohen_d'))} "
+                    f"| {p_fdr_str} "
+                    f"| {_fmt_float(d)} "
+                    f"| {mag} |"
                 )
-            lines.append("")
+            lines.append(
+                "\n`*` p<0.05  `**` p<0.01  `***` p<0.001  "
+                "(stars use FDR-corrected p for Levels 2–3, autocorr-adjusted for Levels 0–1; "
+                "CIs unchanged — BH adjusts the decision threshold, not the SE)\n"
+            )
         return "\n".join(lines)
 
     sig = sig.assign(abs_d=sig["Cohen_d"].abs()).sort_values("abs_d", ascending=False)
@@ -940,23 +948,29 @@ def _section_findings(
         f"({model_label}, {cfg.primary_n_segments}-seg, adjusted α = {alpha}):\n"
     )
     lines.append(
-        "| Parameter | Level | Model | β | SE (adj) | p (adj) | Cohen's d | Magnitude |"
+        "| Parameter | Level | Model | β | SE (adj) | p (autocorr) | p (FDR) | Cohen's d | Magnitude |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     for _, r in sig.iterrows():
-        d   = r.get("Cohen_d")
+        d = r.get("Cohen_d")
         mag = _cohens_d_label(d) if pd.notna(d) else "—"
+        p_fdr_str = _fmt_p(r["p_value_fdr"]) if "p_value_fdr" in r.index and pd.notna(r["p_value_fdr"]) else "—"
         lines.append(
             f"| {_clean_param(r['Parameter'])}{_stars(r[cfg.p_col])} "
             f"| {_short_level(r['Comparison_Level'])} "
             f"| {r['Model_Type']} "
             f"| {_fmt_float(r['Coefficient'])} "
             f"| {_fmt_float(r['SE_adjusted'])} "
-            f"| {_fmt_p(r[cfg.p_col])} "
+            f"| {_fmt_p(r['p_value_adjusted'])} "
+            f"| {p_fdr_str} "
             f"| {_fmt_float(d)} "
             f"| {mag} |"
         )
-    lines.append("\n`*` p<0.05  `**` p<0.01  `***` p<0.001 (SE adjusted for autocorrelation)\n")
+    lines.append(
+        "\n`*` p<0.05  `**` p<0.01  `***` p<0.001  "
+        "(stars use FDR-corrected p for Levels 2–3, autocorr-adjusted for Levels 0–1; "
+        "CIs unchanged — BH adjusts the decision threshold, not the SE)\n"
+    )
 
     all_segs = sorted(res["N. Segments"].dropna().unique())
     if len(all_segs) > 1:
@@ -1036,8 +1050,8 @@ def _section_cross_resolution(
             f"**Parameter:** `{_clean_param(param)}` "
             f"| **Level:** {_short_level(comp_level)}\n"
         )
-        lines.append("| Segs | β | SE (adj) | p (adj) | Cohen's d | Magnitude | Sig? |")
-        lines.append("|---|---|---|---|---|---|---|")
+        lines.append("| Segs | β | SE (adj) | p (autocorr) | p (FDR) | Cohen's d | Magnitude | Sig? |")
+        lines.append("|---|---|---|---|---|---|---|---|")
 
         for n_seg in available_segs:
             row_match = res[
@@ -1051,17 +1065,20 @@ def _section_cross_resolution(
                 continue
 
             r              = row_match.iloc[0]
-            p_adj          = r['p_value_adjusted']
+            p_adj = r["p_value_adjusted"]
+            p_fdr_str = _fmt_p(r["p_value_fdr"]) if "p_value_fdr" in r.index and pd.notna(r.get("p_value_fdr")) else "—"
+            p_for_sig = r.get(cfg.p_col, p_adj)  # use cfg.p_col for the ✅/⚠️ verdict
+            sig_ico = "✅" if (pd.notna(p_for_sig) and p_for_sig < alpha) else "⚠️"
             cohen_d        = r.get("Cohen_d")
             mag            = _cohens_d_label(cohen_d) if pd.notna(cohen_d) else "—"
-            sig_ico        = "✅" if (pd.notna(p_adj) and p_adj < alpha) else "⚠️"
             primary_marker = " ← primary" if n_seg == cfg.primary_n_segments else ""
 
             lines.append(
                 f"| **{n_seg}-seg**{primary_marker} "
                 f"| {_fmt_float(r['Coefficient'])} "
                 f"| {_fmt_float(r['SE_adjusted'])} "
-                f"| {_fmt_p(p_adj)}{_stars(p_adj)} "
+                f"| {_fmt_p(p_adj)} "
+                f"| {p_fdr_str} "
                 f"| {_fmt_float(cohen_d)} "
                 f"| {mag} "
                 f"| {sig_ico} |"
@@ -1080,8 +1097,8 @@ def _section_cross_resolution(
                 ]
             if match.empty:
                 continue
-            p = match.iloc[0]['p_value_adjusted']
-            if pd.notna(p) and p < alpha:
+            p_to_check = match.iloc[0].get(cfg.p_col, match.iloc[0]["p_value_adjusted"])
+            if pd.notna(p_to_check) and p_to_check < alpha:
                 sig_at.append(n)
 
         n_avail = len(available_segs)
@@ -1840,13 +1857,19 @@ def generate_statistical_report(
     """
     # ── Apply FDR correction if requested ────────────────────────────────────
     if fdr_levels_to_correct:
-        omnibus_results_frame = _apply_fdr_to_results(
-            omnibus_results_frame,
-            levels_to_correct=fdr_levels_to_correct,
-            alpha=alpha_adjusted,
-            group_by_dv=fdr_group_by_dv,
-        )
-        p_col = "p_value_for_plot"
+        if "p_value_for_plot" in omnibus_results_frame.columns:
+            # FDR already applied during omnibus workflow — use saved columns directly
+            print("  [Report FDR] Using pre-computed p_value_fdr from results frame.")
+            p_col = "p_value_for_plot"
+        else:
+            # Fallback: apply now (e.g. when loading an older CSV without FDR columns)
+            omnibus_results_frame = _apply_fdr_to_results(
+                omnibus_results_frame,
+                levels_to_correct=fdr_levels_to_correct,
+                alpha=alpha_adjusted,
+                group_by_dv=fdr_group_by_dv,
+            )
+            p_col = "p_value_for_plot"
     else:
         p_col = "p_value_adjusted"
 
