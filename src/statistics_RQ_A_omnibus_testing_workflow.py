@@ -7,16 +7,16 @@ import src.pipeline.visualizations as visualizations
 import src.utils.file_management as filemgmt
 
 
-def fetch_level_definitions(multi_segments_per_trial: bool) -> list[dict]:
+def fetch_level_definitions(multi_segments_per_trial: bool, always_include_scaled_force: bool = False) -> list[dict]:
     return [
         ######### CONFIRMATORY ANALYSES ############
         # Level 0 — all data, music vs. silence
         {
             'df_filter': None,
             'condition_vars': {'Music Listening': 'categorical'},
-            'reference_categories': {'Music Listening': 'False'},
+            'reference_categories': {'Music Listening': False},
             'explanatory_vars': (['Median Scaled Force [0-1]',
-                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial else [
+                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial or always_include_scaled_force else [
                 'Median Unscaled Force [% MVC]']) + (
                                     ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
             'moderation_pairs': [('Music Listening', 'Musical skill [0-7]_centered'),
@@ -28,7 +28,7 @@ def fetch_level_definitions(multi_segments_per_trial: bool) -> list[dict]:
             'condition_vars': {'Category or Silence': 'categorical'},
             'reference_categories': {'Category or Silence': 'Silence'},
             'explanatory_vars': (['Median Scaled Force [0-1]',
-                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial else [
+                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial or always_include_scaled_force else [
                 'Median Unscaled Force [% MVC]']) + (
                                     ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
             'moderation_pairs': [('Category or Silence', 'Musical skill [0-7]_centered'),
@@ -42,7 +42,7 @@ def fetch_level_definitions(multi_segments_per_trial: bool) -> list[dict]:
             'condition_vars': {'Perceived Category': 'categorical', 'Familiarity [0-7]': 'ordinal'},
             'reference_categories': {'Perceived Category': 'Classic'},
             'explanatory_vars': (['Median Scaled Force [0-1]',
-                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial else [
+                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial or always_include_scaled_force else [
                 'Median Unscaled Force [% MVC]']) + ['Liking [0-7]'] + (
                                     ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
             'moderation_pairs': [('Perceived Category', 'Musical skill [0-7]_centered'),
@@ -53,7 +53,7 @@ def fetch_level_definitions(multi_segments_per_trial: bool) -> list[dict]:
             'df_filter': lambda df: df.loc[df['Music Listening']],
             'condition_vars': {'Familiarity [0-7]': 'ordinal'},
             'explanatory_vars': (['Median Scaled Force [0-1]',
-                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial else [
+                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial or always_include_scaled_force else [
                 'Median Unscaled Force [% MVC]']) + ['Liking [0-7]',
                                                      'BPM_manual', 'Spectral Flux Mean', 'Spectral Centroid Mean',
                                                      'IOI Variance Coeff', 'Syncopation Ratio'] + (
@@ -82,7 +82,7 @@ if __name__ == '__main__':
     n_within_trial_segments_list: list[int] = [1, 2, 5, 10]  # of ~40sec trials
 
     # Subjects to exclude from all analyses (e.g. outliers or incomplete data)
-    exclude_subjects: list[int] = [7, 8]
+    exclude_subjects: list[int] = []
 
 
     ## Data Exploration
@@ -123,10 +123,10 @@ if __name__ == '__main__':
         ('VALIDATION: EMG Extensor PSD Increases with Force', 'PSD_emg_2_extensor_Global_all'),
 
         # Possible Mediators:
-        ('MEDIATION: Heart Rate', 'Median_Heart_Rate_[bpm]'),
-        ('MEDIATION: HRV', 'Median_HRV_[sec]'),
-        ('MEDIATION: GSR', 'GSR_[0-3.3]'),
-        ('MEDIATION: Emotional Modulation', 'Emotional_State_[0-7]'),
+        ('MEDIATION: Heart Rate', 'Median_Heart_Rate'),
+        ('MEDIATION: HRV', 'Median_HRV'),
+        ('MEDIATION: GSR', 'GSR'),
+        ('MEDIATION: Emotional Modulation', 'Emotional_State'),
 
     ]
     save_single_time_res_summaries: bool = False
@@ -477,7 +477,7 @@ if __name__ == '__main__':
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_mean_gamma",
             comp_lvl=1,
-            n_segments=1,
+            n_segments=2,
             target_parameters=[
                 "Q('Median Scaled Force [0-1]')",
                 "Q('Segment ID')"
@@ -488,7 +488,7 @@ if __name__ == '__main__':
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_max_gamma",
             comp_lvl=1,
-            n_segments=1,
+            n_segments=2,
             target_parameters=[
                 "Q('Median Scaled Force [0-1]')",
                 "Q('Segment ID')"
@@ -499,7 +499,7 @@ if __name__ == '__main__':
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_mean_beta",
             comp_lvl=1,
-            n_segments=1,
+            n_segments=2,
             target_parameters=[
                 "Q('Median Scaled Force [0-1]')",
                 "Q('Segment ID')"
@@ -510,7 +510,7 @@ if __name__ == '__main__':
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_max_beta",
             comp_lvl=1,
-            n_segments=1,
+            n_segments=2,
             target_parameters=[
                 "Q('Median Scaled Force [0-1]')",
                 "Q('Segment ID')"
@@ -521,7 +521,7 @@ if __name__ == '__main__':
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_mean_gamma",
             comp_lvl=1,
-            n_segments=1,
+            n_segments=2,
             target_parameters=[
                 "Q('Median Scaled Force [0-1]')",
                 "Q('Segment ID')"
@@ -532,7 +532,7 @@ if __name__ == '__main__':
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_max_gamma",
             comp_lvl=1,
-            n_segments=1,
+            n_segments=2,
             target_parameters=[
                 "Q('Median Scaled Force [0-1]')",
                 "Q('Segment ID')"
@@ -543,7 +543,7 @@ if __name__ == '__main__':
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_mean_beta",
             comp_lvl=1,
-            n_segments=1,
+            n_segments=2,
             target_parameters=[
                 "Q('Median Scaled Force [0-1]')",
                 "Q('Segment ID')"
@@ -553,7 +553,7 @@ if __name__ == '__main__':
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_max_beta",
             comp_lvl=1,
-            n_segments=1,
+            n_segments=2,
             target_parameters=[
                 "Q('Median Scaled Force [0-1]')",
                 "Q('Segment ID')"
@@ -709,6 +709,12 @@ if __name__ == '__main__':
             results_frame = pd.DataFrame(all_model_results)
             diagnostics_frame = pd.DataFrame(all_diagnostics)
 
+            ### ADD DESCRIPTIVE TIME-RES VARIABLES:
+            results_frame['Time Resolution'] = 40 / n_within_trial_segments
+            diagnostics_frame['Time Resolution'] = 40 / n_within_trial_segments
+            results_frame['N. Segments'] = n_within_trial_segments
+            diagnostics_frame['N. Segments'] = n_within_trial_segments
+
             # ── FDR correction for exploratory levels (per time resolution) ───────────
             # Applied here so forest plots reflect corrected significance.
             # Levels 0–1 are confirmatory (pre-specified, directional) — no correction.
@@ -794,12 +800,8 @@ if __name__ == '__main__':
 
 
 
-            # n. segment-dependent vars:
-            results_frame['Time Resolution'] = 40 / n_within_trial_segments
-            diagnostics_frame['Time Resolution'] = 40 / n_within_trial_segments
-            results_frame['N. Segments'] = n_within_trial_segments
-            diagnostics_frame['N. Segments'] = n_within_trial_segments
 
+            ### SAVE TIME-RES FRAME
             # save:
             all_time_resolutions_results_list.append(results_frame.copy())
             all_diagnostics_list.append(diagnostics_frame.copy())
