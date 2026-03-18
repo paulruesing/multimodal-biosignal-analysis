@@ -956,6 +956,10 @@ def apply_fdr_correction(
     eligible = df[eligible_mask].copy()
 
     # Define grouping keys
+    # -> important line: By defining the subset for each FDR correction we define the conservativeness.
+    #                    group_by_dv False: subsets = Comp_Lvl x N_Segments
+    #                    group_by_dv True: ... x DV (more subsets)
+    #                    -> the SMALLER the family, the more LIBERAL the test.
     group_cols = ["Comparison_Level", "N. Segments"]
     if group_by_dv:
         group_cols.append("Dependent_Variable")
