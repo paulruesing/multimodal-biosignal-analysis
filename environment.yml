@@ -5,12 +5,14 @@ channels:
 dependencies:
   - ipykernel
   - ipython
+  - kaleido
   - numpy
   - matplotlib
   - mne
   - mne-icalabel
   - pandas
   - pip
+  - plotly
   - pytest
   - pytest-cov
   - pytorch
