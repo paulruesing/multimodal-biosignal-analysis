@@ -154,6 +154,124 @@ def smart_save_fig(dir: str | Path,
     save_dir = Path(dir) / filemgmt.file_title(title if title is not None else 'Plot', format)
     plt.savefig(save_dir, bbox_inches='tight')
 
+
+def plot_category_reassignment_sankey(category_reassignment_frame: pd.DataFrame,
+                                      song_colors: dict[str, str],
+                                      preferred_order: list[str] | None = None,
+                                      show_title: bool = False,
+                                      output_dir: str | Path | None = None,
+                                      width: int = 700,
+                                      height: int = 400):
+    """Plot category reassignments as a two-column Sankey (original -> perceived)."""
+    import plotly.graph_objects as go
+
+    if preferred_order is None:
+        preferred_order = ['Happy', 'Groovy', 'Sad', 'Classic']
+
+    sankey_source = category_reassignment_frame[['from', 'to']].dropna()
+    if len(sankey_source) == 0:
+        print("No category reassignments available for Sankey plot.")
+        return None
+
+    transition_counts = (
+        sankey_source
+        .groupby(['from', 'to'], as_index=False)
+        .size()
+        .rename(columns={'size': 'value'})
+    )
+
+    def ordered_categories(values: list[str]) -> list[str]:
+        present = [cat for cat in preferred_order if cat in values]
+        remaining = sorted([cat for cat in values if cat not in preferred_order])
+        return present + remaining
+
+    def spaced_positions(n: int, top: float = 0.08, bottom: float = 0.92) -> list[float]:
+        if n <= 1:
+            return [0.50]
+        return np.linspace(top, bottom, n).tolist()
+
+    def color_with_alpha(category: str, alpha: float) -> str:
+        base_color = song_colors.get(category, 'gray')
+        r, g, b, _ = mcolors.to_rgba(base_color)
+        return f"rgba({int(r * 255)}, {int(g * 255)}, {int(b * 255)}, {alpha:.2f})"
+
+    left_categories = ordered_categories(transition_counts['from'].unique().tolist())
+    right_categories = ordered_categories(transition_counts['to'].unique().tolist())
+
+    left_ids = [f"L::{cat}" for cat in left_categories]
+    right_ids = [f"R::{cat}" for cat in right_categories]
+    node_ids = left_ids + right_ids
+    node_id_to_index = {node_id: ind for ind, node_id in enumerate(node_ids)}
+
+    left_y = spaced_positions(len(left_categories))
+    right_y = spaced_positions(len(right_categories))
+    node_x = [0.13] * len(left_categories) + [0.87] * len(right_categories)
+    node_y = left_y + right_y
+    node_color = [color_with_alpha(cat, 0.85) for cat in (left_categories + right_categories)]
+
+    link_source = [node_id_to_index[f"L::{cat}"] for cat in transition_counts['from']]
+    link_target = [node_id_to_index[f"R::{cat}"] for cat in transition_counts['to']]
+    link_value = transition_counts['value'].to_list()
+    link_color = [color_with_alpha(cat, 0.55) for cat in transition_counts['from']]
+
+    fig = go.Figure(data=[go.Sankey(
+        arrangement='fixed',
+        node=dict(
+            # Render labels outside the node columns via annotations.
+            label=[''] * len(node_ids),
+            x=node_x,
+            y=node_y,
+            pad=36,
+            thickness=18,
+            color=node_color,
+            line=dict(color='rgba(70,70,70,1)', width=1.0),
+        ),
+        link=dict(
+            source=link_source,
+            target=link_target,
+            value=link_value,
+            color=link_color,
+        )
+    )])
+
+    annotations = [
+        dict(text='Original Category', x=0.06, y=1.05, xref='paper', yref='paper', xanchor='right', showarrow=False),
+        dict(text='Perceived Category', x=0.94, y=1.05, xref='paper', yref='paper', xanchor='left', showarrow=False),
+    ]
+    annotations += [
+        dict(text=cat, x=0.06, y=y_pos, xref='paper', yref='paper', xanchor='right', yanchor='middle', showarrow=False)
+        for cat, y_pos in zip(left_categories, left_y)
+    ]
+    annotations += [
+        dict(text=cat, x=0.94, y=y_pos, xref='paper', yref='paper', xanchor='left', yanchor='middle', showarrow=False)
+        for cat, y_pos in zip(right_categories, right_y)
+    ]
+
+    fig.update_layout(
+        title='Category Reassignments' if show_title else None,
+        font_size=12,
+        width=width,
+        height=height,
+        margin=dict(l=140, r=140, t=70, b=30),
+        annotations=annotations,
+    )
+
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        filemgmt.assert_dir(output_dir)
+        save_path = output_dir / filemgmt.file_title("Category Reassignment Sankey Plot", ".svg")
+        try:
+            fig.write_image(str(save_path))
+        except ValueError as e:
+            warnings.warn(
+                "Could not export Sankey plot as SVG. "
+                "Please install kaleido (pip install --upgrade kaleido). "
+                f"Original error: {e}"
+            )
+
+    fig.show()
+    return fig
+
 ##############  PLOTTING FUNCTIONS ##############
 def initialise_electrode_heatmap(
         values: np.ndarray | list[float],
