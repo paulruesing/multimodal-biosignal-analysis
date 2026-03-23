@@ -33,7 +33,7 @@ EEG_CHANNELS: list[str] = list(EEG_CHANNEL_IND_DICT.keys())   # full 64-ch set
 EEG_SFREQ: float = 2048  # Hz — adjust to your actual EEG sampling rate
 
 # CMC subset (11 left-hemisphere motor channels; will be mirrored for left-handers)
-# todo: always needs to match feature_extraction_workflow.py!
+# todo: always needs to match subject_feature_extraction_workflow.py!
 CMC_EEG_CHANNEL_SUBSET: list[str] = [
     "C5", "C3", "C1",
     "FC5", "FC3", "FC1", "F3",
