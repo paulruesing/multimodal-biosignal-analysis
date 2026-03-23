@@ -533,6 +533,49 @@ def get_task_start_end(df: pd.DataFrame,
                        trial_id: int | None = None,
                        silence_id: int | None = None,
                        cut_off_sec_to_prevent_transients: float = 2.0) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """
+    Return start and end timestamps for a single motor task window.
+
+    The task can be selected by `song_id`, `song_title`, `silence_id`, or
+    `trial_id`. If `trial_id` is provided, it is first resolved to song/silence
+    identifiers. For song trials, the time window is restricted to rows where
+    `Task Frequency` is present (active task period).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Enriched log frame containing trial metadata and either a DatetimeIndex
+        or a `Time` column.
+    song_id : int | None, default None
+        Song identifier to select a music trial.
+    song_title : str | None, default None
+        Song title to select a music trial. Must map to exactly one `Song ID`.
+    trial_id : int | None, default None
+        Trial identifier. If given, it takes precedence by resolving to song or
+        silence identifiers.
+    silence_id : int | None, default None
+        Silence-task identifier.
+    cut_off_sec_to_prevent_transients : float, default 2.0
+        Seconds subtracted from the computed end timestamp to avoid transient
+        effects near task end. Set to 0 to disable.
+
+    Returns
+    -------
+    tuple[pd.Timestamp, pd.Timestamp]
+        `(start, end)` timestamps for the selected task window.
+
+    Raises
+    ------
+    ValueError
+        If no selector is provided, the task cannot be found, the song title
+        maps to multiple song IDs, trial is marked for exclusion, or required
+        time information is missing.
+
+    Notes
+    -----
+    Prints informational messages for skipped songs and excluded trials before
+    applying final validation.
+    """
     if song_id is None and song_title is None and silence_id is None and trial_id is None:
         raise ValueError("Either song_id, song_title, trial_id or silence_id must be specified")
 
@@ -595,6 +638,30 @@ def get_all_task_start_ends(enriched_log_df: pd.DataFrame,
                             output_type: Literal['dict', 'list'] = 'dict',
                             cut_off_sec_to_prevent_transients: float = 2.0,
                             ) -> dict[int, tuple[pd.Timestamp, pd.Timestamp]] | list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """
+    Collect task start/end timestamps for all valid trials.
+
+    Iterates over unique `Trial ID` values in the enriched log, computes task
+    windows via `get_task_start_end`, converts timestamps to timezone-aware
+    values, and skips trials that raise `ValueError` (e.g., skipped/excluded or
+    missing task windows).
+
+    Parameters
+    ----------
+    enriched_log_df : pd.DataFrame
+        Enriched log frame containing `Trial ID` and timing/task columns.
+    output_type : Literal['dict', 'list'], default 'dict'
+        Output format. `'dict'` returns `{trial_id: (start, end)}`. `'list'`
+        returns a list of `(start, end)` tuples ordered by trial iteration.
+    cut_off_sec_to_prevent_transients : float, default 2.0
+        Seconds subtracted from each task end timestamp (passed through to
+        `get_task_start_end`).
+
+    Returns
+    -------
+    dict[int, tuple[pd.Timestamp, pd.Timestamp]] | list[tuple[pd.Timestamp, pd.Timestamp]]
+        Start/end windows for all valid trials in the requested format.
+    """
     if output_type == 'dict': trial_start_end_dict: dict[int, tuple[pd.Timestamp, pd.Timestamp]] = {}
     else: start_end_list: list[tuple[pd.Timestamp, pd.Timestamp]] = []
 
@@ -1640,6 +1707,31 @@ def fetch_skipped_trials(enriched_log_df: pd.DataFrame) -> list[int]:
 def fetch_enriched_serial_frame(experiment_data_dir: str | Path, set_time_index: bool = True,
                                 #verbose: bool = True,
                                 ) -> pd.DataFrame:
+    """
+    Load the most recent enriched serial frame for a subject/session.
+
+    Reads the newest CSV in `serial_measurements` matching the signature
+    ``Enriched Serial Frame``. Optionally parses the `Time` column and sets it
+    as the DataFrame index.
+
+    Parameters
+    ----------
+    experiment_data_dir : str | Path
+        Root directory containing the `serial_measurements` subfolder.
+    set_time_index : bool, default True
+        If True, parses `Time` using ISO-8601 and sets it as index.
+
+    Returns
+    -------
+    pd.DataFrame
+        Enriched serial frame loaded from disk.
+
+    Raises
+    ------
+    ValueError
+        If no matching enriched serial frame file can be found in
+        `serial_measurements`.
+    """
     serial_dir = experiment_data_dir / "serial_measurements"
 
     try:
@@ -1688,6 +1780,40 @@ def fetch_personal_data(experiment_data_dir: str | Path, include_name_and_birthd
 
 def fetch_enriched_log_frame(experiment_data_dir: str | Path, set_time_index: bool = True,
                              verbose: bool = True) -> pd.DataFrame:
+    """
+    Load the most recent enriched experiment log for a subject/session.
+
+    Reads the newest CSV in `experiment_logs` matching the signature
+    ``Enriched Experiment Log``. Optionally converts the ``Time`` column to a
+    timezone-aware `DatetimeIndex`.
+
+    Parameters
+    ----------
+    experiment_data_dir : str | Path
+        Root directory containing the `experiment_logs` subfolder.
+    set_time_index : bool, default True
+        If True, parses ``Time`` as datetime, sets it as index, and applies
+        `make_timezone_aware` to the resulting index.
+    verbose : bool, default True
+        If True, prints a concise summary including QTC measurement duration,
+        trial counts, excluded/skipped trials, and valid trial entries.
+
+    Returns
+    -------
+    pd.DataFrame
+        Enriched log frame loaded from disk. The frame has a timezone-aware
+        `DatetimeIndex` when `set_time_index=True`.
+
+    Raises
+    ------
+    ValueError
+        If no matching enriched log file can be found in `experiment_logs`.
+
+    Notes
+    -----
+    Verbose output uses helper methods such as `get_qtc_measurement_start_end`,
+    `fetch_excluded_trials`, and `fetch_skipped_trials` for reporting.
+    """
     log_dir = experiment_data_dir / "experiment_logs"
     try:
         log_path = filemgmt.most_recent_file(log_dir, ".csv", ["Enriched Experiment Log"])
