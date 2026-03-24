@@ -153,6 +153,15 @@ class CBPAConfig:
     """Minimum number of valid cycles a subject must contribute per condition
     to be included in the contrast."""
 
+    # Optional target-sine subplot (below each main panel)
+    show_target_sine: bool = True
+    target_sine_min_pct_mvc: float = 7.5
+    target_sine_max_pct_mvc: float = 22.5
+    target_sine_frequency_hz: float = 0.1
+
+    # Optional figure suptitle (useful to disable for publication figures)
+    include_suptitle: bool = False
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  MNE INFO & ADJACENCY
@@ -490,8 +499,14 @@ def _extract_band_power(
     resolution. Returns shape (n_windows, n_channels_selected).
 
     We call aggregate_psd_spectrogram with a single op on axis=1 (freq) so
-    that the time and channel axes are untouched.
+    that time and channel axes are untouched.
+
+    Pooling rule:
+      - PSD: mean within frequency band
+      - CMC: max within frequency band (matches subject feature extraction)
     """
+    band_op = "max" if cfg.modality == "CMC" else "mean"
+
     band_power = aggregate_psd_spectrogram(
         spectrogram,
         freqs,
@@ -499,7 +514,7 @@ def _extract_band_power(
         channel_indices=channel_indices,
         is_log_scaled=cfg.psd_is_log_scaled if cfg.modality == "PSD" else False,
         freq_slice=cfg.freq_band,
-        aggregation_ops=[("mean", 1)],  # mean over freq band only → (n_windows, n_channels)
+        aggregation_ops=[(band_op, 1)],  # reduce freq band only → (n_windows, n_channels)
     )
     # band_power: (n_windows, n_channels)
     return band_power
@@ -937,6 +952,38 @@ def run_cbpa(
 #  VISUALISATION
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _target_sine_values(x: np.ndarray, cfg: CBPAConfig) -> np.ndarray:
+    """Return target-force sine over x in phase-domain or time-domain units."""
+    x_arr = np.asarray(x, dtype=float)
+    mid = 0.5 * (cfg.target_sine_min_pct_mvc + cfg.target_sine_max_pct_mvc)
+    amp = 0.5 * (cfg.target_sine_max_pct_mvc - cfg.target_sine_min_pct_mvc)
+
+    if cfg.use_phase_normalization:
+        phase_rad = 2.0 * np.pi * (x_arr / 360.0)
+    else:
+        phase_rad = 2.0 * np.pi * cfg.target_sine_frequency_hz * x_arr
+
+    # Match experiment logic: start at mean at x=0.
+    return mid + amp * np.sin(phase_rad)
+
+
+def _plot_target_sine_panel(
+    ax,
+    x: np.ndarray,
+    cfg: CBPAConfig,
+    x_label: str,
+    show_ylabel: bool = True,
+) -> None:
+    """Draw one target-sine panel beneath a main subplot."""
+    y = _target_sine_values(x, cfg)
+    ax.plot(x, y, color="dimgray", linewidth=1.2)
+    pad = 0.1 * max(1e-6, cfg.target_sine_max_pct_mvc - cfg.target_sine_min_pct_mvc)
+    ax.set_ylim(cfg.target_sine_min_pct_mvc - pad, cfg.target_sine_max_pct_mvc + pad)
+    ax.set_ylabel("Force [% MVC]" if show_ylabel else "")
+    ax.set_xlabel(x_label)
+    ax.set_title("Target sine", fontsize=12)
+    ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
+
 def _plot_results(results: dict, cfg: CBPAConfig) -> None:
     t_obs        = results["t_obs"]
     t_thresh     = results["t_thresh"]
@@ -1007,17 +1054,42 @@ def _plot_results(results: dict, cfg: CBPAConfig) -> None:
 
         return flat_mask.reshape(n_times, n_ch)
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5))
-    fig.suptitle(
-        f"{cfg.hypothesis_label}\n"
-        f"Contrast: '{cfg.condition_A}' − '{cfg.condition_B}'  |  "
-        f"{cfg.modality} {cfg.freq_band}  |  "
-        f"n = {n_valid_subjects} subjects, {cfg.n_permutations} permutations",
-        fontsize=10,
-    )
+    if cfg.show_target_sine:
+        fig = plt.figure(figsize=(16, 6))
+        gs = fig.add_gridspec(
+            2,
+            4,
+            width_ratios=[1.0, 0.05, 0.14, 1.0],
+            height_ratios=[5.0, 1.0],
+            wspace=0.12,
+            hspace=0.28,
+        )
+        ax = fig.add_subplot(gs[0, 0])
+        cax = fig.add_subplot(gs[0, 1])
+        ax2 = fig.add_subplot(gs[0, 3])
+        ax_tgt_left = fig.add_subplot(gs[1, 0], sharex=ax)
+        ax_tgt_right = fig.add_subplot(gs[1, 3], sharex=ax2)
+        fig.add_subplot(gs[1, 1]).axis("off")
+        fig.add_subplot(gs[0, 2]).axis("off")
+        fig.add_subplot(gs[1, 2]).axis("off")
+    else:
+        fig = plt.figure(figsize=(16, 5))
+        gs = fig.add_gridspec(1, 4, width_ratios=[1.0, 0.05, 0.14, 1.0], wspace=0.12)
+        ax = fig.add_subplot(gs[0, 0])
+        cax = fig.add_subplot(gs[0, 1])
+        ax2 = fig.add_subplot(gs[0, 3])
+        fig.add_subplot(gs[0, 2]).axis("off")
+
+    if cfg.include_suptitle:
+        fig.suptitle(
+            f"{cfg.hypothesis_label}\n"
+            f"Contrast: '{cfg.condition_A}' − '{cfg.condition_B}'  |  "
+            f"{cfg.modality} {cfg.freq_band}  |  "
+            f"n = {n_valid_subjects} subjects, {cfg.n_permutations} permutations",
+            fontsize=10,
+        )
 
     # ── Panel A: heatmap + cluster contours ──────────────────────────────────
-    ax = axes[0]
     # Use a fixed ±3 baseline for cross-plot comparability;
     # expand only if the observed t-values exceed it
     vlim = max(3.0, np.nanpercentile(np.abs(t_obs), 97))
@@ -1026,7 +1098,7 @@ def _plot_results(results: dict, cfg: CBPAConfig) -> None:
         vmin=-vlim, vmax=vlim,
         extent=[t_ax[0], t_ax[-1], -0.5, n_ch - 0.5],
     )
-    plt.colorbar(im, ax=ax, label="t-statistic", shrink=0.8)
+    plt.colorbar(im, cax=cax, label="t-statistic")
 
     for idx, cluster in enumerate(clusters):
         mask = _resolve_mask(cluster)
@@ -1042,14 +1114,14 @@ def _plot_results(results: dict, cfg: CBPAConfig) -> None:
             )
 
     x_label = "Force Cycle Phase (°)" if cfg.use_phase_normalization else "Time within trial (s)"
-    ax.set_xlabel(x_label)
+    if not cfg.show_target_sine:
+        ax.set_xlabel(x_label)
     ax.set_ylabel("Channel index")
     ax.set_yticks(range(n_ch))
     ax.set_yticklabels(ch_names, fontsize=6)
     ax.set_title("t-statistic map\n(black contour = significant cluster)")
 
     # ── Panel B: significant cluster time courses ─────────────────────────────
-    ax2 = axes[1]
     if len(good_inds) == 0:
         ax2.text(0.5, 0.5, "No significant clusters", ha="center", va="center",
                  transform=ax2.transAxes, fontsize=12, color="grey")
@@ -1073,18 +1145,27 @@ def _plot_results(results: dict, cfg: CBPAConfig) -> None:
         ax2.axhline( t_thresh, color="red", linewidth=0.8, linestyle=":",
                      label=f"±t_thresh ({t_thresh:.2f})")
         ax2.axhline(-t_thresh, color="red", linewidth=0.8, linestyle=":")
-        ax2.set_xlabel(x_label)
-        ax2.set_ylabel("Mean t-statistic over cluster channels")
-        ax2.set_title("Significant cluster time courses")
         ax2.legend(fontsize=8)
 
+    if not cfg.show_target_sine:
+        ax2.set_xlabel(x_label)
+    ax2.set_ylabel("Mean t-statistic over cluster channels")
+    ax2.set_title("Significant cluster time courses")
+
+    if cfg.show_target_sine:
+        _plot_target_sine_panel(ax_tgt_left, t_ax, cfg, x_label=x_label, show_ylabel=True)
+        _plot_target_sine_panel(ax_tgt_right, t_ax, cfg, x_label=x_label, show_ylabel=True)
+
     if cfg.use_phase_normalization:
-        for a in [ax, ax2]:
+        phase_axes = [ax, ax2]
+        if cfg.show_target_sine:
+            phase_axes.extend([ax_tgt_left, ax_tgt_right])
+        for a in phase_axes:
             a.set_xticks([0, 90, 180, 270, 360])
             a.axvline(90,  color="grey", lw=0.5, ls=":")
             a.axvline(270, color="grey", lw=0.5, ls=":")
 
-    plt.tight_layout()
+    fig.subplots_adjust(left=0.06, right=0.985, top=0.90, bottom=0.10)
     if cfg.save_plots:
         out = cfg.output_dir / filemgmt.file_title(cfg.hypothesis_label + "_clusters", ".png")
         fig.savefig(out, dpi=150, bbox_inches="tight")
