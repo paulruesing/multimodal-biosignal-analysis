@@ -107,11 +107,15 @@ if __name__ == "__main__":
             # below two are transformed via key-word (modality) search in columns:
             modalities_to_standardize_per_subject: list[str] = []  # ['PSD', 'Force']  # will change that columns
             modalities_to_center_over_subjects: list[str] = [
+                'Liking',
                 'Listening habit [0-3]', 'Dancing habit [0-7]',
                 'Athleticism [0-7]', 'Musical skill [0-7]']  # will add new columns (COLUMN + _centered)
+            modalities_to_square: list[str] = [
+                'Liking_centered'
+            ]
 
             music_features_to_fetch = ('BPM_manual', 'Spectral Flux Mean', 'Spectral Centroid Mean', 'IOI Variance Coeff',
-                                       'Syncopation Ratio')
+                                       'Syncopation Ratio', 'Spectral Flux Std.')
 
             ########### ITERATE OVER ALL PARTICIPANTS ###########
             all_subject_data_frame = pd.DataFrame(columns=['Subject ID'])
@@ -323,9 +327,17 @@ if __name__ == "__main__":
                         )
                     except ValueError: continue
 
-                    # Assign uniform timestamps: assume taps are evenly distributed over full span
+                    # Accuracy sampling starts after a pre-phase (default 5s), so
+                    # align samples to [trial_start+offset, trial_end].
+                    acc_start = full_start + pd.Timedelta(
+                        seconds=data_integration.TRIAL_ACCURACY_START_OFFSET_SEC
+                    )
+                    if acc_start >= full_end:
+                        continue
+
+                    # Assign uniform timestamps over effective accuracy span
                     accuracy_timestamps = data_analysis.add_time_index(
-                        start_timestamp=full_start,
+                        start_timestamp=acc_start,
                         end_timestamp=full_end,
                         n_timesteps=len(accuracy_array),
                     )
@@ -436,7 +448,7 @@ if __name__ == "__main__":
                     # music features:
                     ('Perceived Category', song_category_per_segment),
                     ('Category or Silence', category_or_silence),
-                    ('Liking [0-7]', song_liking_per_segment),
+                    ('Liking', song_liking_per_segment),
                     ('Familiarity [0-7]', song_familiarity_per_segment),
                     (list(music_features_to_fetch), music_feature_tuples),
 
@@ -475,6 +487,14 @@ if __name__ == "__main__":
                     all_subject_data_frame[f"{column}_centered"] = all_subject_data_frame[column].transform(
                         lambda x: (x - x.mean()))
                     print(f"Added new column: {column}_centered")
+
+            for modality in modalities_to_square:
+                for column in [c for c in all_subject_data_frame.columns if modality in c]:
+                    print("Squaring statistics for: ", column)
+                    all_subject_data_frame[f"{column}_squared"] = (
+                        all_subject_data_frame[column].astype(float) ** 2
+                    )
+                    print(f"Added new column: {column}_squared")
 
             ######### SAVE COMBINED STATISTICS #########
             all_subject_data_frame.to_csv(
