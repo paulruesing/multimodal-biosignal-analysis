@@ -238,12 +238,18 @@ def plot_category_reassignment_sankey(category_reassignment_frame: pd.DataFrame,
         dict(text='Original Category', x=0.06, y=1.05, xref='paper', yref='paper', xanchor='right', showarrow=False),
         dict(text='Perceived Category', x=0.94, y=1.05, xref='paper', yref='paper', xanchor='left', showarrow=False),
     ]
+
+    # Plotly Sankey node.y uses top-origin coordinates, while paper annotations
+    # use bottom-origin coordinates. Convert to keep labels aligned to nodes.
+    def node_y_to_paper_y(y_pos: float) -> float:
+        return 1.0 - y_pos
+
     annotations += [
-        dict(text=cat, x=0.06, y=y_pos, xref='paper', yref='paper', xanchor='right', yanchor='middle', showarrow=False)
+        dict(text=cat, x=0.06, y=node_y_to_paper_y(y_pos), xref='paper', yref='paper', xanchor='right', yanchor='middle', showarrow=False)
         for cat, y_pos in zip(left_categories, left_y)
     ]
     annotations += [
-        dict(text=cat, x=0.94, y=y_pos, xref='paper', yref='paper', xanchor='left', yanchor='middle', showarrow=False)
+        dict(text=cat, x=0.94, y=node_y_to_paper_y(y_pos), xref='paper', yref='paper', xanchor='left', yanchor='middle', showarrow=False)
         for cat, y_pos in zip(right_categories, right_y)
     ]
 
@@ -969,6 +975,17 @@ def plot_scatter(x, y, x_label: str | None = None, y_label: str | None = None,
     # =========================================================================
 
     if include_kdes:
+        def can_compute_kde(values: np.ndarray, eps: float = 1e-12) -> tuple[bool, np.ndarray]:
+            arr = np.asarray(values, dtype=float)
+            arr = arr[np.isfinite(arr)]
+            if arr.size < 2:
+                return False, arr
+            if np.unique(arr).size < 2:
+                return False, arr
+            if np.nanstd(arr) <= eps:
+                return False, arr
+            return True, arr
+
         if categorical_kdes and category_list is not None:
             # Plot separate KDE for each category
             x_range = np.linspace(np.asarray(x).min(), np.asarray(x).max(), 200)
@@ -980,18 +997,30 @@ def plot_scatter(x, y, x_label: str | None = None, y_label: str | None = None,
                 y_cat = np.asarray(y)[mask]
 
                 # Plot X-axis marginal KDE (top)
-                if len(x_cat) > 1:  # Need at least 2 points for KDE
-                    kde_x = gaussian_kde(x_cat)
-                    ax_top.fill_between(x_range, kde_x(x_range), alpha=kde_alpha,
-                                        color=colors[i],
-                                        label=str(cat) if add_kde_legend else None)
+                can_kde_x, x_cat_clean = can_compute_kde(x_cat)
+                if can_kde_x:
+                    try:
+                        kde_x = gaussian_kde(x_cat_clean)
+                        ax_top.fill_between(x_range, kde_x(x_range), alpha=kde_alpha,
+                                            color=colors[i],
+                                            label=str(cat) if add_kde_legend else None)
+                    except (np.linalg.LinAlgError, ValueError) as e:
+                        print(f"[WARNING] Skipping X-KDE for category '{cat}': {e}")
+                else:
+                    print(f"[WARNING] Skipping X-KDE for category '{cat}': insufficient variation or too few valid values")
 
                 # Plot Y-axis marginal KDE (right)
-                if len(y_cat) > 1:
-                    kde_y = gaussian_kde(y_cat)
-                    ax_right.fill_betweenx(y_range, kde_y(y_range), alpha=kde_alpha,
-                                           color=colors[i],
-                                           label=str(cat) if add_kde_legend else None)
+                can_kde_y, y_cat_clean = can_compute_kde(y_cat)
+                if can_kde_y:
+                    try:
+                        kde_y = gaussian_kde(y_cat_clean)
+                        ax_right.fill_betweenx(y_range, kde_y(y_range), alpha=kde_alpha,
+                                               color=colors[i],
+                                               label=str(cat) if add_kde_legend else None)
+                    except (np.linalg.LinAlgError, ValueError) as e:
+                        print(f"[WARNING] Skipping Y-KDE for category '{cat}': {e}")
+                else:
+                    print(f"[WARNING] Skipping Y-KDE for category '{cat}': insufficient variation or too few valid values")
 
             # Add legends only if labels were assigned
             if add_kde_legend:
@@ -1000,14 +1029,28 @@ def plot_scatter(x, y, x_label: str | None = None, y_label: str | None = None,
         else:
             # Plot overall KDE (no categories or categorical_kdes=False)
             x_range = np.linspace(np.asarray(x).min(), np.asarray(x).max(), 200)
-            kde_x = gaussian_kde(x)
-            ax_top.fill_between(x_range, kde_x(x_range), alpha=kde_alpha,
-                                color='steelblue')
+            can_kde_x, x_clean = can_compute_kde(np.asarray(x))
+            if can_kde_x:
+                try:
+                    kde_x = gaussian_kde(x_clean)
+                    ax_top.fill_between(x_range, kde_x(x_range), alpha=kde_alpha,
+                                        color='steelblue')
+                except (np.linalg.LinAlgError, ValueError) as e:
+                    print(f"[WARNING] Skipping overall X-KDE: {e}")
+            else:
+                print("[WARNING] Skipping overall X-KDE: insufficient variation or too few valid values")
 
             y_range = np.linspace(np.asarray(y).min(), np.asarray(y).max(), 200)
-            kde_y = gaussian_kde(y)
-            ax_right.fill_betweenx(y_range, kde_y(y_range), alpha=kde_alpha,
-                                   color='steelblue')
+            can_kde_y, y_clean = can_compute_kde(np.asarray(y))
+            if can_kde_y:
+                try:
+                    kde_y = gaussian_kde(y_clean)
+                    ax_right.fill_betweenx(y_range, kde_y(y_range), alpha=kde_alpha,
+                                           color='steelblue')
+                except (np.linalg.LinAlgError, ValueError) as e:
+                    print(f"[WARNING] Skipping overall Y-KDE: {e}")
+            else:
+                print("[WARNING] Skipping overall Y-KDE: insufficient variation or too few valid values")
 
         # Configure KDE axes
         ax_top.set_ylabel('Density')
@@ -2440,13 +2483,16 @@ def plot_cmc_lineplots_per_category(
         cmc_plot_min: float = 0.7,
         cmc_plot_max: float = 1.0,
         n_yticks: int = 4,
+        show_fig_title: bool = False,
         include_std_dev: bool = True,
+        extended_y_label: bool = False,
         std_dev_factor: float = 0.2,
-        colormap: str = 'tab20',
+        colormap: Union[str, List[str], Tuple[str, ...]] = 'tab20',
         save_dir: Path = None,
         show_significance_threshold: bool = True,
         n_tapers: int = 5,
-        alpha: float = 0.2
+        alpha: float = 0.2,
+        subject_ids_subset: list[int] | None = None,
 ) -> None:
     """
     Create line plots of CMC values across trial time for different categories.
@@ -2462,11 +2508,15 @@ def plot_cmc_lineplots_per_category(
         n_yticks: Number of y-axis ticks
         include_std_dev: Whether to plot standard deviation bands
         std_dev_factor: Multiplier for standard deviation bands
-        colormap: Matplotlib colormap name
+        colormap: Matplotlib colormap name or explicit list/tuple of color strings.
+            If a list/tuple is passed, entries are used in order and must be valid
+            matplotlib colors (e.g., '#1f77b4', 'steelblue').
         save_dir: Directory to save plots
         show_significance_threshold: Whether to show CMC significance threshold line
         n_tapers: Number of tapers for CMC significance threshold
         alpha: Alpha level for CMC significance threshold
+        subject_ids_subset: Optional list of subject IDs to include. If None,
+            all available subjects are plotted.
     """
     from matplotlib.lines import Line2D
 
@@ -2480,9 +2530,8 @@ def plot_cmc_lineplots_per_category(
     unique_labels = all_subject_data_frame[category_column].dropna().unique().tolist()
     unique_labels.sort()
 
-    # Generate colors from colormap
-    cmap = plt.colormaps[colormap]
-    colors = [cmap(i / len(unique_labels)) for i in range(len(unique_labels))]
+    # Resolve colors from colormap name or explicit color list/tuple.
+    colors = _resolve_category_colors(colormap=colormap, n_colors=len(unique_labels))
 
     # Create legend handles for all unique labels
     legend_handles = [Line2D([0], [0], color=color, lw=2, label=label)
@@ -2497,7 +2546,14 @@ def plot_cmc_lineplots_per_category(
 
     # Create subplots (rows: beta/gamma, columns: subjects)
     subject_ids = all_subject_data_frame['Subject ID'].unique().tolist()
-    fig, axs = plt.subplots(2, len(subject_ids), figsize=(20, 10))
+    if subject_ids_subset is not None:
+        selected_subject_set = set(subject_ids_subset)
+        subject_ids = [subject_id for subject_id in subject_ids if subject_id in selected_subject_set]
+    if len(subject_ids) == 0:
+        warnings.warn("No subjects selected for CMC line plot.", RuntimeWarning)
+        return
+
+    fig, axs = plt.subplots(2, len(subject_ids), figsize=(20, 10), squeeze=False)
 
     # Prepare x-axis values
     x_ticks = np.linspace(0, 1, max(n_within_trial_segments, 2))
@@ -2566,6 +2622,7 @@ def plot_cmc_lineplots_per_category(
                 include_std_dev=include_std_dev,
                 std_dev_factor=std_dev_factor,
                 x_ticks=x_ticks,
+                extended_y_label=extended_y_label,
             )
 
     # Figure-level legend — placed outside the grid, tight layout accounts for it automatically
@@ -2578,7 +2635,8 @@ def plot_cmc_lineplots_per_category(
         frameon=True,
     )
 
-    fig.suptitle(f"CMC per Subject and '{category_column}'")
+    if show_fig_title:
+        fig.suptitle(f"CMC per Subject and '{category_column}'")
 
     # Adjust layout to make room for the legend on the right
     fig.subplots_adjust(left=0.05, right=0.83, top=0.93, bottom=0.10,
@@ -2593,12 +2651,280 @@ def plot_cmc_lineplots_per_category(
     plt.show()
 
 
+def plot_cmc_lineplot_normalised(
+        all_subject_data_frame: pd.DataFrame,
+        muscle: str,
+        cmc_operator: str,
+        n_within_trial_segments: int,
+        cmc_plot_min: float = 80.0,
+        cmc_plot_max: float = 120.0,
+        n_yticks: int = 5,
+        show_fig_title: bool = False,
+        trial_color: str = 'tab:blue',
+        trial_alpha: float = 0.4,
+        line_width: float = 0.8,
+        show_grid: bool = False,
+        corridor_std_factor: float = 0.5,
+        corridor_color: str = 'grey',
+        corridor_alpha: float = 0.15,
+        save_dir: Path = None,
+        show_significance_threshold: bool = False,
+        n_tapers: int = 5,
+        alpha: float = 0.2,
+        subject_ids_subset: list[int] | None = None,
+) -> None:
+    """Plot normalized CMC time series per trial for each subject and frequency band.
+
+    Args:
+        subject_ids_subset: Optional list of subject IDs to include. If None,
+            all available subjects are plotted.
+    """
+
+    print("Plotting normalised CMC lineplot per trial")
+    from matplotlib.lines import Line2D
+
+    # Backward-compatible guard: callers that still pass [0.7, 1.0] are
+    # interpreted as fractional values and converted to percent range.
+    if cmc_plot_max <= 2.0:
+        warnings.warn(
+            "plot_cmc_lineplot_normalised expected percentage limits; converting fractional y-limits to percent.",
+            RuntimeWarning,
+        )
+        cmc_plot_min *= 100.0
+        cmc_plot_max *= 100.0
+
+    subject_ids = all_subject_data_frame['Subject ID'].unique().tolist()
+    if subject_ids_subset is not None:
+        selected_subject_set = set(subject_ids_subset)
+        subject_ids = [subject_id for subject_id in subject_ids if subject_id in selected_subject_set]
+    if len(subject_ids) == 0:
+        warnings.warn("No subjects selected for normalised CMC line plot.", RuntimeWarning)
+        return
+
+    fig, axs = plt.subplots(2, len(subject_ids), figsize=(20, 10), squeeze=False)
+
+    x_ticks = np.linspace(0, 1, max(n_within_trial_segments, 2))
+
+    if show_significance_threshold:
+        cmc_threshold = features.compute_cmc_independence_threshold(n_tapers, alpha)
+
+    n_plotted_lines = 0
+
+    for row_ind, freq_band in enumerate(['beta', 'gamma']):
+        cmc_col = f"CMC_{muscle}_{cmc_operator}_{freq_band}"
+
+        for col_ind, subject_id in enumerate(subject_ids):
+            ax = axs[row_ind, col_ind]
+            aligned_trials_for_corridor: list[np.ndarray] = []
+
+            subject_frame = all_subject_data_frame[
+                all_subject_data_frame['Subject ID'] == subject_id
+            ]
+            if len(subject_frame) == 0:
+                continue
+
+            subject_frame = subject_frame.assign(
+                _within_trial_idx=subject_frame.groupby('Trial ID').cumcount()
+            )
+
+            for _, trial_frame in subject_frame.groupby('Trial ID', sort=False):
+                trial_series = trial_frame.sort_values('_within_trial_idx')[cmc_col].to_numpy(dtype=float)
+                if len(trial_series) == 0:
+                    continue
+
+                finite_mask = np.isfinite(trial_series)
+                if not np.any(finite_mask):
+                    continue
+
+                first_valid_idx = int(np.flatnonzero(finite_mask)[0])
+                trial_series = trial_series[first_valid_idx:]
+                trial_start = trial_series[0]
+                if (not np.isfinite(trial_start)) or np.isclose(trial_start, 0.0):
+                    continue
+
+                normalised_series = trial_series / trial_start * 100.0
+                normalised_series[0] = 100.0
+
+                if len(normalised_series) == 1:
+                    x_values = np.array([0.0, 1.0])
+                    normalised_series = np.array([normalised_series[0], normalised_series[0]])
+                elif len(normalised_series) == len(x_ticks):
+                    x_values = x_ticks
+                else:
+                    x_values = np.linspace(0, 1, len(normalised_series))
+
+                ax.plot(
+                    x_values,
+                    normalised_series,
+                    color=trial_color,
+                    linewidth=line_width,
+                    alpha=trial_alpha,
+                    marker='o',
+                    markevery=[0],
+                    markersize=max(2.5, line_width * 4.0),
+                    markeredgewidth=0,
+                )
+                n_plotted_lines += 1
+
+                finite_plot_mask = np.isfinite(x_values) & np.isfinite(normalised_series)
+                if np.sum(finite_plot_mask) >= 2:
+                    aligned_trials_for_corridor.append(
+                        np.interp(
+                            x_ticks,
+                            x_values[finite_plot_mask],
+                            normalised_series[finite_plot_mask],
+                            left=np.nan,
+                            right=np.nan,
+                        )
+                    )
+                elif np.sum(finite_plot_mask) == 1:
+                    aligned_trials_for_corridor.append(
+                        np.full(len(x_ticks), normalised_series[finite_plot_mask][0], dtype=float)
+                    )
+
+            if len(aligned_trials_for_corridor) > 0:
+                trial_matrix = np.vstack(aligned_trials_for_corridor)
+                mean_series = np.nanmean(trial_matrix, axis=0)
+                std_series = np.nanstd(trial_matrix, axis=0)
+                corridor_half_width = corridor_std_factor * std_series
+                valid_corridor_mask = np.isfinite(mean_series) & np.isfinite(corridor_half_width)
+                if np.any(valid_corridor_mask):
+                    ax.fill_between(
+                        x_ticks[valid_corridor_mask],
+                        mean_series[valid_corridor_mask] - corridor_half_width[valid_corridor_mask],
+                        mean_series[valid_corridor_mask] + corridor_half_width[valid_corridor_mask],
+                        color=corridor_color,
+                        alpha=corridor_alpha,
+                        linewidth=0,
+                        zorder=0,
+                    )
+
+            if show_significance_threshold:
+                ax.axhline(y=cmc_threshold, color='grey', linestyle='--', linewidth=2)
+
+            _format_cmc_subplot(
+                ax=ax,
+                row_ind=row_ind,
+                col_ind=col_ind,
+                subject_id=subject_id,
+                muscle=muscle,
+                freq_band=freq_band,
+                y_ticks=np.linspace(cmc_plot_min, cmc_plot_max, n_yticks),
+                cmc_plot_min=cmc_plot_min,
+                cmc_plot_max=cmc_plot_max,
+                include_std_dev=False,
+                std_dev_factor=0.0,
+                x_ticks=x_ticks,
+                y_label_override=f'{muscle} Normalized CMC [%]',
+                y_label_all_columns=False,
+                show_grid=show_grid,
+                grid_color='lightgrey',
+                grid_alpha=0.8,
+            )
+
+    if n_plotted_lines == 0:
+        warnings.warn(
+            "No trial lines were plotted. Check CMC column names and whether trial starts are finite and non-zero.",
+            RuntimeWarning,
+        )
+
+    legend_handles = [
+        Line2D(
+            [0], [0],
+            color=trial_color,
+            linewidth=line_width,
+            alpha=trial_alpha,
+            marker='o',
+            markersize=max(2.5, line_width * 4.0),
+            markeredgewidth=0,
+            label='Single Trial Trajectory',
+        ),
+        patches.Patch(
+            facecolor=corridor_color,
+            edgecolor='none',
+            alpha=corridor_alpha,
+            label=f'Mean Corridor (±{corridor_std_factor:.2g}x SD)',
+        ),
+    ]
+    if show_significance_threshold:
+        legend_handles.append(
+            Line2D(
+                [0], [0],
+                color='grey',
+                linestyle='--',
+                linewidth=2,
+                label=f"CMC Sig. Threshold ({int(alpha * 100)}%)",
+            )
+        )
+
+    fig.legend(
+        handles=legend_handles,
+        loc='center left',
+        bbox_to_anchor=(0.85, 0.5),
+        borderaxespad=0,
+        frameon=True,
+    )
+
+    if show_fig_title:
+        fig.suptitle(f"Normalised CMC per Subject ({muscle}, {cmc_operator})")
+
+    fig.subplots_adjust(left=0.05, right=0.84, top=0.93, bottom=0.10,
+                        hspace=0.05, wspace=0.1)
+
+    if save_dir is not None:
+        save_path = save_dir / filemgmt.file_title(
+            f"Normalised CMC {muscle} per Subject", ".svg"
+        )
+        fig.savefig(save_path, bbox_inches='tight')
+
+    plt.show()
+
+
+def _resolve_category_colors(
+        colormap: Union[str, List[str], Tuple[str, ...]],
+        n_colors: int,
+) -> List[Tuple[float, float, float, float]]:
+    """Resolve a discrete list of category colors from a colormap name or color list."""
+    if n_colors <= 0:
+        return []
+
+    if isinstance(colormap, str):
+        cmap = plt.colormaps[colormap]
+        return [cmap(i / max(n_colors - 1, 1)) for i in range(n_colors)]
+
+    if isinstance(colormap, (list, tuple)):
+        if len(colormap) < n_colors:
+            raise ValueError(
+                f"Explicit color list is too short: got {len(colormap)} colors for {n_colors} categories."
+            )
+
+        invalid_colors = [
+            color for color in colormap
+            if (not isinstance(color, str)) or (not mcolors.is_color_like(color))
+        ]
+        if invalid_colors:
+            raise ValueError(
+                f"Invalid color entries in explicit color list: {invalid_colors}."
+            )
+
+        return [mcolors.to_rgba(color) for color in colormap[:n_colors]]
+
+    raise TypeError(
+        "colormap must be a matplotlib colormap name (str) or a list/tuple of color strings."
+    )
+
+
 def _format_cmc_subplot(
         ax, row_ind: int, col_ind: int, subject_id: int,
         muscle: str, freq_band: str, y_ticks: np.ndarray,
         cmc_plot_min: float, cmc_plot_max: float,
         include_std_dev: bool, std_dev_factor: float,
-        x_ticks: np.ndarray,
+        x_ticks: np.ndarray, extended_y_label: bool = False,
+        y_label_override: Optional[str] = None,
+        y_label_all_columns: bool = False,
+        show_grid: bool = True,
+        grid_color: Optional[str] = None,
+        grid_alpha: Optional[float] = None,
 ) -> None:
     """Format individual subplot for CMC line plot."""
 
@@ -2607,12 +2933,15 @@ def _format_cmc_subplot(
         ax.set_title(f"Subject {subject_id:02}")
 
     # Y-axis formatting
-    if col_ind == 0:
-        ylabel = f"{muscle} {freq_band.capitalize()} CMC (Mean"
-        if include_std_dev:
-            ylabel += f" ± {std_dev_factor:.1f}x Std.Dev."
-        ylabel += ")"
-        ax.set_ylabel(ylabel)
+    if col_ind == 0 or y_label_all_columns:
+        if y_label_override is not None:
+            ax.set_ylabel(y_label_override)
+        else:
+            ylabel = f"{muscle} {freq_band.capitalize()} CMC (Mean"
+            if include_std_dev and extended_y_label:
+                ylabel += f" ± {std_dev_factor:.1f}x Std.Dev."
+            ylabel += ")"
+            ax.set_ylabel(ylabel)
     else:
         ax.set_ylabel('')
 
@@ -2634,7 +2963,13 @@ def _format_cmc_subplot(
     ax.get_xticklabels()[1].set_ha('right')  # 'Start' anchors left
 
     # Grid
-    ax.grid()
+    if show_grid:
+        grid_kwargs = {}
+        if grid_color is not None:
+            grid_kwargs['color'] = grid_color
+        if grid_alpha is not None:
+            grid_kwargs['alpha'] = grid_alpha
+        ax.grid(**grid_kwargs)
 
     """# Legend (only lower right subplot)
     if row_ind == 1 and col_ind == (n_subjects - 1):
