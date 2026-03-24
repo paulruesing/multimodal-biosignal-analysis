@@ -8,6 +8,27 @@ import src.utils.file_management as filemgmt
 
 
 def fetch_level_definitions(multi_segments_per_trial: bool, always_include_scaled_force: bool = False) -> list[dict]:
+    """Build the analysis-level configuration list for RQ-A omnibus modelling.
+
+    Args:
+        multi_segments_per_trial: If True, segment-wise models are configured (uses
+            ``Segment ID`` in explanatory variables). If False, trial-wise models are
+            configured (uses only ``Trial ID``).
+        always_include_scaled_force: If True, ``Median Scaled Force [0-1]`` is kept in
+            explanatory variables even for multi-segment models.
+
+    Returns:
+        A list of level-definition dictionaries consumed by
+        ``statistics.run_model_levels``. Each dictionary can include keys such as:
+        ``df_filter``, ``condition_vars``, ``reference_categories``,
+        ``explanatory_vars``, and ``moderation_pairs``.
+
+        Current levels are:
+        - Level 0: all data, Music vs. Silence
+        - Level 1: all data, Category-or-Silence comparison
+        - Level 2: music trials only, subjective predictors
+        - Level 3: music trials only, objective music-feature predictors
+    """
     return [
         ######### CONFIRMATORY ANALYSES ############
         # Level 0 — all data, music vs. silence
@@ -16,7 +37,7 @@ def fetch_level_definitions(multi_segments_per_trial: bool, always_include_scale
             'condition_vars': {'Music Listening': 'categorical'},
             'reference_categories': {'Music Listening': False},
             'explanatory_vars': (['Median Scaled Force [0-1]',
-                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial or always_include_scaled_force else [
+                                  'Median Unscaled Force [% MVC]'] if multi_segments_per_trial or always_include_scaled_force else [
                 'Median Unscaled Force [% MVC]']) + (
                                     ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
             'moderation_pairs': [('Music Listening', 'Musical skill [0-7]_centered'),
@@ -28,7 +49,7 @@ def fetch_level_definitions(multi_segments_per_trial: bool, always_include_scale
             'condition_vars': {'Category or Silence': 'categorical'},
             'reference_categories': {'Category or Silence': 'Silence'},
             'explanatory_vars': (['Median Scaled Force [0-1]',
-                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial or always_include_scaled_force else [
+                                  'Median Unscaled Force [% MVC]'] if multi_segments_per_trial or always_include_scaled_force else [
                 'Median Unscaled Force [% MVC]']) + (
                                     ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
             'moderation_pairs': [('Category or Silence', 'Musical skill [0-7]_centered'),
@@ -42,31 +63,34 @@ def fetch_level_definitions(multi_segments_per_trial: bool, always_include_scale
             'condition_vars': {'Perceived Category': 'categorical', 'Familiarity [0-7]': 'ordinal'},
             'reference_categories': {'Perceived Category': 'Classic'},
             'explanatory_vars': (['Median Scaled Force [0-1]',
-                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial or always_include_scaled_force else [
-                'Median Unscaled Force [% MVC]']) + ['Liking [0-7]'] + (
+                                  'Median Unscaled Force [% MVC]'] if multi_segments_per_trial or always_include_scaled_force else [
+                'Median Unscaled Force [% MVC]']) + ['Liking_centered_squared'] + (
                                     ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
             'moderation_pairs': [('Perceived Category', 'Musical skill [0-7]_centered'),
                                  ('Perceived Category', 'Dancing habit [0-7]_centered')],
         },
-        # Level 3 — music trials only, objective features
+        # Level 3 — music trials only, objective features:
+        #   Insights from music deep dive (distinctive features per perceived category)
+        #       'Spectral Centroid Mean' for all but happy
+        #       'Spectral Flux Std. ' for happy vs. sad
+        #       'IOI Variance Coeff' for all but happy  ( + maybe a moderation with musical skill)
         {
             'df_filter': lambda df: df.loc[df['Music Listening']],
-            'condition_vars': {'Familiarity [0-7]': 'ordinal'},
+            'condition_vars': {'Familiarity [0-7]': 'ordinal'},  # REMOVED music category here to prevent redundancy!
             'explanatory_vars': (['Median Scaled Force [0-1]',
-                                  'Median Unscaled Force [% MVC]'] if not multi_segments_per_trial or always_include_scaled_force else [
-                'Median Unscaled Force [% MVC]']) + ['Liking [0-7]',
-                                                     'BPM_manual', 'Spectral Flux Mean', 'Spectral Centroid Mean',
-                                                     'IOI Variance Coeff', 'Syncopation Ratio'] + (
+                                  'Median Unscaled Force [% MVC]'] if multi_segments_per_trial or always_include_scaled_force else [
+                'Median Unscaled Force [% MVC]']) + ['Liking_centered_squared',
+                                                     'Spectral Centroid Mean', 'Spectral Flux Std.',
+                                                     'IOI Variance Coeff',] + (
                                     ['Trial ID'] if not multi_segments_per_trial else ['Trial ID', 'Segment ID']),
-            'moderation_pairs': [('Perceived Category', 'Musical skill [0-7]_centered'),
-                                 ('Perceived Category', 'Dancing habit [0-7]_centered')],
+            'moderation_pairs': [('IOI Variance Coeff', 'Musical skill [0-7]_centered'),],
         },
     ]
 
 
 if __name__ == '__main__':
     ######## PREPARATION #########
-    ROOT = Path().resolve().parent
+    ROOT = Path(__file__).resolve().parent.parent
     # system:
     DATA = ROOT / "data"
     OUTPUT = ROOT / 'output'
@@ -82,17 +106,25 @@ if __name__ == '__main__':
     n_within_trial_segments_list: list[int] = [1, 2, 5, 10]  # of ~40sec trials
 
     # Subjects to exclude from all analyses (e.g. outliers or incomplete data)
-    exclude_subjects: list[int] = []
+    exclude_subjects: list[int] = []  # todo: always check!
+    cmc_subject_subsets: list[list[int]] = [list(range(0, 6)), list(range(6, 12))]
 
 
     ## Data Exploration
-    add_bin_features_dict: dict[str, int] = {'Median Scaled Force [0-1]': 4, 'Familiarity [0-7]': 5,
-                                             'GSR [0-3.3]': 4, 'Trial ID': 4}
+    add_bin_features_dict: dict[str, int] = {'Median Unscaled Force [% MVC]': 4,
+                                             'Liking': 4,
+                                             'Liking_centered_squared': 4,
+                                             'Familiarity [0-7]': 4,
+                                             'Trial ID': 4}
     # creates bin index for per subject values to be used as categories (new col. will be named "{OLD_COL}_bin")
-    cmc_plot_categories: list[str] = ['Subject ID', 'Category or Silence', 'Familiarity [0-7]_bin', 'Trial ID_bin',
-                                      'Median Scaled Force [0-1]_bin', 'GSR [0-3.3]_bin']
+    cmc_plot_categories: list[str] = ['Category or Silence', 'Liking_bin', 'Liking_centered_squared_bin', 'Trial ID_bin',
+                                      'Median Unscaled Force [% MVC]_bin', 'Familiarity [0-7]_bin']
+    # color list:
+    cmc_plot_colors = ['darkorange', 'red', 'green', 'blue', 'purple']
+    cmc_plot_n_segments = 10
     # subject wise line plots:
-    plot_cmc_lineplots: bool = False
+    plot_cmc_lineplots_normalised: bool = True
+    plot_cmc_lineplots_per_category: bool = True
     save_cmc_lineplots: bool = True
     # compound scatters:
     show_cmc_scatterplots: bool = False
@@ -122,13 +154,14 @@ if __name__ == '__main__':
         ('VALIDATION: EMG Flexor PSD Increases with Force', 'PSD_emg_1_flexor_Global_all'),
         ('VALIDATION: EMG Extensor PSD Increases with Force', 'PSD_emg_2_extensor_Global_all'),
 
-        # Possible Mediators:
-        ('MEDIATION: Heart Rate', 'Median_Heart_Rate'),
-        ('MEDIATION: HRV', 'Median_HRV'),
-        ('MEDIATION: GSR', 'GSR'),
-        ('MEDIATION: Emotional Modulation', 'Emotional_State'),
+        # Possible Mediators: (NOW IN SEPARATE SCRIPT)
+        # ('MEDIATION: Heart Rate', 'Median_Heart_Rate'),
+        # ('MEDIATION: HRV', 'Median_HRV'),
+        # ('MEDIATION: GSR', 'GSR'),
+        # ('MEDIATION: Emotional Modulation', 'Emotional_State'),
 
     ]
+    levels_for_fdr_correction: list[int] = [2, 3]
     save_single_time_res_summaries: bool = False
 
     # plotting:
@@ -161,6 +194,7 @@ if __name__ == '__main__':
     # LME robustness checks / influence measures:
     conduct_robustness_checks: bool = True
     dep_var_comp_lvl_n_segments_tuples_to_robustness_check: list[tuple[str, int, int]] = [
+        # ── CMC DVs: all have significant effects at primary resolution (1-seg, L1) ──
         ('CMC_Extensor_mean_beta', 1, 1),
         ('CMC_Extensor_max_beta', 1, 1),
         ('CMC_Extensor_mean_gamma', 1, 1),
@@ -169,18 +203,19 @@ if __name__ == '__main__':
         ('CMC_Flexor_max_beta', 1, 1),
         ('CMC_Flexor_mean_gamma', 1, 1),
         ('CMC_Flexor_max_gamma', 1, 1),
-        ('PSD_eeg_FC_CP_T_theta', 1, 1),
-        ('PSD_eeg_F_C_beta', 1, 1),
-        ('PSD_eeg_P_PO_alpha', 1, 1),
-        ('PSD_eeg_Global_gamma', 1, 1),
 
-        # Level 2:
-        ('CMC_Extensor_mean_beta', 2, 1),  # S01 drives Dancing habit / Musical skill interactions at L2
+        # ── Level 2 entries for DVs where L2 subjects drive key interactions ──
+        ('CMC_Extensor_mean_beta', 2, 1),  # S07 drives Dancing habit / Musical skill interactions at L2
         ('CMC_Flexor_max_beta', 2, 1),  # S06/S07/S08 drive Groovy + Musical skill interactions at L2
 
-        # todo: add capability for below, currently only one segment count possible
-    ]
+        # ── Mediation variables: significant effects confirmed, primary level TBC ──
+        # ('Emotional_State', 1, 1),
+        # ('Median_HRV', 1, 1),
 
+        # NOTE: EEG PSD variables (PSD_eeg_*) removed — 0 significant effects at
+        # adjusted p < 0.05 (LME, 1-seg) for all four hypotheses H2–H5.
+    ]
+    # todo: add capability for below, currently only one segment count possible
     """# all modulated by segment ID at segments = 5
     ('CMC_Extensor_mean_beta', 1, 5),
     ('CMC_Extensor_max_beta', 1, 5),
@@ -192,10 +227,11 @@ if __name__ == '__main__':
     ('CMC_Flexor_max_gamma', 1, 5),"""
 
     # Statistical Power Analysis:
-    # todo: include n_segments = 2 for Segment ID power analysis!
-    conduct_power_analysis: bool = False
+    conduct_power_analysis: bool = True
+    # to be filled in upon new significant parameters are found:
     power_configs: list[statistics.PowerConfig] = [
 
+        # ── CMC_Flexor_mean_beta ── Level 1 + 2: near-sig Happy (d=0.73 / 0.71) ──
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_mean_beta",
             comp_lvl=1,
@@ -213,13 +249,14 @@ if __name__ == '__main__':
             ],
         ),
 
-        # ── CMC_Extensor_max_beta ── Level 2 + 3: Perceived Category = Happy
+        # ── CMC_Extensor_max_beta ── Level 2 + 3: Perceived Category = Happy ──
+        # No sig effects at 1-seg primary; near-sig at 5/10-seg; well-powered at L2/L3
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_max_beta",
             comp_lvl=2,
             n_segments=1,
             target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",
+                "C(Q('Perceived Category'))[T.Happy]",  # near-sig 1-seg, sig 5/10-seg, d=0.59, power=0.958
             ],
         ),
         statistics.PowerConfig(
@@ -227,28 +264,28 @@ if __name__ == '__main__':
             comp_lvl=3,
             n_segments=1,
             target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",
+                "C(Q('Perceived Category'))[T.Happy]",  # power=0.940
             ],
         ),
 
-        # ── CMC_Extensor_max_gamma ── Level 1: Category or Silence + Force covariate
+        # ── CMC_Extensor_max_gamma ── Level 1: Category or Silence Happy + Force ──
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_max_gamma",
             comp_lvl=1,
             n_segments=1,
             target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",
-                "Q('Median Unscaled Force [% MVC]')",
+                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.67, power=0.920
+                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.18, power=0.614 (under-powered)
             ],
         ),
 
-        # ── CMC_Extensor_max_gamma ── Level 2 + 3: Perceived Category = Happy
+        # ── CMC_Extensor_max_gamma ── Level 2 + 3: Perceived Category = Happy ──
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_max_gamma",
             comp_lvl=2,
             n_segments=1,
             target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",
+                "C(Q('Perceived Category'))[T.Happy]",  # sig, d=0.64, power=0.918
             ],
         ),
         statistics.PowerConfig(
@@ -256,101 +293,104 @@ if __name__ == '__main__':
             comp_lvl=3,
             n_segments=1,
             target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",
+                "C(Q('Perceived Category'))[T.Happy]",  # sig, d=0.64, power=0.896
             ],
         ),
 
-        # ── CMC_Extensor_mean_beta ── Level 1: Category + interactions + Force
+        # ── CMC_Extensor_mean_beta ── Level 1: Category + interactions + Force ──
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_mean_beta",
             comp_lvl=1,
             n_segments=1,
             target_parameters=[
                 "C(Q('Category or Silence'))[T.Classic]:Q('Dancing habit [0-7]_centered')",
+                # sig, d=-0.23, under-powered
                 "C(Q('Category or Silence'))[T.Classic]:Q('Musical skill [0-7]_centered')",
-                "C(Q('Category or Silence'))[T.Happy]",
-                "Q('Median Unscaled Force [% MVC]')",
+                # sig, d=0.12, under-powered
+                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.35, power=0.816
+                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.15, power=0.862
             ],
         ),
 
-        # ── CMC_Extensor_mean_beta ── Level 2: Perceived Category + interactions + covariates
+        # ── CMC_Extensor_mean_beta ── Level 2: Perceived Category + interactions + covariates ──
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_mean_beta",
             comp_lvl=2,
             n_segments=1,
             target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
-                "C(Q('Perceived Category'))[T.Sad]:Q('Dancing habit [0-7]_centered')",
-                "Q('Dancing habit [0-7]_centered')",
-                "Q('Median Unscaled Force [% MVC]')",
+                "C(Q('Perceived Category'))[T.Happy]",  # sig, d=0.40, power=0.950
+                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.17, under-powered
+                "C(Q('Perceived Category'))[T.Sad]:Q('Dancing habit [0-7]_centered')",  # sig, d=0.21, under-powered
+                "Q('Dancing habit [0-7]_centered')",  # sig, d=-0.51, under-powered
+                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.15, power=0.512 (under-powered)
             ],
         ),
 
-        # ── CMC_Extensor_mean_beta ── Level 3: Perceived Category = Happy + Musical skill interaction
+        # ── CMC_Extensor_mean_beta ── Level 3: Perceived Category = Happy + Musical skill interaction ──
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_mean_beta",
             comp_lvl=3,
             n_segments=1,
             target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
+                "C(Q('Perceived Category'))[T.Happy]",  # sig, d=0.40, power=0.920
+                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.17, under-powered
             ],
         ),
 
-        # ── CMC_Extensor_mean_gamma ── Level 1: Category or Silence + Force covariate
+        # ── CMC_Extensor_mean_gamma ── Level 1: Category + Force ──
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_mean_gamma",
             comp_lvl=1,
             n_segments=1,
             target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",
-                "Q('Median Unscaled Force [% MVC]')",
+                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.49, power=0.922
+                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.20, power=0.912
             ],
         ),
 
-        # ── CMC_Extensor_mean_gamma ── Level 2: Perceived Category + interactions + covariates
+        # ── CMC_Extensor_mean_gamma ── Level 2: Perceived Category + interactions + covariates ──
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_mean_gamma",
             comp_lvl=2,
             n_segments=1,
             target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
-                "Q('Dancing habit [0-7]_centered')",
-                "Q('Median Unscaled Force [% MVC]')",
+                "C(Q('Perceived Category'))[T.Happy]",  # sig, d=0.44, power=0.902
+                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.18, under-powered
+                "Q('Dancing habit [0-7]_centered')",  # sig, under-powered
+                "Q('Median Unscaled Force [% MVC]')",  # sig, power=0.654 (under-powered)
             ],
         ),
 
-        # ── CMC_Flexor_max_beta ── Level 1: Category + Groovy + interactions + covariates
+        # ── CMC_Flexor_max_beta ── Level 1: Category + interactions + covariates ──
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_max_beta",
             comp_lvl=1,
             n_segments=1,
             target_parameters=[
                 "C(Q('Category or Silence'))[T.Classic]:Q('Dancing habit [0-7]_centered')",
-                "C(Q('Category or Silence'))[T.Groovy]",
-                "C(Q('Category or Silence'))[T.Happy]",
-                "C(Q('Category or Silence'))[T.Happy]:Q('Dancing habit [0-7]_centered')",
-                "Q('Median Unscaled Force [% MVC]')",
-                "Q('Musical skill [0-7]_centered')",
+                # sig, d=-0.30, under-powered
+                "C(Q('Category or Silence'))[T.Groovy]",  # sig, d=0.49, power=0.780 (under-powered)
+                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.72, power=0.918
+                "C(Q('Category or Silence'))[T.Happy]:Q('Dancing habit [0-7]_centered')",  # sig, d=-0.33, under-powered
+                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.21
+                "Q('Musical skill [0-7]_centered')",  # sig
             ],
         ),
 
-        # ── CMC_Flexor_max_beta ── Level 2: Perceived Category (Happy + Groovy) + interactions
+        # ── CMC_Flexor_max_beta ── Level 2: Perceived Category (Happy + Groovy) + interactions ──
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_max_beta",
             comp_lvl=2,
             n_segments=1,
             target_parameters=[
-                "C(Q('Perceived Category'))[T.Groovy]",
-                "C(Q('Perceived Category'))[T.Groovy]:Q('Musical skill [0-7]_centered')",
-                "C(Q('Perceived Category'))[T.Happy]",
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
+                "C(Q('Perceived Category'))[T.Groovy]",  # sig, power=0.906
+                "C(Q('Perceived Category'))[T.Groovy]:Q('Musical skill [0-7]_centered')",  # sig, under-powered
+                "C(Q('Perceived Category'))[T.Happy]",  # sig
+                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, under-powered
             ],
         ),
 
-        # ── CMC_Flexor_max_beta ── Level 3: Perceived Category (Happy + Groovy) + interactions
+        # ── CMC_Flexor_max_beta ── Level 3: Perceived Category (Happy + Groovy) + interactions ──
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_max_beta",
             comp_lvl=3,
@@ -363,43 +403,44 @@ if __name__ == '__main__':
             ],
         ),
 
-        # ── CMC_Flexor_max_gamma ── Level 1: Category or Silence = Happy
+        # ── CMC_Flexor_max_gamma ── Level 1: Category or Silence = Happy ──
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_max_gamma",
             comp_lvl=1,
             n_segments=1,
             target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",
+                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.79, power=0.966
             ],
         ),
 
-        # ── CMC_Flexor_mean_gamma ── Level 1: Category + Groovy + interactions + Force
+        # ── CMC_Flexor_mean_gamma ── Level 1: Category + Groovy + interactions + Force ──
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_mean_gamma",
             comp_lvl=1,
             n_segments=1,
             target_parameters=[
                 "C(Q('Category or Silence'))[T.Classic]:Q('Dancing habit [0-7]_centered')",
-                "C(Q('Category or Silence'))[T.Groovy]",
-                "C(Q('Category or Silence'))[T.Happy]",
-                "C(Q('Category or Silence'))[T.Happy]:Q('Dancing habit [0-7]_centered')",
-                "Q('Median Unscaled Force [% MVC]')",
+                # sig, d=-0.30, under-powered
+                "C(Q('Category or Silence'))[T.Groovy]",  # sig, d=0.49, power=0.780 (under-powered)
+                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.71, power=0.956
+                "C(Q('Category or Silence'))[T.Happy]:Q('Dancing habit [0-7]_centered')",  # sig, d=-0.33, under-powered
+                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.21, power=0.810
             ],
         ),
 
-        # ── CMC_Flexor_mean_gamma ── Level 2: Perceived Category + interactions
+        # ── CMC_Flexor_mean_gamma ── Level 2: Perceived Category + interactions ──
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_mean_gamma",
             comp_lvl=2,
             n_segments=1,
             target_parameters=[
-                "C(Q('Perceived Category'))[T.Groovy]:Q('Dancing habit [0-7]_centered')",
-                "C(Q('Perceived Category'))[T.Happy]",
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
+                "C(Q('Perceived Category'))[T.Groovy]:Q('Dancing habit [0-7]_centered')",  # sig, under-powered
+                "C(Q('Perceived Category'))[T.Happy]",  # sig, power=0.740 (under-powered)
+                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, under-powered
             ],
         ),
 
-        # ── PSD_emg_1_flexor_Global_all ── Level 2: Perceived Category + interactions + Force
+        # ── PSD_emg_1_flexor_Global_all ── Level 2: Perceived Category + interactions + Force ──
         statistics.PowerConfig(
             dependent_var="PSD_emg_1_flexor_Global_all",
             comp_lvl=2,
@@ -412,7 +453,7 @@ if __name__ == '__main__':
             ],
         ),
 
-        # ── PSD_emg_1_flexor_Global_all ── Level 3: interactions + Force
+        # ── PSD_emg_1_flexor_Global_all ── Level 3: interactions + Force ──
         statistics.PowerConfig(
             dependent_var="PSD_emg_1_flexor_Global_all",
             comp_lvl=3,
@@ -424,27 +465,27 @@ if __name__ == '__main__':
             ],
         ),
 
-        # ── PSD_emg_2_extensor_Global_all ── Level 0: Force covariates only
+        # ── PSD_emg_2_extensor_Global_all ── Level 0: Force only ──
         statistics.PowerConfig(
             dependent_var="PSD_emg_2_extensor_Global_all",
             comp_lvl=0,
             n_segments=1,
             target_parameters=[
-                "Q('Median Unscaled Force [% MVC]')",
+                "Q('Median Unscaled Force [% MVC]')",  # sig, d=-0.17, power=0.764 (under-powered)
             ],
         ),
 
-        # ── PSD_emg_2_extensor_Global_all ── Level 1: Force covariates only
+        # ── PSD_emg_2_extensor_Global_all ── Level 1: Force + Scaled Force ──
         statistics.PowerConfig(
             dependent_var="PSD_emg_2_extensor_Global_all",
             comp_lvl=1,
             n_segments=1,
             target_parameters=[
-                "Q('Median Unscaled Force [% MVC]')",
+                "Q('Median Unscaled Force [% MVC]')",  # sig, d=-0.13, power=0.516 (under-powered)
             ],
         ),
 
-        # ── PSD_emg_2_extensor_Global_all ── Level 2: Perceived Category + interactions + Force
+        # ── PSD_emg_2_extensor_Global_all ── Level 2: Perceived Category + interactions + Force ──
         statistics.PowerConfig(
             dependent_var="PSD_emg_2_extensor_Global_all",
             comp_lvl=2,
@@ -456,7 +497,7 @@ if __name__ == '__main__':
             ],
         ),
 
-        # ── PSD_emg_2_extensor_Global_all ── Level 3: Perceived Category + interactions + Force
+        # ── PSD_emg_2_extensor_Global_all ── Level 3: Perceived Category + interactions + Force ──
         statistics.PowerConfig(
             dependent_var="PSD_emg_2_extensor_Global_all",
             comp_lvl=3,
@@ -470,9 +511,7 @@ if __name__ == '__main__':
             ],
         ),
 
-
-
-        ######### N_segments = 2 interactions for Segment ID and Scaled Force:
+        ######### N_segments = 2: Segment ID and Scaled Force interactions #########
 
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_mean_gamma",
@@ -483,8 +522,6 @@ if __name__ == '__main__':
                 "Q('Segment ID')"
             ],
         ),
-
-
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_max_gamma",
             comp_lvl=1,
@@ -494,8 +531,6 @@ if __name__ == '__main__':
                 "Q('Segment ID')"
             ],
         ),
-
-
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_mean_beta",
             comp_lvl=1,
@@ -505,8 +540,6 @@ if __name__ == '__main__':
                 "Q('Segment ID')"
             ],
         ),
-
-
         statistics.PowerConfig(
             dependent_var="CMC_Flexor_max_beta",
             comp_lvl=1,
@@ -516,8 +549,6 @@ if __name__ == '__main__':
                 "Q('Segment ID')"
             ],
         ),
-
-
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_mean_gamma",
             comp_lvl=1,
@@ -527,8 +558,6 @@ if __name__ == '__main__':
                 "Q('Segment ID')"
             ],
         ),
-
-
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_max_gamma",
             comp_lvl=1,
@@ -538,8 +567,6 @@ if __name__ == '__main__':
                 "Q('Segment ID')"
             ],
         ),
-
-
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_mean_beta",
             comp_lvl=1,
@@ -549,7 +576,6 @@ if __name__ == '__main__':
                 "Q('Segment ID')"
             ],
         ),
-
         statistics.PowerConfig(
             dependent_var="CMC_Extensor_max_beta",
             comp_lvl=1,
@@ -561,8 +587,6 @@ if __name__ == '__main__':
         ),
 
     ]
-
-
 
     #######################################################
     ################ LOOP OVER N_SEGMENTS #################
@@ -584,7 +608,7 @@ if __name__ == '__main__':
         #####################################################
 
         ### TRY FETCHING EXISTING FRAME
-        if plot_cmc_lineplots or show_cmc_scatterplots or conduct_analysis:
+        if plot_cmc_lineplots_per_category or show_cmc_scatterplots or conduct_analysis:
             all_subject_data_frame = pd.read_csv(filemgmt.most_recent_file(FEATURE_OUTPUT_DATA, ".csv", [f"Combined Statistics {n_within_trial_segments}seg"]))  # pd.read_csv(FEATURE_OUTPUT_DATA / "statistics_temp_eeg_alpha.csv")  # set to None to run computation
             print(f"Fetching existing statistical data frame for n_segments {n_within_trial_segments}...\n")
 
@@ -603,61 +627,96 @@ if __name__ == '__main__':
         ################ DATA EXPLORATION #####################
         #######################################################
 
-        if plot_cmc_lineplots or show_cmc_scatterplots:
-            all_subject_data_frame = data_analysis.create_trial_bins(
-                df=all_subject_data_frame,
-                columns_to_bin=list(add_bin_features_dict.keys()),
-                n_bins_dict=add_bin_features_dict,
+        if cmc_plot_n_segments == n_within_trial_segments:
+            if plot_cmc_lineplots_per_category or show_cmc_scatterplots:
+                all_subject_data_frame = data_analysis.create_trial_bins(
+                    df=all_subject_data_frame,
+                    columns_to_bin=list(add_bin_features_dict.keys()),
+                    n_bins_dict=add_bin_features_dict,
 
-            )
+                )
+
+
+            # normalised CMC line plot:
+            if plot_cmc_lineplots_normalised:
+                for subset_ids in cmc_subject_subsets:
+                    subset_suffix = f"subjects_{min(subset_ids):02}_{max(subset_ids):02}"
+                    subset_save_dir = None
+                    if save_cmc_lineplots:
+                        subset_save_dir = STATISTICS_OUTPUT_DATA / subset_suffix
+                        subset_save_dir.mkdir(parents=True, exist_ok=True)
+
+                    for muscle in ['Flexor', 'Extensor']:
+                        visualizations.plot_cmc_lineplot_normalised(
+                            all_subject_data_frame, muscle,
+                            cmc_operator='mean', n_within_trial_segments=n_within_trial_segments,
+                            cmc_plot_min=75.0, cmc_plot_max=125.0, n_yticks=5,
+                            show_significance_threshold=False,
+                            corridor_std_factor=1.0, corridor_alpha=.4,
+                            corridor_color='lightblue',
+                            save_dir=subset_save_dir,
+                            alpha=.2,
+                            show_grid=True,
+                            subject_ids_subset=subset_ids,
+                        )
 
 
 
-        if plot_cmc_lineplots:
-            # plot CMC per subject and category:
-            for muscle in ['Flexor', 'Extensor']:
-                # loop over categories (new plot per category)
+
+            if plot_cmc_lineplots_per_category:
+                # plot CMC per subject and category:
+                for subset_ids in cmc_subject_subsets:
+                    subset_suffix = f"subjects_{min(subset_ids):02}_{max(subset_ids):02}"
+                    subset_save_dir = None
+                    if save_cmc_lineplots:
+                        subset_save_dir = STATISTICS_OUTPUT_DATA / subset_suffix
+                        subset_save_dir.mkdir(parents=True, exist_ok=True)
+
+                    for muscle in ['Flexor', 'Extensor']:
+                        # loop over categories (new plot per category)
+                        for category_column in cmc_plot_categories:
+                            visualizations.plot_cmc_lineplots_per_category(
+                                all_subject_data_frame, category_column, muscle,
+                                cmc_operator='mean', n_within_trial_segments=n_within_trial_segments,
+                                cmc_plot_min=.7, cmc_plot_max=1.0, n_yticks=4,
+                                include_std_dev=True, std_dev_factor=.2,
+                                colormap=cmc_plot_colors,
+                                show_significance_threshold=True,
+                                save_dir=subset_save_dir,
+                                alpha=.1,
+                                subject_ids_subset=subset_ids,
+                            )
+
+
+
+
+
+
+            # dependent var (plot beta + gamma scatter for flexor + extensor) for each category:
+            # [((x_column, x_label), (y_column, y_label), category_column), ...]
+            if show_cmc_scatterplots:
+                scatters_to_plot: list[tuple[tuple[str, str], tuple[str, str], str]] = []
                 for category_column in cmc_plot_categories:
-                    visualizations.plot_cmc_lineplots_per_category(
-                        all_subject_data_frame, category_column, muscle,
-                        cmc_operator='mean', n_within_trial_segments=n_within_trial_segments,
-                        cmc_plot_min=.7, cmc_plot_max=1.0, n_yticks=4,
-                        include_std_dev=True, std_dev_factor=.2, colormap='tab20',
-                        show_significance_threshold=True,
-                        save_dir=STATISTICS_OUTPUT_DATA if save_cmc_lineplots else None,
-                        alpha=.1,
-                    )
+                    scatters_to_plot.append(
+                        (('CMC_Flexor_mean_beta', 'CMC Flexor Avg. Beta'), ('CMC_Flexor_mean_gamma', 'CMC Flexor Avg. Gamma'),
+                         category_column))
+                    scatters_to_plot.append(
+                        (('CMC_Extensor_mean_beta', 'CMC Extensor Avg. Beta'), ('CMC_Extensor_mean_gamma', 'CMC Extensor Avg. Gamma'),
+                         category_column))
 
 
-
-
-
-
-        # dependent var (plot beta + gamma scatter for flexor + extensor) for each category:
-        # [((x_column, x_label), (y_column, y_label), category_column), ...]
-        if show_cmc_scatterplots:
-            scatters_to_plot: list[tuple[tuple[str, str], tuple[str, str], str]] = []
-            for category_column in cmc_plot_categories:
-                scatters_to_plot.append(
-                    (('CMC_Flexor_mean_beta', 'CMC Flexor Avg. Beta'), ('CMC_Flexor_mean_gamma', 'CMC Flexor Avg. Gamma'),
-                     category_column))
-                scatters_to_plot.append(
-                    (('CMC_Extensor_mean_beta', 'CMC Extensor Avg. Beta'), ('CMC_Extensor_mean_gamma', 'CMC Extensor Avg. Gamma'),
-                     category_column))
-
-
-            # scatters:
-            for (x, x_label), (y, y_label), category_column in scatters_to_plot:
-                dataframe_subset = all_subject_data_frame.dropna(subset=[x, y, category_column])
-                x_data = dataframe_subset[x]
-                y_data = dataframe_subset[y]
-                category_list = dataframe_subset[category_column]
-                visualizations.plot_scatter(x=x_data, x_label=x_label,
-                                            y=y_data, y_label=y_label,
-                                            category_list=category_list, category_label=category_column,
-                                            save_dir=STATISTICS_OUTPUT_DATA if save_cmc_scatterplots else None,
-                                            cmap='tab20',
-                                            )
+                # scatters:
+                for (x, x_label), (y, y_label), category_column in scatters_to_plot:
+                    dataframe_subset = all_subject_data_frame.dropna(subset=[x, y, category_column])
+                    x_data = dataframe_subset[x]
+                    y_data = dataframe_subset[y]
+                    category_list = dataframe_subset[category_column]
+                    visualizations.plot_scatter(x=x_data, x_label=x_label,
+                                                y=y_data, y_label=y_label,
+                                                category_list=category_list, category_label=category_column,
+                                                save_dir=STATISTICS_OUTPUT_DATA if save_cmc_scatterplots else None,
+                                                cmap=cmc_plot_colors,
+                                                )
 
 
 
@@ -721,7 +780,7 @@ if __name__ == '__main__':
             # Levels 2–3 are exploratory — BH correction within each Level × DV stratum.
             results_frame = statistics.apply_fdr_correction(
                 results_df=results_frame,
-                levels_to_correct=[2, 3],
+                levels_to_correct=levels_for_fdr_correction,
                 alpha=0.05,
                 group_by_dv=True,
             )
@@ -844,8 +903,17 @@ if __name__ == '__main__':
         except NameError:
             all_time_resolutions_results_frame = statistics.load_recent_results_frame(STATISTICS_OUTPUT_DATA)
 
+        # Rebuild hypothesis groups from the loaded/combined frame so this block
+        # also works when conduct_analysis=False in the current run.
+        available_hypotheses = all_time_resolutions_results_frame['Hypothesis'].dropna().unique().tolist()
+        cmc_flexor_hypotheses = [h for h in available_hypotheses if 'CMC' in h and 'Flexor' in h and 'VALIDATION: ' not in h]
+        cmc_extensor_hypotheses = [h for h in available_hypotheses if 'CMC' in h and 'Extensor' in h and 'VALIDATION: ' not in h]
+        psd_hypotheses = [h for h in available_hypotheses if 'PSD' in h and 'VALIDATION: ' not in h]
+
         for parameter, comparison_level in parameter_comp_lvl_tuples_to_plot_across_time:
             for hypotheses in [cmc_flexor_hypotheses, cmc_extensor_hypotheses, psd_hypotheses]:
+                if len(hypotheses) == 0:
+                    continue
                 visualizations.plot_time_resolution_forest_mosaic(
                     result_frame=all_time_resolutions_results_frame, hypotheses=hypotheses,
                     parameter=parameter, comparison_level=comparison_level,
