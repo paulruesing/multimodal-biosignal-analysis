@@ -50,22 +50,34 @@ if __name__ == '__main__':
 
     analyse_category_fit: bool = True  # plot, how many participants RE-assigned categories
     cluster_results: bool = False
-    compute_mutual_information: bool = True  # analyse relation music features -> genres / categories
+    compute_mutual_information: bool = False  # analyse relation music features -> genres / categories
     plot_scatters: bool = True  # plot feature distribution across categories
 
     # plot parameters:
     song_colors = {'Classic': 'orange', 'Groovy': 'red',
                    'Happy': 'green', 'Sad': 'blue'}
 
+    # for MI and Scatter hue:
+    target_label: Literal['Genre', 'Category'] = 'Category'
+
     ### scatter parameters:
     # x: spectral flux std, y: spectral flux mean
     scatter_x_y_combinations = [
-        (4, 3),  # x: spectral flux std, y: spectral flux mean
-        (7, 8),  # x: Spectral Centroid Mean, y: IOI Variance Coeff
-        (7, 0),  # x: Spectral Centroid Mean, y: BPM
-        (10, 8),  # x: Syncopation Ratio, y: IOI Variance Coeff
-        (10, 9)  # x: Syncopation Ratio, y: Syncopation Degree
+        ('Spectral Centroid Mean', 'Spectral Flux Std.'),
+        ('Spectral Centroid Mean', 'IOI Variance Coeff'),
+        ('BPM_manual', 'IOI Variance Coeff'),
+        ('BPM_manual', 'Spectral Centroid Mean'),
+        ('Spectral Flux Std.', 'IOI Variance Coeff'),
+        ('Spectral Flux Std.', 'Syncopation Ratio'),
+        ('IOI Variance Coeff', 'Syncopation Ratio'),
     ]
+    # -> MI Candidates:
+    #       'Spectral Centroid Mean', 'Spectral Flux Std.', 'IOI Variance Coeff',
+    #       'Spectral Flux Mean', 'Spectral Flux Min.', 'BPM_manual'
+    # -> which of these linear?
+    #       'Spectral Centroid Mean' for all but happy
+    #       'Spectral Flux Std' for happy vs. sad
+    #       'IOI Variance Coeff' for all but happy
 
 
 
@@ -154,10 +166,9 @@ if __name__ == '__main__':
         frame = pd.read_csv(filemgmt.most_recent_file(RESULT_DIR, ".csv", ["Song Characteristic Lookup Table"]))
         print(f"Imported music characteristics for {len(frame)} songs")
 
-        # select numerical:
-        numerical_cols = [col for col in frame.columns if frame.dtypes[col] != 'object']
-        feature_array = frame.loc[:, numerical_cols].to_numpy()
-        feature_labels = frame.columns
+        # select numerical and remove start parameter:
+        feature_labels = [col for col in frame.columns if frame.dtypes[col] != 'object' and col != 'Intended Start [sec]']
+        feature_array = frame.loc[:, feature_labels].to_numpy()
 
         #
         print("Feature indices: ", list(enumerate(feature_labels)))
@@ -325,7 +336,7 @@ if __name__ == '__main__':
 
 
     ### STANDARDIZATION
-    if cluster_results or compute_mutual_information:
+    if cluster_results:
         # standardize:
         scaler = StandardScaler()
         standardized_feature_array = scaler.fit_transform(feature_array)
@@ -391,22 +402,27 @@ if __name__ == '__main__':
     ### MUTUAL INFORMATION
     if compute_mutual_information:
 
-        target_label: Literal['Genre', 'Category'] = 'Category'
-
         if target_label == 'Genre': target_array = genres
         elif target_label == 'Category':  # remove familiarity label
             target_array = [cat.replace("Unfamiliar ", "").replace("Familiar ", "") for cat in categories]
 
         from src.pipeline.signal_features import compute_feature_mi_importance
-        _, _ , feature_importance = compute_feature_mi_importance(standardized_feature_array, target_array,
+        _, _ , feature_importance = compute_feature_mi_importance(feature_array, target_array,
                                                                   feature_labels, target_label, plot_save_dir=PLOT_DIR,)
         print(feature_importance)
 
 
+
     # analyse musical features via Scatter + KDE plots
     if plot_scatters:
-        for x_ind, y_ind in scatter_x_y_combinations:
+        for x, y in scatter_x_y_combinations:
+            x_ind = feature_labels.index(x)
+            y_ind = feature_labels.index(y)
+            if target_label == 'Genre':
+                target_array = genres
+            elif target_label == 'Category':  # remove familiarity label
+                target_array = [cat.replace("Unfamiliar ", "").replace("Familiar ", "") for cat in categories]
             _ = visualizations.plot_scatter(x=feature_array[:, x_ind], y=feature_array[:, y_ind],
-                                            x_label=feature_labels[x_ind], y_label=feature_labels[y_ind],
+                                            x_label=x, y_label=y,
                                             category_list=target_array, category_label=target_label,
                                             cmap=list(song_colors.values()), save_dir=PLOT_DIR)
