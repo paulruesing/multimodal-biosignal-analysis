@@ -9,6 +9,11 @@ import src.utils.file_management as filemgmt
 from src.pipeline.data_analysis import make_timezone_aware
 
 
+# accuracy_sampler starts logging squared error after an initial wait phase.
+# Keep this here as single source of truth for downstream timestamp alignment.
+TRIAL_ACCURACY_START_OFFSET_SEC: float = 5.0
+
+
 ############################## LOG FRAME HANDLING ##############################
 def fetch_experiment_log(subject_data_dir: Path) -> pd.DataFrame:
     """
