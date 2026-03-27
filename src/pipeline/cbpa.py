@@ -19,7 +19,8 @@ from scipy.stats import t as t_dist
 from src.pipeline.signal_features import fetch_stored_spectrograms, aggregate_psd_spectrogram
 import src.pipeline.data_integration as data_integration
 import src.pipeline.data_analysis as data_analysis
-from src.pipeline.visualizations import EEG_CHANNEL_IND_DICT, EEG_CHANNELS_BY_AREA
+from src.pipeline.channel_layout import EEG_CHANNEL_IND_DICT
+import src.pipeline.visualizations as visualizations
 import src.utils.file_management as filemgmt
 
 
@@ -158,6 +159,8 @@ class CBPAConfig:
     target_sine_min_pct_mvc: float = 7.5
     target_sine_max_pct_mvc: float = 22.5
     target_sine_frequency_hz: float = 0.1
+    include_dynamometer_force: bool = True
+    """If True, overlay the averaged per-cycle dynamometer force on target sine panels."""
 
     # Optional figure suptitle (useful to disable for publication figures)
     include_suptitle: bool = False
@@ -270,7 +273,7 @@ def _load_subject_data(
     subject_feat_dir = FEATURE_DATA / f"subject_{subject_ind:02}"
     subject_exp_dir = EXPERIMENT_DATA / f"subject_{subject_ind:02}"
 
-    log_df = data_integration.fetch_enriched_log_frame(subject_exp_dir)
+    log_df = data_integration.fetch_enriched_log_frame(subject_exp_dir, verbose=False)
     log_df.index = data_analysis.make_timezone_aware(log_df.index)
 
     qtc_start, qtc_end = data_integration.get_qtc_measurement_start_end(log_df, False)
@@ -479,6 +482,23 @@ def _mode_label_for_span(
     t_start,
     t_end,
 ) -> str | None:
+    """Return the modal non-null label for a column within a time span.
+
+    Parameters
+    ----------
+    log_df : pd.DataFrame
+        Log frame with a DatetimeIndex.
+    column : str
+        Column name containing categorical labels.
+    t_start, t_end : Any
+        Inclusive/exclusive time bounds used for slicing ``log_df``.
+
+    Returns
+    -------
+    str | None
+        Most frequent non-null value in ``column`` within ``[t_start, t_end)``,
+        or ``None`` if the span contains no valid labels.
+    """
     mask = (log_df.index >= t_start) & (log_df.index < t_end)
     col = log_df.loc[mask, column].dropna()
     return col.mode().iloc[0] if not col.empty else None
@@ -490,25 +510,81 @@ def _mode_label_for_span(
 
 def _extract_band_power(
     cfg: CBPAConfig,
-    spectrogram: np.ndarray,  # (n_windows, n_freqs, n_channels)
+    spectrogram: np.ndarray,
     freqs: np.ndarray,
     channel_indices: list[int] | None,
+    freq_pooling: Literal["max", "mean"] = "max",
+    channel_pooling: Literal["max", "mean"] = "max",
 ) -> np.ndarray:
     """
-    Reduce spectrogram along frequency axis only; keep full time and channel
-    resolution. Returns shape (n_windows, n_channels_selected).
+    Reduce spectrogram to band-wise time x channel data.
+
+    For CMC, this enforces the intended order:
+      1) max/mean over EMG channels (if present as 4th axis),
+      2) max/mean over frequencies within cfg.freq_band.
+
+    For PSD, this computes the mean within cfg.freq_band.
+
+    Output shape is always (n_windows, n_channels_selected).
 
     We call aggregate_psd_spectrogram with a single op on axis=1 (freq) so
     that time and channel axes are untouched.
 
     Pooling rule:
       - PSD: mean within frequency band
-      - CMC: max within frequency band (matches subject feature extraction)
+      - CMC: max/mean within frequency band (after optional EMG max/mean)
+
+    Parameters
+    ----------
+    cfg : CBPAConfig
+        Active run configuration that defines modality and frequency band.
+    spectrogram : np.ndarray
+        Input spectrogram. Expected shapes:
+        - PSD: ``(n_windows, n_freqs, n_channels)``
+        - CMC: ``(n_windows, n_freqs, n_eeg)`` or
+          ``(n_windows, n_freqs, n_eeg, n_emg)``.
+    freqs : np.ndarray
+        Frequency vector matching the spectrogram frequency axis.
+    channel_indices : list[int] | None
+        Optional channel subset indices (used for PSD path).
+    freq_pooling : {'max', 'mean'}, default 'max'
+        Pooling operation for frequency dimension (default 'max' for CMC behavior).
+    channel_pooling : {'max', 'mean'}, default 'max'
+        Pooling operation for EMG channels (default 'max' for CMC behavior).
+
+    Returns
+    -------
+    np.ndarray
+        Band-reduced array of shape ``(n_windows, n_channels_selected)``.
+
+    Raises
+    ------
+    ValueError
+        If the spectrogram dimensionality does not match modality expectations.
     """
-    band_op = "max" if cfg.modality == "CMC" else "mean"
+    spec = spectrogram
+
+    if cfg.modality == "CMC":
+        if spec.ndim == 4:
+            # Expected raw CMC layout: (time, freq, eeg, emg)
+            if channel_pooling == "mean":
+                spec = np.nanmean(spec, axis=3)
+            else:  # "max"
+                spec = np.nanmax(spec, axis=3)
+        elif spec.ndim != 3:
+            raise ValueError(
+                f"Unexpected CMC spectrogram shape {spec.shape}. "
+                "Expected 3D (time,freq,eeg) or 4D (time,freq,eeg,emg)."
+            )
+    elif spec.ndim != 3:
+        raise ValueError(
+            f"Unexpected PSD spectrogram shape {spec.shape}. Expected 3D (time,freq,channel)."
+        )
+
+    band_op = freq_pooling if cfg.modality == "CMC" else "mean"
 
     band_power = aggregate_psd_spectrogram(
-        spectrogram,
+        spec,
         freqs,
         normalize_mvc=False,
         channel_indices=channel_indices,
@@ -543,6 +619,21 @@ def _band_power_per_phase(
     cycles_by_condition : dict mapping condition_label →
                           list of (n_phase_bins, n_channels) arrays,
                           one entry per valid cycle across all trials.
+
+    Parameters
+    ----------
+    cfg : CBPAConfig
+        Configuration with phase-normalization parameters.
+    band_power : np.ndarray
+        Array of shape ``(n_windows, n_channels)``.
+    timestamps : pd.DatetimeIndex
+        Absolute timestamps aligned with ``band_power`` windows.
+    trial_spans : dict[int, tuple]
+        Trial start/end timestamps per trial ID.
+    trial_cond_map : dict[int, str]
+        Mapping from trial ID to condition label.
+    log_df : pd.DataFrame
+        Enriched log frame used to recover per-trial task frequency.
     """
     phase_grid = np.linspace(0, 360, cfg.n_phase_bins, endpoint=False)
     cycles_by_condition: dict[str, list[np.ndarray]] = {}
@@ -579,6 +670,7 @@ def _band_power_per_phase(
         trial_bp = band_power[mask]          # (n_windows_in_trial, n_channels)
         trial_ts = timestamps[mask]
 
+
         if len(trial_ts) == 0:
             continue
 
@@ -588,41 +680,210 @@ def _band_power_per_phase(
             dtype=float,
         )
 
-        # Phase of each CMC window: sine starts at 0 at trial onset
-        # phase = (t_rel * task_freq * 360) % 360
-        window_phases = (t_rel * task_freq * 360.0) % 360.0
-
-        # Split into individual complete cycles
+        # replace the entire "for cycle_idx in range(...)" block with:
         trial_dur_sec = (t_end - t_start).total_seconds()
-        n_complete_cycles = int(trial_dur_sec * task_freq)
-
-        for cycle_idx in range(n_complete_cycles):
-            # Identify windows belonging to this cycle via raw time offset
-            t_cycle_start = cycle_idx * cycle_dur_sec
-            t_cycle_end = (cycle_idx + 1) * cycle_dur_sec
-            in_cycle = (t_rel >= t_cycle_start) & (t_rel < t_cycle_end)
-
-            if in_cycle.sum() < cfg.min_samples_per_cycle:
-                continue  # insufficient samples in this specific cycle
-
-            # Phase within this cycle: 0–360°
-            phases_in_cycle = window_phases[in_cycle]
-            # Clamp to [0, 360) to handle floating point edge cases
-            phases_in_cycle = np.clip(phases_in_cycle, 0.0, 360.0 - 1e-9)
-            bp_in_cycle = trial_bp[in_cycle]  # (n_in_cycle, n_channels)
-
-            # Interpolate each channel onto the shared phase grid
-            cycle_profile = np.zeros((cfg.n_phase_bins, bp_in_cycle.shape[1]))
-            for ch in range(bp_in_cycle.shape[1]):
-                cycle_profile[:, ch] = np.interp(
-                    phase_grid,
-                    phases_in_cycle,
-                    bp_in_cycle[:, ch],
-                    left=bp_in_cycle[0, ch],   # extrapolate at edges with boundary value
-                    right=bp_in_cycle[-1, ch],
-                )
-
+        cycles = data_analysis.phase_normalize_cycles(
+            signal=trial_bp,
+            t_rel=t_rel,
+            task_freq=task_freq,
+            trial_dur_sec=trial_dur_sec,
+            phase_grid=phase_grid,
+            min_samples_per_cycle=cfg.min_samples_per_cycle,
+            start_offset_sec=0.0,  # no offset for CMC/EMG
+            show_debug_cycle_wise_plots=False,
+            show_debug_trial_wise_plots=False,
+        )
+        for cycle_profile in cycles:
             cycles_by_condition.setdefault(condition, []).append(cycle_profile)
+def _extract_band_power(
+    cfg: CBPAConfig,
+    spectrogram: np.ndarray,
+    freqs: np.ndarray,
+    channel_indices: list[int] | None,
+    freq_pooling: Literal["max", "mean"] = "max",
+    channel_pooling: Literal["max", "mean"] = "max",
+) -> np.ndarray:
+    """
+    Reduce spectrogram to band-wise time x channel data.
+
+    For CMC, this enforces the intended order:
+      1) max/mean over EMG channels (if present as 4th axis),
+      2) max/mean over frequencies within cfg.freq_band.
+
+    For PSD, this computes the mean within cfg.freq_band.
+
+    Output shape is always (n_windows, n_channels_selected).
+
+    We call aggregate_psd_spectrogram with a single op on axis=1 (freq) so
+    that time and channel axes are untouched.
+
+    Pooling rule:
+      - PSD: mean within frequency band
+      - CMC: max/mean within frequency band (after optional EMG max/mean)
+
+    Parameters
+    ----------
+    cfg : CBPAConfig
+        Active run configuration that defines modality and frequency band.
+    spectrogram : np.ndarray
+        Input spectrogram. Expected shapes:
+        - PSD: ``(n_windows, n_freqs, n_channels)``
+        - CMC: ``(n_windows, n_freqs, n_eeg)`` or
+          ``(n_windows, n_freqs, n_eeg, n_emg)``.
+    freqs : np.ndarray
+        Frequency vector matching the spectrogram frequency axis.
+    channel_indices : list[int] | None
+        Optional channel subset indices (used for PSD path).
+    freq_pooling : {'max', 'mean'}, default 'max'
+        Pooling operation for frequency dimension (default 'max' for CMC behavior).
+    channel_pooling : {'max', 'mean'}, default 'max'
+        Pooling operation for EMG channels (default 'max' for CMC behavior).
+
+    Returns
+    -------
+    np.ndarray
+        Band-reduced array of shape ``(n_windows, n_channels_selected)``.
+
+    Raises
+    ------
+    ValueError
+        If the spectrogram dimensionality does not match modality expectations.
+    """
+    spec = spectrogram
+
+    if cfg.modality == "CMC":
+        if spec.ndim == 4:
+            # Expected raw CMC layout: (time, freq, eeg, emg)
+            if channel_pooling == "mean":
+                spec = np.nanmean(spec, axis=3)
+            else:  # "max"
+                spec = np.nanmax(spec, axis=3)
+        elif spec.ndim != 3:
+            raise ValueError(
+                f"Unexpected CMC spectrogram shape {spec.shape}. "
+                "Expected 3D (time,freq,eeg) or 4D (time,freq,eeg,emg)."
+            )
+    elif spec.ndim != 3:
+        raise ValueError(
+            f"Unexpected PSD spectrogram shape {spec.shape}. Expected 3D (time,freq,channel)."
+        )
+
+    band_op = freq_pooling if cfg.modality == "CMC" else "mean"
+
+    band_power = aggregate_psd_spectrogram(
+        spec,
+        freqs,
+        normalize_mvc=False,
+        channel_indices=channel_indices,
+        is_log_scaled=cfg.psd_is_log_scaled if cfg.modality == "PSD" else False,
+        freq_slice=cfg.freq_band,
+        aggregation_ops=[(band_op, 1)],  # reduce freq band only → (n_windows, n_channels)
+    )
+    # band_power: (n_windows, n_channels)
+    return band_power
+
+
+def _band_power_per_phase(
+    cfg: CBPAConfig,
+    band_power: np.ndarray,          # (n_windows, n_channels)
+    timestamps: pd.DatetimeIndex,
+    trial_spans: dict[int, tuple],   # {trial_id: (start, end)}
+    trial_cond_map: dict[int, str],  # {trial_id: condition_label}
+    log_df: pd.DataFrame,
+) -> dict[str, list[np.ndarray]]:
+    """
+    Convert band_power time series into phase-resolved profiles per condition.
+
+    For each trial:
+      1. Retrieve task frequency from log_df.
+      2. Skip trial if samples-per-cycle < cfg.min_samples_per_cycle.
+      3. For each complete force cycle, map CMC windows to phase (0–360°)
+         and interpolate onto cfg.n_phase_bins.
+      4. Accumulate cycles by condition label.
+
+    Returns
+    -------
+    cycles_by_condition : dict mapping condition_label →
+                          list of (n_phase_bins, n_channels) arrays,
+                          one entry per valid cycle across all trials.
+
+    Parameters
+    ----------
+    cfg : CBPAConfig
+        Configuration with phase-normalization parameters.
+    band_power : np.ndarray
+        Array of shape ``(n_windows, n_channels)``.
+    timestamps : pd.DatetimeIndex
+        Absolute timestamps aligned with ``band_power`` windows.
+    trial_spans : dict[int, tuple]
+        Trial start/end timestamps per trial ID.
+    trial_cond_map : dict[int, str]
+        Mapping from trial ID to condition label.
+    log_df : pd.DataFrame
+        Enriched log frame used to recover per-trial task frequency.
+    """
+    phase_grid = np.linspace(0, 360, cfg.n_phase_bins, endpoint=False)
+    cycles_by_condition: dict[str, list[np.ndarray]] = {}
+
+    for trial_id, (t_start, t_end) in trial_spans.items():
+        condition = trial_cond_map.get(int(trial_id))
+        if condition is None:
+            continue  # trial not assigned to any condition
+
+        # Retrieve task frequency for this trial
+        task_freq = _get_task_freq_for_trial(log_df, t_start, t_end)
+        if task_freq is None or task_freq <= 0:
+            warnings.warn(
+                f"  [phase] Trial {trial_id}: Task Frequency missing or zero. Skipping."
+            )
+            continue
+
+        cycle_dur_sec = 1.0 / task_freq
+
+        # Check temporal resolution: samples per cycle
+        tw_step = (cfg.cmc_time_window_sec if cfg.modality == "CMC"
+                   else cfg.psd_time_window_sec) * (1.0 - cfg.overlap_ratio)
+        samples_per_cycle = cycle_dur_sec / tw_step
+        if samples_per_cycle < cfg.min_samples_per_cycle:
+            warnings.warn(
+                f"  [phase] Trial {trial_id}: only {samples_per_cycle:.1f} "
+                f"CMC samples/cycle at {task_freq} Hz — skipping "
+                f"(min={cfg.min_samples_per_cycle})."
+            )
+            continue
+
+        # Slice spectrogram windows belonging to this trial
+        mask = (timestamps >= t_start) & (timestamps < t_end)
+        trial_bp = band_power[mask]          # (n_windows_in_trial, n_channels)
+        trial_ts = timestamps[mask]
+
+
+        if len(trial_ts) == 0:
+            continue
+
+        # Convert absolute timestamps to seconds relative to trial start
+        t_rel = np.array(
+            [(ts - t_start).total_seconds() for ts in trial_ts],
+            dtype=float,
+        )
+
+        # replace the entire "for cycle_idx in range(...)" block with:
+        trial_dur_sec = (t_end - t_start).total_seconds()
+        cycles = data_analysis.phase_normalize_cycles(
+            signal=trial_bp,
+            t_rel=t_rel,
+            task_freq=task_freq,
+            trial_dur_sec=trial_dur_sec,
+            phase_grid=phase_grid,
+            min_samples_per_cycle=cfg.min_samples_per_cycle,
+            start_offset_sec=float(1.0 / task_freq),  # skip first cycle
+        )
+        for cycle_profile in cycles:
+            cycles_by_condition.setdefault(condition, []).append(cycle_profile)
+
+    return cycles_by_condition
+
+
 
     return cycles_by_condition
 
@@ -640,6 +901,27 @@ def build_contrast_array(
 
     Condition labels are resolved entirely from the pre-computed Combined
     Statistics frame (1seg), keyed on (Subject ID, Trial ID).
+
+    Parameters
+    ----------
+    cfg : CBPAConfig
+        Full analysis configuration (modality, band, conditions, segmentation,
+        phase normalization options).
+
+    Returns
+    -------
+    X : np.ndarray
+        Subject-level contrast array of shape ``(n_subjects, n_times, n_channels)``.
+    ch_names_out : list[str]
+        Channel labels corresponding to axis 2 of ``X``.
+    time_grid : np.ndarray
+        Time axis in seconds (clock-time mode) or phase in degrees
+        (phase-normalized mode).
+
+    Raises
+    ------
+    RuntimeError
+        If no subject yields a valid contrast after filtering and checks.
     """
     # ── Load stats frame once — hard failure if missing ──────────────────────
     stats_df = load_stats_frame(cfg.data_root)
@@ -731,6 +1013,7 @@ def build_contrast_array(
 
         # ── Phase-normalised path ─────────────────────────────────────────
         if cfg.use_phase_normalization:
+            # todo: replace with data analysis function
             cycles_by_cond = _band_power_per_phase(
                 cfg, band_power, timestamps,
                 trial_spans_int, trial_cond_map, log_df,
@@ -941,238 +1224,10 @@ def run_cbpa(
     )
 
     if cfg.save_plots or cfg.show_plots:
-        _plot_results(results, cfg)
+        visualizations.plot_cbpa_results(results, cfg)
 
     return results
 
-
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  VISUALISATION
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _target_sine_values(x: np.ndarray, cfg: CBPAConfig) -> np.ndarray:
-    """Return target-force sine over x in phase-domain or time-domain units."""
-    x_arr = np.asarray(x, dtype=float)
-    mid = 0.5 * (cfg.target_sine_min_pct_mvc + cfg.target_sine_max_pct_mvc)
-    amp = 0.5 * (cfg.target_sine_max_pct_mvc - cfg.target_sine_min_pct_mvc)
-
-    if cfg.use_phase_normalization:
-        phase_rad = 2.0 * np.pi * (x_arr / 360.0)
-    else:
-        phase_rad = 2.0 * np.pi * cfg.target_sine_frequency_hz * x_arr
-
-    # Match experiment logic: start at mean at x=0.
-    return mid + amp * np.sin(phase_rad)
-
-
-def _plot_target_sine_panel(
-    ax,
-    x: np.ndarray,
-    cfg: CBPAConfig,
-    x_label: str,
-    show_ylabel: bool = True,
-) -> None:
-    """Draw one target-sine panel beneath a main subplot."""
-    y = _target_sine_values(x, cfg)
-    ax.plot(x, y, color="dimgray", linewidth=1.2)
-    pad = 0.1 * max(1e-6, cfg.target_sine_max_pct_mvc - cfg.target_sine_min_pct_mvc)
-    ax.set_ylim(cfg.target_sine_min_pct_mvc - pad, cfg.target_sine_max_pct_mvc + pad)
-    ax.set_ylabel("Force [% MVC]" if show_ylabel else "")
-    ax.set_xlabel(x_label)
-    ax.set_title("Target sine", fontsize=12)
-    ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
-
-def _plot_results(results: dict, cfg: CBPAConfig) -> None:
-    t_obs        = results["t_obs"]
-    t_thresh     = results["t_thresh"]
-    clusters     = results["clusters"]
-    cluster_pv   = results["cluster_pv"]
-    good_inds    = results["good_cluster_inds"]
-    ch_names     = results["ch_names"]
-    time_grid    = results["time_grid"]
-    n_valid_subjects = results["n_valid_subjects"]
-
-    n_times, n_ch = t_obs.shape
-    t_ax = time_grid if time_grid is not None else np.arange(n_times)
-
-    # Shared mask resolver — handles all formats MNE may return:
-    #   • bool ndarray shape (n_times, n_ch)       — spatio-temporal
-    #   • bool ndarray shape (n_times * n_ch,)      — flat temporal-only
-    #   • tuple of index arrays (rows, cols)        — out_type="indices"
-    def _resolve_mask(cluster) -> np.ndarray:
-        """
-        Resolve any MNE cluster format to a (n_times, n_ch) boolean mask.
-
-        MNE may return any of these formats depending on test type and version:
-          - np.ndarray bool (n_times, n_ch)      spatio-temporal, out_type="mask"
-          - np.ndarray bool (n_times * n_ch,)    flat test, out_type="mask"
-          - (np.ndarray bool,)                   flat test, bool wrapped in tuple
-          - (np.ndarray int,)                    flat test, int indices in tuple
-          - (slice,)                             flat test, slice wrapped in tuple
-          - (np.ndarray int, np.ndarray int)     2D index arrays (time, channel)
-        """
-        n_flat = n_times * n_ch
-        flat_mask = np.zeros(n_flat, dtype=bool)
-
-        # Unwrap single-element tuples to their inner value
-        if isinstance(cluster, tuple) and len(cluster) == 1:
-            cluster = cluster[0]
-
-        # --- Bare boolean array ---
-        if isinstance(cluster, np.ndarray) and cluster.dtype == bool:
-            return cluster.reshape(n_times, n_ch)
-
-        # --- Slice into flat space ---
-        if isinstance(cluster, slice):
-            flat_mask[cluster] = True
-            return flat_mask.reshape(n_times, n_ch)
-
-        # --- Tuple of two index arrays: (time_inds, ch_inds) ---
-        if (isinstance(cluster, tuple) and len(cluster) == 2
-                and isinstance(cluster[0], np.ndarray)):
-            mask = np.zeros((n_times, n_ch), dtype=bool)
-            mask[cluster[0], cluster[1]] = True
-            return mask
-
-        # --- Integer index array into flat space ---
-        if isinstance(cluster, np.ndarray):
-            idx = cluster.ravel().astype(int)
-            idx = idx[(idx >= 0) & (idx < n_flat)]  # bounds guard
-            flat_mask[idx] = True
-            return flat_mask.reshape(n_times, n_ch)
-
-        # --- Fallback: try coercing to integer indices ---
-        try:
-            idx = np.asarray(cluster).ravel().astype(int)
-            idx = idx[(idx >= 0) & (idx < n_flat)]
-            flat_mask[idx] = True
-        except Exception as e:
-            warnings.warn(f"[CBPA] _resolve_mask: unrecognised cluster format "
-                          f"{type(cluster)} — mask will be all-False. Error: {e}")
-
-        return flat_mask.reshape(n_times, n_ch)
-
-    if cfg.show_target_sine:
-        fig = plt.figure(figsize=(16, 6))
-        gs = fig.add_gridspec(
-            2,
-            4,
-            width_ratios=[1.0, 0.05, 0.14, 1.0],
-            height_ratios=[5.0, 1.0],
-            wspace=0.12,
-            hspace=0.28,
-        )
-        ax = fig.add_subplot(gs[0, 0])
-        cax = fig.add_subplot(gs[0, 1])
-        ax2 = fig.add_subplot(gs[0, 3])
-        ax_tgt_left = fig.add_subplot(gs[1, 0], sharex=ax)
-        ax_tgt_right = fig.add_subplot(gs[1, 3], sharex=ax2)
-        fig.add_subplot(gs[1, 1]).axis("off")
-        fig.add_subplot(gs[0, 2]).axis("off")
-        fig.add_subplot(gs[1, 2]).axis("off")
-    else:
-        fig = plt.figure(figsize=(16, 5))
-        gs = fig.add_gridspec(1, 4, width_ratios=[1.0, 0.05, 0.14, 1.0], wspace=0.12)
-        ax = fig.add_subplot(gs[0, 0])
-        cax = fig.add_subplot(gs[0, 1])
-        ax2 = fig.add_subplot(gs[0, 3])
-        fig.add_subplot(gs[0, 2]).axis("off")
-
-    if cfg.include_suptitle:
-        fig.suptitle(
-            f"{cfg.hypothesis_label}\n"
-            f"Contrast: '{cfg.condition_A}' − '{cfg.condition_B}'  |  "
-            f"{cfg.modality} {cfg.freq_band}  |  "
-            f"n = {n_valid_subjects} subjects, {cfg.n_permutations} permutations",
-            fontsize=10,
-        )
-
-    # ── Panel A: heatmap + cluster contours ──────────────────────────────────
-    # Use a fixed ±3 baseline for cross-plot comparability;
-    # expand only if the observed t-values exceed it
-    vlim = max(3.0, np.nanpercentile(np.abs(t_obs), 97))
-    im = ax.imshow(
-        t_obs.T, aspect="auto", origin="lower", cmap="RdBu_r",
-        vmin=-vlim, vmax=vlim,
-        extent=[t_ax[0], t_ax[-1], -0.5, n_ch - 0.5],
-    )
-    plt.colorbar(im, cax=cax, label="t-statistic")
-
-    for idx, cluster in enumerate(clusters):
-        mask = _resolve_mask(cluster)
-        color = "black" if idx in good_inds else "silver"
-        lw    = 1.8    if idx in good_inds else 0.8
-        # contour needs at least one True and one False cell to draw anything
-        if mask.any() and not mask.all():
-            ax.contour(
-                np.linspace(t_ax[0], t_ax[-1], n_times),
-                np.arange(n_ch),
-                mask.T.astype(float),
-                levels=[0.5], colors=color, linewidths=lw,
-            )
-
-    x_label = "Force Cycle Phase (°)" if cfg.use_phase_normalization else "Time within trial (s)"
-    if not cfg.show_target_sine:
-        ax.set_xlabel(x_label)
-    ax.set_ylabel("Channel index")
-    ax.set_yticks(range(n_ch))
-    ax.set_yticklabels(ch_names, fontsize=6)
-    ax.set_title("t-statistic map\n(black contour = significant cluster)")
-
-    # ── Panel B: significant cluster time courses ─────────────────────────────
-    if len(good_inds) == 0:
-        ax2.text(0.5, 0.5, "No significant clusters", ha="center", va="center",
-                 transform=ax2.transAxes, fontsize=12, color="grey")
-    else:
-        for idx in good_inds:
-            # Use shared resolver — fixes the previously unreshaped 1D mask here
-            mask = _resolve_mask(clusters[idx])
-
-            ch_in_cluster = mask.any(axis=0)   # (n_ch,) bool
-            t_in_cluster  = mask.any(axis=1)   # (n_times,) bool
-
-            if not ch_in_cluster.any():
-                continue
-
-            t_course = t_obs[:, ch_in_cluster].mean(axis=1)  # (n_times,)
-            ax2.plot(t_ax, t_course,
-                     label=f"Cluster #{idx + 1}  p={cluster_pv[idx]:.3f}")
-            ax2.fill_between(t_ax, 0, t_course, where=t_in_cluster, alpha=0.2)
-
-        ax2.axhline(0,         color="k",   linewidth=0.8, linestyle="--")
-        ax2.axhline( t_thresh, color="red", linewidth=0.8, linestyle=":",
-                     label=f"±t_thresh ({t_thresh:.2f})")
-        ax2.axhline(-t_thresh, color="red", linewidth=0.8, linestyle=":")
-        ax2.legend(fontsize=8)
-
-    if not cfg.show_target_sine:
-        ax2.set_xlabel(x_label)
-    ax2.set_ylabel("Mean t-statistic over cluster channels")
-    ax2.set_title("Significant cluster time courses")
-
-    if cfg.show_target_sine:
-        _plot_target_sine_panel(ax_tgt_left, t_ax, cfg, x_label=x_label, show_ylabel=True)
-        _plot_target_sine_panel(ax_tgt_right, t_ax, cfg, x_label=x_label, show_ylabel=True)
-
-    if cfg.use_phase_normalization:
-        phase_axes = [ax, ax2]
-        if cfg.show_target_sine:
-            phase_axes.extend([ax_tgt_left, ax_tgt_right])
-        for a in phase_axes:
-            a.set_xticks([0, 90, 180, 270, 360])
-            a.axvline(90,  color="grey", lw=0.5, ls=":")
-            a.axvline(270, color="grey", lw=0.5, ls=":")
-
-    fig.subplots_adjust(left=0.06, right=0.985, top=0.90, bottom=0.10)
-    if cfg.save_plots:
-        out = cfg.output_dir / filemgmt.file_title(cfg.hypothesis_label + "_clusters", ".png")
-        fig.savefig(out, dpi=150, bbox_inches="tight")
-        print(f"  Plot saved: {out}")
-    if cfg.show_plots:
-        plt.show()
-    plt.close(fig)
 
 
 
@@ -1294,6 +1349,13 @@ def _save_results(
 
 
 def _print_header(cfg: CBPAConfig) -> None:
+    """Print a compact console summary of the active CBPA configuration.
+
+    Parameters
+    ----------
+    cfg : CBPAConfig
+        Configuration to display.
+    """
     bar = "═" * 70
     print(f"\n{bar}")
     print(f"  CBPA: {cfg.hypothesis_label}")
