@@ -17,7 +17,7 @@ import src.pipeline.data_integration as data_integration
 import src.utils.file_management as filemgmt
 
 from src.pipeline.preprocessing import BiosignalPreprocessor
-from src.pipeline.visualizations import EEG_CHANNEL_IND_DICT, EEG_CHANNELS_BY_AREA
+from src.pipeline.channel_layout import EEG_CHANNEL_IND_DICT, EEG_CHANNELS_BY_AREA
 
 
 if __name__=="__main__":
@@ -34,7 +34,7 @@ if __name__=="__main__":
 
     ### WORKFLOW CONTROL
     # select subject:
-    for subject_ind in range(12):  # only new
+    for subject_ind in range(12):
         handedness: Literal['left', 'right'] = 'right' if subject_ind != 3 else 'left'
 
 
@@ -52,7 +52,7 @@ if __name__=="__main__":
 
 
         # CMC computation:
-        do_compute_cmc: bool = False
+        do_compute_cmc: bool = True
         only_extensor: bool = False
         fetch_precomputed_cmc: bool = False
         cmc_eeg_channel_subset = [  # will be mirrored for left-handed subject
@@ -63,7 +63,8 @@ if __name__=="__main__":
         cmc_line_visualization_channels = cmc_eeg_channel_subset  # should be included in the above
         cmc_window_size_sec: float = 2.0
         cmc_window_overlap_ratio: float = 0.5
-        cmc_independence_threshold_alpha: float = .2  # significance level from which to derive confidence treshold
+        pre_trial_cmc_buffer = 3.0  # in seconds, time added before trial start for CMC computation to capture pre-trial activity
+        cmc_independence_threshold_alpha: float = .2  # significance level from which to derive confidence threshold
         filter_significant_cmc: bool = False  # filter out all CMCs lower than confidence threshold
         cmc_jackknife_alpha: float = .05
         save_cmc: bool = True
@@ -250,6 +251,7 @@ if __name__=="__main__":
                     enforce_independence_threshold=filter_significant_cmc, independence_threshold_alpha=cmc_independence_threshold_alpha,
                     use_jackknife=True, jackknife_alpha=cmc_jackknife_alpha,
                     save_dir=subject_cmc_save_dir,
+                    pre_trial_computation_buffer_sec=pre_trial_cmc_buffer,
                 )
 
 
@@ -343,6 +345,7 @@ if __name__=="__main__":
                     independence_threshold_alpha=cmc_independence_threshold_alpha,
                     use_jackknife=True, jackknife_alpha=cmc_jackknife_alpha,
                     save_dir=subject_cmc_save_dir,
+                    pre_trial_computation_buffer_sec=pre_trial_cmc_buffer,
                 )
 
 
