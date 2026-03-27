@@ -124,7 +124,7 @@ if __name__ == '__main__':
     cmc_plot_n_segments = 10
     # subject wise line plots:
     plot_cmc_lineplots_normalised: bool = True
-    plot_cmc_lineplots_per_category: bool = True
+    plot_cmc_lineplots_per_category: bool = False
     save_cmc_lineplots: bool = True
     # compound scatters:
     show_cmc_scatterplots: bool = False
@@ -170,7 +170,7 @@ if __name__ == '__main__':
     show_effect_plots: bool = True  # if False, either of the above will be hidden
 
     # comparison levels:
-    lvl_inds_to_include: list[int] = [0, 1, 2, 3]  # defines below
+    lvl_inds_to_include: list[int] = [0, 1]  # defines below
     lvls_to_include: list[str] = [f"lvl_{lvl_ind}" for lvl_ind in lvl_inds_to_include]
 
     # across time resolution comparison:
@@ -656,6 +656,8 @@ if __name__ == '__main__':
                             corridor_color='lightblue',
                             save_dir=subset_save_dir,
                             alpha=.2,
+                            line_width=1.2,
+                            plot_size=(12, 6),
                             show_grid=True,
                             subject_ids_subset=subset_ids,
                         )
@@ -685,6 +687,8 @@ if __name__ == '__main__':
                                 save_dir=subset_save_dir,
                                 alpha=.1,
                                 subject_ids_subset=subset_ids,
+                                plot_size=(12, 6),
+                                show_grid=True,
                             )
 
 
