@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 import warnings
 from pathlib import Path
@@ -5,7 +7,7 @@ import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from typing import Optional, Union, Tuple, List, Callable, Literal
+from typing import Optional, Union, Tuple, List, Callable, Literal, TYPE_CHECKING
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
@@ -16,14 +18,24 @@ from matplotlib.widgets import Button, Slider
 import matplotlib.animation as animation
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import multiprocessing
+from tqdm import tqdm
 import os
 import textwrap
 from scipy.stats import gaussian_kde
 import math
 
+
 import src.utils.file_management as filemgmt
 from src.utils.str_conversion import enter_line_breaks
+import src.pipeline.data_analysis as data_analysis
 import src.pipeline.signal_features as features
+import src.pipeline.data_integration as data_integration
+from src.pipeline.channel_layout import EEG_CHANNELS, EEG_CHANNELS_BY_AREA, EEG_CHANNEL_IND_DICT
+
+if TYPE_CHECKING:
+    from src.pipeline.cbpa import CBPAConfig
+
+
 
 
 ############### MATPLOTLIB PREP ###############
@@ -43,29 +55,7 @@ mpl.use('Qt5Agg')
 
 ##############  CONSTANT PARAMETERS ##############
 ### EEG:
-EEG_CHANNELS = ['Fp1', 'Fpz', 'Fp2',
-                'AF7', 'AF3', 'AFz', 'AF4', 'AF8',
-                'F9', 'F7', 'F3', 'F1', 'Fz', 'F2', 'F4', 'F8', 'F10',
-                'FT9', 'FT7',
-                'FC5', 'FC3', 'FC1', 'FCz', 'FC2', 'FC4', 'FC6',
-                'FT8', 'FT10',
-                'T9', 'T7',
-                'C5', 'C3', 'C1', 'Cz', 'C2', 'C4', 'C6',
-                'T8', 'T10',
-                'TP9', 'TP7',
-                'CP5', 'CP3', 'CP1', 'CPz', 'CP2', 'CP4', 'CP6',
-                'TP8', 'TP10',
-                'P9', 'P7', 'P3', 'P1', 'Pz', 'P2', 'P4', 'P8', 'P10',
-                'PO7', 'POz', 'PO8',
-                'O1', 'O2',
-                ]  # according to printout of quattrocento
-EEG_CHANNELS_BY_AREA = {
-    area_label: [ch for ch in EEG_CHANNELS if (ch[:len(area_abbr)] == area_abbr) and (
-                (ch[len(area_abbr):].isnumeric()) or ch[len(area_abbr):] == 'z')] for area_label, area_abbr in [
-        ('Frontal Pole', 'Fp'), ('Anterior Frontal', 'AF'), ('Fronto-Central', 'FC'), ('Frontal', 'F'),
-        ('Fronto-Temporal', 'FT'), ('Temporal', 'T'), ('Central', 'C'), ('Temporo-Parietal', 'TP'),
-        ('Centro-Parietal', 'CP'), ('Parietal', 'P'), ('Parieto-Occipital', 'PO'), ('Occipital', 'O')]}
-EEG_CHANNEL_IND_DICT = {ch: ind for ind, ch in enumerate(EEG_CHANNELS)}
+
 
 EEG_POSITIONS = {'Fpz': (0.0, 0.602),
                  'Fp1': (-0.165, 0.5599999999999999),
@@ -682,6 +672,21 @@ def plot_spectrogram(
     spec = spectrogram.T.copy()  # transpose: feature dimension on y-axis
     times = timestamps.copy()
 
+    # Handle NaN values in timestamps for task-wise data
+    # Filter to only include valid (non-NaN) time windows
+    valid_time_mask = ~np.isnan(times)
+    if np.any(valid_time_mask):
+        # Filter both spectrogram and timestamps to valid entries
+        spec = spec[:, valid_time_mask]  # Keep features, filter windows (time axis)
+        times = times[valid_time_mask]
+    
+    # If no valid times remain, raise informative error
+    if len(times) == 0:
+        raise ValueError(
+            f"No valid timestamps found in input. All {len(timestamps)} timestamps are NaN. "
+            f"Cannot plot spectrogram without valid time information."
+        )
+
     # Extract and filter features (frequency or channel)
     if plot_type == 'time-frequency':
         features = frequencies.copy()
@@ -730,6 +735,7 @@ def plot_spectrogram(
     fig, ax = plt.subplots(figsize=figsize)# constrained_layout=True)
 
     # Calculate extent for proper axis labeling
+    # Safe to use times directly since NaN values have been filtered
     extent = (
         times[0] - (times[1] - times[0]) / 2,
         times[-1] + (times[-1] - times[-2]) / 2,
@@ -868,7 +874,6 @@ def _is_dark(color) -> bool:
     # Relative luminance formula (WCAG)
     luminance = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
     return luminance < 0.5
-
 
 
 def plot_scatter(x, y, x_label: str | None = None, y_label: str | None = None,
@@ -1888,6 +1893,14 @@ def _resolve_p_column(
     return autocorr_col
 
 
+def _rename_parameter_label(label: str, rename_dict: dict[str, str] | None = None) -> str:
+    """Return renamed parameter label if mapping exists; otherwise return original label."""
+    label_str = str(label)
+    if rename_dict is None:
+        return label_str
+    return rename_dict.get(label_str, label_str)
+
+
 def draw_forest_plot(ax, effects_frame: pd.DataFrame,
                      hypothesis_column: str = 'Hypothesis',
                      param_column: str = 'Parameter',
@@ -1903,6 +1916,8 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
                      include_y_labels: bool = True,
                      title_max_width: int = 30,
                      show_significance_legend: bool = False,
+                     rename_dict: dict[str, str] | None = None,
+                     parameter_label_colors: dict[str, str] | None = None,
                      ):
     """
     Creates a beautiful forest plot for statistical effects.
@@ -1918,6 +1933,10 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
         Maximum character width for title before wrapping (default: 40)
     show_significance_legend : bool
         If True, shows significance legend (default: False)
+    rename_dict : dict[str, str] | None
+        Optional mapping for display names of parameter labels.
+    parameter_label_colors : dict[str, str] | None
+        Optional mapping from raw parameter name to y-tick font color.
     significant_pos_color : str
         Color for significant positive effects (default: 'green')
     significant_neg_color : str
@@ -1944,7 +1963,10 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
     df = df.sort_values(by=[param_column, 'level_num', model_type_column]).reset_index(drop=True)
 
     # Create y-axis labels combining parameter, enumerated level, and model type
-    df['y_label'] = (df[param_column].astype(str) + ' | ' +
+    df['param_label_display'] = df[param_column].astype(str).apply(
+        lambda x: _rename_parameter_label(x, rename_dict)
+    )
+    df['y_label'] = (df['param_label_display'].astype(str) + ' | ' +
                      df['comparison_lvl_enum'].astype(str) + ' | ' +
                      df[model_type_column].astype(str))
 
@@ -2046,8 +2068,10 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
     ax.set_yticks(y_positions)
 
     if include_y_labels:
-        # All y-tick labels in black
-        ax.set_yticklabels(df['y_label'], fontsize=7)
+        y_tick_labels = ax.set_yticklabels(df['y_label'], fontsize=7)
+        if parameter_label_colors:
+            for tick, param_name in zip(y_tick_labels, df[param_column].astype(str).tolist()):
+                tick.set_color(parameter_label_colors.get(param_name, 'black'))
     else:
         # Hide labels but keep ticks visible
         ax.set_yticklabels([])
@@ -2055,7 +2079,7 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
     ax.set_ylim(-0.5, max_y + 0.5)
 
     # Set x-axis
-    ax.set_xlabel('Effect Size (β)', fontsize=11, fontweight='bold')
+    ax.set_xlabel('Coefficient (β)', fontsize=11, fontweight='bold')
     ax.tick_params(axis='x', labelsize=10)
 
     # Add grid for readability
@@ -2114,6 +2138,7 @@ def draw_time_resolution_forest_plot(
         insignificant_color: str = '#AAAAAA',
         include_y_labels: bool = True,
         show_significance_legend: bool = False,
+        rename_dict: dict[str, str] | None = None,
 ):
     """
     Forest plot comparing one parameter at one comparison level across time resolutions.
@@ -2138,6 +2163,7 @@ def draw_time_resolution_forest_plot(
     """
     # --- filter to the single parameter x level of interest ---
     df = effects_frame.copy()
+    display_parameter = _rename_parameter_label(parameter, rename_dict)
     if hypothesis is not None:
         df = df[df[hypothesis_column] == hypothesis]
     df = df[df[param_column] == parameter]
@@ -2155,9 +2181,9 @@ def draw_time_resolution_forest_plot(
     df = df[df[comparison_lvl_column].isin(comparison_level_strs)]
 
     if df.empty:
-        ax.text(0.5, 0.5, f'No data\n"{parameter}"\n@ "{comparison_level}"',
+        ax.text(0.5, 0.5, f'No data\n"{display_parameter}"\n@ "{comparison_level}"',
                 ha='center', va='center', transform=ax.transAxes, fontsize=8, color='gray')
-        ax.set_title('\n'.join(textwrap.wrap(parameter, width=40)),
+        ax.set_title('\n'.join(textwrap.wrap(display_parameter, width=40)),
                      fontsize=7, fontweight='bold', pad=10)
         return ax
 
@@ -2267,7 +2293,7 @@ def draw_time_resolution_forest_plot(
     ax.set_ylim(-0.5, max_y + 0.5)
 
     # --- x-axis ---
-    ax.set_xlabel('Effect Size (β)', fontsize=11, fontweight='bold')
+    ax.set_xlabel('Coefficient (β)', fontsize=11, fontweight='bold')
     ax.tick_params(axis='x', labelsize=10)
 
     # --- grid & spines ---
@@ -2279,7 +2305,7 @@ def draw_time_resolution_forest_plot(
     ax.spines['bottom'].set_linewidth(1.2)
 
     # --- title = hypothesis if provided, else parameter name ---
-    title_text = hypothesis if hypothesis is not None else parameter
+    title_text = hypothesis if hypothesis is not None else display_parameter
     ax.set_title('\n'.join(textwrap.wrap(title_text, width=40)),
                  fontsize=7, fontweight='bold', pad=10)
 
@@ -2313,6 +2339,8 @@ def plot_time_resolution_forest_mosaic(
         plot_size: tuple[int, int] | Literal['auto'] = 'auto',
         show_legend: bool = False,
         significance_source: Literal["autocorr", "fdr", "auto"] = "auto",
+        show_title: bool = False,
+        rename_dict: dict[str, str] | None = None,
 ):
     """
     Mosaic of time-resolution forest plots — one column per hypothesis,
@@ -2387,14 +2415,16 @@ def plot_time_resolution_forest_mosaic(
             y_axis_label=y_axis_label if col_ind == 0 else '',
             include_y_labels=(col_ind == 0),  # only label y-axis on first column
             show_significance_legend=(col_ind == 0) and show_legend,
+            rename_dict=rename_dict,
         )
 
+    display_parameter = _rename_parameter_label(parameter, rename_dict)
     fig_title = (
-        f"Time Resolution Comparison: {parameter}"
+        f"Time Resolution Comparison: {display_parameter}"
         f"{f' ({model_type})' if model_type else ''}"
         f"{f' — {file_identifier_suffix}' if file_identifier_suffix else ''}"
     )
-    fig.suptitle(fig_title, fontsize=9, fontweight='bold')
+    if show_title: fig.suptitle(fig_title, fontsize=9, fontweight='bold')
 
     if output_dir is not None:
         save_path = filemgmt.file_title(fig_title, '.svg')
@@ -2414,6 +2444,8 @@ def plot_hypothesis_forest_mosaic(
     hidden: bool = False,
     plot_size: tuple[int, int] | Literal["auto"] = "auto",
     significance_source: Literal["autocorr", "fdr", "auto"] = "auto",
+    show_title: bool = False,
+    rename_dict: dict[str, str] | None = None,
 ):
     # slice results_frame:
     results_frame_subset = result_frame.copy()
@@ -2446,6 +2478,34 @@ def plot_hypothesis_forest_mosaic(
     axs = axs.flatten()
 
     # plot hypothesis forest plots:
+    selected_hypotheses = results_frame_subset[
+        results_frame_subset['Hypothesis'].isin(hypotheses)
+    ].copy()
+    selected_hypotheses['__plot_p'] = np.nan
+    for hypothesis in hypotheses:
+        hyp_mask = selected_hypotheses['Hypothesis'] == hypothesis
+        hyp_subset = selected_hypotheses.loc[hyp_mask]
+        if hyp_subset.empty:
+            continue
+        p_col = _resolve_p_column(hyp_subset, significance_source)
+        if p_col in selected_hypotheses.columns:
+            selected_hypotheses.loc[hyp_mask, '__plot_p'] = selected_hypotheses.loc[hyp_mask, p_col]
+
+    # Determine one color per parameter label across all subplots.
+    parameter_label_colors: dict[str, str] = {}
+    for parameter_name, parameter_rows in selected_hypotheses.groupby('Parameter'):
+        sig_rows = parameter_rows[
+            (parameter_rows['__plot_p'] < 0.05) & parameter_rows['Coefficient'].notna()
+        ]
+        signs = set(np.sign(sig_rows['Coefficient'].to_numpy(dtype=float)))
+        signs.discard(0.0)
+        if not signs or len(signs) > 1:
+            parameter_label_colors[str(parameter_name)] = 'black'
+        elif 1.0 in signs:
+            parameter_label_colors[str(parameter_name)] = 'green'
+        else:
+            parameter_label_colors[str(parameter_name)] = 'red'
+
     for col_ind, hypothesis in enumerate(hypotheses):
         hyp_subset = results_frame_subset.loc[
             results_frame_subset["Hypothesis"] == hypothesis
@@ -2457,10 +2517,12 @@ def plot_hypothesis_forest_mosaic(
             effects_frame=hyp_subset,
             p_column=p_col,
             include_y_labels=(col_ind == 0),
+            rename_dict=rename_dict,
+            parameter_label_colors=parameter_label_colors if col_ind == 0 else None,
         )
 
-    fig_title = f"Effect Size Overview{f' ({model_type} models)' if model_type is not None else ''}{f' ({file_identifier_suffix})' if file_identifier_suffix is not None else ''}"
-    fig.suptitle(fig_title)
+    fig_title = f"Coefficient Overview{f' ({model_type} models)' if model_type is not None else ''}{f' ({file_identifier_suffix})' if file_identifier_suffix is not None else ''}"
+    if show_title: fig.suptitle(fig_title)
 
     if output_dir is not None:
         save_path = filemgmt.file_title(fig_title, '.svg')
@@ -2493,6 +2555,9 @@ def plot_cmc_lineplots_per_category(
         n_tapers: int = 5,
         alpha: float = 0.2,
         subject_ids_subset: list[int] | None = None,
+        plot_size: tuple[float, float] = (12, 6),
+        show_legend: bool = True,
+        show_grid: bool = False,
 ) -> None:
     """
     Create line plots of CMC values across trial time for different categories.
@@ -2517,6 +2582,9 @@ def plot_cmc_lineplots_per_category(
         alpha: Alpha level for CMC significance threshold
         subject_ids_subset: Optional list of subject IDs to include. If None,
             all available subjects are plotted.
+        plot_size: Figure size as (width, height) in inches.
+        show_legend: Whether to show a figure-level legend.
+        show_grid: Whether to show subplot grids.
     """
     from matplotlib.lines import Line2D
 
@@ -2553,7 +2621,7 @@ def plot_cmc_lineplots_per_category(
         warnings.warn("No subjects selected for CMC line plot.", RuntimeWarning)
         return
 
-    fig, axs = plt.subplots(2, len(subject_ids), figsize=(20, 10), squeeze=False)
+    fig, axs = plt.subplots(2, len(subject_ids), figsize=plot_size, squeeze=False)
 
     # Prepare x-axis values
     x_ticks = np.linspace(0, 1, max(n_within_trial_segments, 2))
@@ -2623,24 +2691,27 @@ def plot_cmc_lineplots_per_category(
                 std_dev_factor=std_dev_factor,
                 x_ticks=x_ticks,
                 extended_y_label=extended_y_label,
+                show_grid=show_grid,
+                grid_color='lightgrey',
+                grid_alpha=0.8,
             )
 
-    # Figure-level legend — placed outside the grid, tight layout accounts for it automatically
-    fig.legend(
-        handles=legend_handles,
-        loc='center left',
-        bbox_to_anchor=(.84, 0.5),  # right of figure, vertically centred
-        title=category_column,
-        borderaxespad=0,
-        frameon=True,
-    )
+    if show_legend and legend_handles:
+        legend_ax = axs[-1, -1]
+        legend_ax.legend(
+            handles=legend_handles,
+            ncol=len(legend_handles),
+            loc='upper right',
+            bbox_to_anchor=(1.0, -0.23),
+            title=category_column,
+            borderaxespad=0,
+            frameon=True,
+        )
 
     if show_fig_title:
         fig.suptitle(f"CMC per Subject and '{category_column}'")
 
-    # Adjust layout to make room for the legend on the right
-    fig.subplots_adjust(left=0.05, right=0.83, top=0.93, bottom=0.10,
-                        hspace=0.05, wspace=0.1)
+    fig.subplots_adjust(top=.95, bottom=0.17, left=0.075, right=0.98, hspace=0.17, wspace=.1)
 
     if save_dir is not None:
         save_path = save_dir / filemgmt.file_title(
@@ -2672,12 +2743,16 @@ def plot_cmc_lineplot_normalised(
         n_tapers: int = 5,
         alpha: float = 0.2,
         subject_ids_subset: list[int] | None = None,
+        plot_size: tuple[float, float] = (12, 6),
+        show_legend: bool = True,
 ) -> None:
     """Plot normalized CMC time series per trial for each subject and frequency band.
 
     Args:
         subject_ids_subset: Optional list of subject IDs to include. If None,
             all available subjects are plotted.
+        plot_size: Figure size as (width, height) in inches.
+        show_legend: Whether to show a figure-level legend.
     """
 
     print("Plotting normalised CMC lineplot per trial")
@@ -2701,7 +2776,7 @@ def plot_cmc_lineplot_normalised(
         warnings.warn("No subjects selected for normalised CMC line plot.", RuntimeWarning)
         return
 
-    fig, axs = plt.subplots(2, len(subject_ids), figsize=(20, 10), squeeze=False)
+    fig, axs = plt.subplots(2, len(subject_ids), figsize=plot_size, squeeze=False)
 
     x_ticks = np.linspace(0, 1, max(n_within_trial_segments, 2))
 
@@ -2815,7 +2890,7 @@ def plot_cmc_lineplot_normalised(
                 include_std_dev=False,
                 std_dev_factor=0.0,
                 x_ticks=x_ticks,
-                y_label_override=f'{muscle} Normalized CMC [%]',
+                y_label_override=f'{muscle} {freq_band.capitalize()} Normalized CMC [%]',
                 y_label_all_columns=False,
                 show_grid=show_grid,
                 grid_color='lightgrey',
@@ -2857,19 +2932,20 @@ def plot_cmc_lineplot_normalised(
             )
         )
 
-    fig.legend(
-        handles=legend_handles,
-        loc='center left',
-        bbox_to_anchor=(0.85, 0.5),
-        borderaxespad=0,
-        frameon=True,
-    )
+    if show_legend:
+        legend_ax = axs[-1, -1]
+        legend_ax.legend(
+            handles=legend_handles,
+            loc='upper right',
+            bbox_to_anchor=(1.0, -0.23),
+            borderaxespad=0,
+            frameon=True,
+        )
 
     if show_fig_title:
         fig.suptitle(f"Normalised CMC per Subject ({muscle}, {cmc_operator})")
 
-    fig.subplots_adjust(left=0.05, right=0.84, top=0.93, bottom=0.10,
-                        hspace=0.05, wspace=0.1)
+    fig.subplots_adjust(top=.95, bottom=0.17, left=0.075, right=0.98, hspace=0.17, wspace=.1)
 
     if save_dir is not None:
         save_path = save_dir / filemgmt.file_title(
@@ -2979,3 +3055,964 @@ def _format_cmc_subplot(
             loc='lower left',
             title=category_column
         )"""
+
+
+def _phase_normalize_accuracy_cycles(
+    accuracy: np.ndarray,
+    phase_grid: np.ndarray,
+    task_freq: float,
+    trial_dur_sec: float,
+    min_samples_per_cycle: int,
+    start_offset_sec: float,
+    expected_sampling_rate: float | None = None,
+) -> list[np.ndarray]:
+    """Phase-normalize accuracy samples into per-cycle profiles.
+
+    Accuracy is recorded only after the warm-up offset, so the synthetic time
+    axis starts at ``start_offset_sec``. The sampling interval is inferred from
+    the effective duration and sample count, which reflects the true elapsed
+    time regardless of Python loop overhead.
+    """
+    if accuracy is None or len(accuracy) == 0 or task_freq <= 0:
+        return []
+
+    effective_dur = trial_dur_sec - start_offset_sec
+    if effective_dur <= 0:
+        return []
+
+    n = len(accuracy)
+
+    # Infer actual sampling rate from known duration and sample count.
+    inferred_rate = n / effective_dur
+
+    if expected_sampling_rate is not None and expected_sampling_rate > 0:
+        deviation = abs(inferred_rate - expected_sampling_rate) / expected_sampling_rate
+        if deviation > 0.15:
+            print(
+                f"[WARNING] Accuracy sampling rate mismatch: "
+                f"inferred {inferred_rate:.2f} Hz vs expected {expected_sampling_rate:.2f} Hz "
+                f"({deviation * 100:.1f}% deviation). Using inferred rate."
+            )
+
+    t_rel = start_offset_sec + np.arange(n) / inferred_rate
+
+    return data_analysis.phase_normalize_cycles(
+        signal=accuracy,
+        t_rel=t_rel,
+        task_freq=task_freq,
+        trial_dur_sec=trial_dur_sec,
+        phase_grid=phase_grid,
+        min_samples_per_cycle=min_samples_per_cycle,
+        start_offset_sec=start_offset_sec,
+    )
+
+
+def _derive_cmc_accuracy_hypothesis_label(cfg: CBPAConfig) -> str:
+    """Build a deterministic label from modality settings for this plot type."""
+    return f"{cfg.modality}_{cfg.modality_file_id}_{cfg.freq_band}_phase_avg_vs_accuracy"
+
+
+def _create_cbpa_dual_panel_figure(
+    show_target_sine: bool,
+    figure_size_with_target: tuple[float, float] = (16, 6),
+    figure_size_without_target: tuple[float, float] = (16, 5),
+    grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
+    grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
+    grid_wspace: float = 0.12,
+    grid_hspace_with_target: float = 0.28,
+) -> tuple[Figure, Axes, Axes, Axes, Axes | None, Axes | None]:
+    """Create shared two-panel layout with optional target-sine row."""
+    if show_target_sine:
+        fig = plt.figure(figsize=figure_size_with_target)
+        gs = fig.add_gridspec(
+            2,
+            4,
+            width_ratios=grid_width_ratios,
+            height_ratios=grid_height_ratios_with_target,
+            wspace=grid_wspace,
+            hspace=grid_hspace_with_target,
+        )
+        ax = fig.add_subplot(gs[0, 0])
+        cax = fig.add_subplot(gs[0, 1])
+        ax2 = fig.add_subplot(gs[0, 3])
+        ax_tgt_left = fig.add_subplot(gs[1, 0], sharex=ax)
+        ax_tgt_right = fig.add_subplot(gs[1, 3], sharex=ax2)
+        fig.add_subplot(gs[1, 1]).axis("off")
+        fig.add_subplot(gs[0, 2]).axis("off")
+        fig.add_subplot(gs[1, 2]).axis("off")
+        return fig, ax, cax, ax2, ax_tgt_left, ax_tgt_right
+
+    fig = plt.figure(figsize=figure_size_without_target)
+    gs = fig.add_gridspec(1, 4, width_ratios=grid_width_ratios, wspace=grid_wspace)
+    ax = fig.add_subplot(gs[0, 0])
+    cax = fig.add_subplot(gs[0, 1])
+    ax2 = fig.add_subplot(gs[0, 3])
+    fig.add_subplot(gs[0, 2]).axis("off")
+    return fig, ax, cax, ax2, None, None
+
+
+def _apply_phase_axis_style(
+    axes: list[Axes],
+    phase_xticks: tuple[float, ...],
+    phase_marker_lines: tuple[float, ...],
+) -> None:
+    """Apply shared phase x-ticks and vertical marker lines to all axes."""
+    for axis in axes:
+        axis.set_xticks(list(phase_xticks))
+        for marker_x in phase_marker_lines:
+            axis.axvline(marker_x, color="grey", lw=0.5, ls=":")
+
+
+def _resolve_cluster_mask(cluster, n_times: int, n_ch: int) -> np.ndarray:
+    """Resolve any MNE cluster format to a (n_times, n_ch) boolean mask."""
+    n_flat = n_times * n_ch
+    flat_mask = np.zeros(n_flat, dtype=bool)
+
+    if isinstance(cluster, tuple) and len(cluster) == 1:
+        cluster = cluster[0]
+
+    if isinstance(cluster, np.ndarray) and cluster.dtype == bool:
+        return cluster.reshape(n_times, n_ch)
+
+    if isinstance(cluster, slice):
+        flat_mask[cluster] = True
+        return flat_mask.reshape(n_times, n_ch)
+
+    if isinstance(cluster, tuple) and len(cluster) == 2 and isinstance(cluster[0], np.ndarray):
+        mask = np.zeros((n_times, n_ch), dtype=bool)
+        mask[cluster[0], cluster[1]] = True
+        return mask
+
+    if isinstance(cluster, np.ndarray):
+        idx = cluster.ravel().astype(int)
+        idx = idx[(idx >= 0) & (idx < n_flat)]
+        flat_mask[idx] = True
+        return flat_mask.reshape(n_times, n_ch)
+
+    try:
+        idx = np.asarray(cluster).ravel().astype(int)
+        idx = idx[(idx >= 0) & (idx < n_flat)]
+        flat_mask[idx] = True
+    except Exception as e:
+        warnings.warn(f"[CBPA] _resolve_cluster_mask: unrecognised cluster format {type(cluster)}. Error: {e}")
+
+    return flat_mask.reshape(n_times, n_ch)
+
+
+def plot_cmc_accuracy_phase_average(
+    cfg: CBPAConfig,
+    experiment_results_dir: Path,
+    exclude_subjects: list[int] | None = None,
+    *,
+    accuracy_sd_factor: float = 0.5,
+    cmc_percentile_limits: tuple[float, float] = (3.0, 97.0),
+    figure_size_with_target: tuple[float, float] = (16, 6),
+    figure_size_without_target: tuple[float, float] = (16, 5),
+    grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
+    grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
+    grid_wspace: float = 0.12,
+    grid_hspace_with_target: float = 0.28,
+    phase_xticks: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0, 360.0),
+    phase_marker_lines: tuple[float, ...] = (90.0, 270.0),
+    channel_label_fontsize: float = 6.0,
+    legend_fontsize: float = 8.0,
+    subplot_margins: tuple[float, float, float, float] = (0.06, 0.985, 0.90, 0.10),
+    save_dpi: int = 150,
+) -> None:
+    """Create a CBPA-like plot with mean CMC map and phase-normalized accuracy.
+
+    Parameters
+    ----------
+    cfg : CBPAConfig
+        CMC plotting/processing configuration. This function requires
+        ``cfg.modality == 'CMC'`` and ``cfg.use_phase_normalization is True``.
+    experiment_results_dir : Path
+        Directory that contains per-subject experiment data used to load trial accuracy.
+    exclude_subjects : list[int] | None, optional
+        Subject IDs to exclude from averaging.
+    accuracy_sd_factor : float, optional
+        Width factor for the variability band around mean accuracy. The shaded band is
+        ``mean ± (accuracy_sd_factor * SD)``. Default: 0.5.
+    cmc_percentile_limits : tuple[float, float], optional
+        Lower/upper percentiles used for robust CMC colormap scaling
+        ``(vmin_percentile, vmax_percentile)``. Default: (3.0, 97.0).
+    figure_size_with_target : tuple[float, float], optional
+        Figure size ``(width, height)`` in inches when target sine subplots are shown.
+        Default: (16, 6).
+    figure_size_without_target : tuple[float, float], optional
+        Figure size ``(width, height)`` in inches when no target sine subplots are shown.
+        Default: (16, 5).
+    grid_width_ratios : tuple[float, float, float, float], optional
+        Width ratios for ``GridSpec`` columns (left panel, colorbar, spacer, right panel).
+    grid_height_ratios_with_target : tuple[float, float], optional
+        Height ratios for ``GridSpec`` rows when target sine subplots are enabled.
+    grid_wspace : float, optional
+        Horizontal spacing between ``GridSpec`` columns.
+    grid_hspace_with_target : float, optional
+        Vertical spacing between ``GridSpec`` rows when target sine subplots are enabled.
+    phase_xticks : tuple[float, ...], optional
+        X-tick positions (in degrees) applied to all phase-related axes.
+    phase_marker_lines : tuple[float, ...], optional
+        Vertical reference lines (in degrees) drawn on all phase-related axes.
+    channel_label_fontsize : float, optional
+        Font size for channel labels on the CMC heatmap y-axis.
+    legend_fontsize : float, optional
+        Font size for the accuracy panel legend.
+    subplot_margins : tuple[float, float, float, float], optional
+        Final subplot margins as ``(left, right, top, bottom)`` for
+        ``fig.subplots_adjust``.
+    save_dpi : int, optional
+        DPI used when saving plots.
+
+    Notes
+    -----
+    Phase normalization for accuracy is performed per trial and per cycle:
+    each trial is split into complete force cycles using trial duration and task
+    frequency, cycle samples are mapped to phase angles [0, 360), and accuracy is
+    linearly interpolated to a shared phase grid (``cfg.n_phase_bins``). This yields
+    cycle-aligned profiles that can be averaged within and across subjects.
+    """
+    import src.pipeline.cbpa as cbpa
+
+    if cfg.modality != "CMC":
+        raise ValueError("plot_cmc_accuracy_phase_average requires cfg.modality='CMC'.")
+    if not cfg.use_phase_normalization:
+        raise ValueError("plot_cmc_accuracy_phase_average requires phase normalization enabled.")
+    if accuracy_sd_factor < 0:
+        raise ValueError("accuracy_sd_factor must be >= 0.")
+    p_low, p_high = cmc_percentile_limits
+    if not (0.0 <= p_low < p_high <= 100.0):
+        raise ValueError("cmc_percentile_limits must satisfy 0 <= low < high <= 100.")
+
+    filemgmt.assert_dir(cfg.output_dir)
+    plot_label = _derive_cmc_accuracy_hypothesis_label(cfg)
+
+    stats_df = cbpa.load_stats_frame(cfg.data_root)
+    subject_ids = sorted(stats_df["Subject ID"].astype(int).unique())
+    exclude = set(exclude_subjects or [])
+    subject_ids = [sid for sid in subject_ids if sid not in exclude]
+
+    phase_grid = np.linspace(0, 360, cfg.n_phase_bins, endpoint=False)
+    ch_names = cfg.channels if cfg.channels is not None else cbpa.CMC_EEG_CHANNEL_SUBSET
+
+    subject_cmc_profiles: list[np.ndarray] = []
+    subject_acc_profiles: list[np.ndarray] = []
+    valid_subjects: list[int] = []
+
+    for subj in tqdm(subject_ids, desc="Importing Subject Data"):
+        try:
+            spectrogram, freqs, timestamps, log_df = cbpa._load_subject_data(cfg, subj)
+        except Exception as exc:
+            warnings.warn(f"Subject {subj:02}: failed to load data ({exc}). Skipping.")
+            continue
+
+        trial_spans = {int(k): v for k, v in cbpa._get_trial_spans(log_df).items()}
+        if len(trial_spans) == 0:
+            warnings.warn(f"Subject {subj:02}: no trial spans found. Skipping.")
+            continue
+
+        band_power = cbpa._extract_band_power(cfg, spectrogram, freqs, channel_indices=None,)
+        trial_cond_map = {trial_id: "ALL" for trial_id in trial_spans}
+        cmc_cycles = cbpa._band_power_per_phase(
+            cfg=cfg,
+            band_power=band_power,
+            timestamps=timestamps,
+            trial_spans=trial_spans,
+            trial_cond_map=trial_cond_map,
+            log_df=log_df,
+        ).get("ALL", [])
+
+        if len(cmc_cycles) == 0:
+            warnings.warn(f"Subject {subj:02}: no valid CMC cycles. Skipping.")
+            continue
+
+        accuracy_cycles: list[np.ndarray] = []
+        subj_exp_dir = experiment_results_dir / f"subject_{subj:02}"
+        for trial_id, (t_start, t_end) in trial_spans.items():
+            task_freq = cbpa._get_task_freq_for_trial(log_df, t_start, t_end)
+            if task_freq is None or task_freq <= 0:
+                continue
+
+            accuracy = data_integration.fetch_trial_accuracy(
+                experiment_data_dir=subj_exp_dir,
+                trial_id=int(trial_id),
+                log_df=log_df,
+                error_handling="continue",
+            )
+            if accuracy is None:
+                continue
+
+            trial_dur_sec = (t_end - t_start).total_seconds()
+            # todo: replace with data analysis function
+            accuracy_cycles.extend(
+                _phase_normalize_accuracy_cycles(
+                    accuracy=accuracy,
+                    phase_grid=phase_grid,
+                    task_freq=float(task_freq),
+                    trial_dur_sec=float(trial_dur_sec),
+                    min_samples_per_cycle=cfg.min_samples_per_cycle,
+                    start_offset_sec=float(data_integration.TRIAL_ACCURACY_START_OFFSET_SEC),
+                )
+            )
+
+        if len(accuracy_cycles) == 0:
+            warnings.warn(f"Subject {subj:02}: no valid accuracy cycles. Skipping.")
+            continue
+
+        subject_cmc_profiles.append(np.nanmean(np.stack(cmc_cycles, axis=0), axis=0))
+        subject_acc_profiles.append(np.nanmean(np.stack(accuracy_cycles, axis=0), axis=0))
+        valid_subjects.append(subj)
+
+    if len(subject_cmc_profiles) == 0 or len(subject_acc_profiles) == 0:
+        warnings.warn("No valid subjects for CMC+accuracy phase plot. Nothing will be plotted.")
+        return
+
+    cmc_stack = np.stack(subject_cmc_profiles, axis=0)  # (n_subj, n_phase, n_ch)
+    acc_stack = np.stack(subject_acc_profiles, axis=0)  # (n_subj, n_phase)
+
+    cmc_mean = np.nanmean(cmc_stack, axis=0)
+    acc_mean = np.nanmean(acc_stack, axis=0)
+    acc_mean_smooth = data_analysis.circular_smooth(acc_mean, kernel_bins=5)
+    acc_std = np.nanstd(acc_stack, axis=0)
+    acc_std_smooth = data_analysis.circular_smooth(acc_std, kernel_bins=5)
+
+    fig, ax, cax, ax2, ax_tgt_left, ax_tgt_right = _create_cbpa_dual_panel_figure(
+        show_target_sine=cfg.show_target_sine,
+        figure_size_with_target=figure_size_with_target,
+        figure_size_without_target=figure_size_without_target,
+        grid_width_ratios=grid_width_ratios,
+        grid_height_ratios_with_target=grid_height_ratios_with_target,
+        grid_wspace=grid_wspace,
+        grid_hspace_with_target=grid_hspace_with_target,
+    )
+
+    if cfg.include_suptitle:
+        fig.suptitle(
+            f"{plot_label}\n"
+            f"Average {cfg.modality} ({cfg.modality_file_id}, {cfg.freq_band}) + Accuracy (RMSE)  |  "
+            f"n = {len(valid_subjects)} subjects",
+            fontsize=10,
+        )
+
+    cmc_vmin = float(np.nanpercentile(cmc_mean, p_low))
+    cmc_vmax = float(np.nanpercentile(cmc_mean, p_high))
+    if not np.isfinite(cmc_vmin) or not np.isfinite(cmc_vmax) or cmc_vmin == cmc_vmax:
+        cmc_vmin, cmc_vmax = None, None
+    im = ax.imshow(
+        cmc_mean.T,
+        aspect="auto",
+        origin="lower",
+        cmap="RdBu_r",
+        vmin=cmc_vmin,
+        vmax=cmc_vmax,
+        extent=(phase_grid[0], 360.0, -0.5, len(ch_names) - 0.5),
+    )
+    plt.colorbar(im, cax=cax, label="CMC Value")
+    if not cfg.show_target_sine:
+        ax.set_xlabel("Force Cycle Phase (°)")
+    ax.set_ylabel("Channel index")
+    ax.set_yticks(range(len(ch_names)))
+    ax.set_yticklabels(ch_names, fontsize=channel_label_fontsize)
+    ax.set_title("Averaged phase-normalized CMC map")
+
+    acc_band = accuracy_sd_factor * acc_std_smooth
+    ax2.plot(phase_grid, acc_mean_smooth, color="tab:blue", linewidth=1.8, label="Mean RMSE")
+    ax2.fill_between(
+        phase_grid,
+        acc_mean_smooth - acc_band,
+        acc_mean_smooth + acc_band,
+        color="tab:blue",
+        alpha=0.2,
+        label=f"±{accuracy_sd_factor:g} x SD",
+    )
+    if not cfg.show_target_sine:
+        ax2.set_xlabel("Force Cycle Phase (°)")
+    ax2.set_ylabel("Accuracy (RMSE)")
+    ax2.set_title("Phase-normalized average accuracy")
+    ax2.legend(fontsize=legend_fontsize)
+
+    if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
+        # Optionally load and average dynamometer force if requested
+        dyno_force = None
+        if cfg.include_dynamometer_force:
+            # todo: replace with data analysis function
+            dyno_force = _load_avg_dynamometer_force_per_phase(
+                valid_subjects, experiment_results_dir, phase_grid, cfg
+            )
+        _plot_target_sine_panel(ax_tgt_left, phase_grid, cfg, x_label="Force Cycle Phase (°)",
+                                show_ylabel=True, dynamometer_force_y=dyno_force)
+        _plot_target_sine_panel(ax_tgt_right, phase_grid, cfg, x_label="Force Cycle Phase (°)",
+                                show_ylabel=True, dynamometer_force_y=dyno_force)
+
+    phase_axes = [ax, ax2]
+    if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
+        phase_axes.extend([ax_tgt_left, ax_tgt_right])
+    _apply_phase_axis_style(
+        phase_axes,
+        phase_xticks=phase_xticks,
+        phase_marker_lines=phase_marker_lines,
+    )
+
+    margin_left, margin_right, margin_top, margin_bottom = subplot_margins
+    fig.subplots_adjust(
+        left=margin_left,
+        right=margin_right,
+        top=margin_top,
+        bottom=margin_bottom,
+    )
+    if cfg.save_plots:
+        out = cfg.output_dir / filemgmt.file_title(plot_label + "_cmc_accuracy_phase", ".png")
+        fig.savefig(out, dpi=save_dpi, bbox_inches="tight")
+        print(f"  Plot saved: {out}")
+    if cfg.show_plots:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_emg_psd_phase_average_plot(
+    cfg: CBPAConfig,
+    exclude_subjects: list[int] | None = None,
+    *,
+    flexor_file_identifier: str = "emg_1_flexor",
+    extensor_file_identifier: str = "emg_2_extensor",
+    emg_percentile_limits: tuple[float, float] = (3.0, 97.0),
+    figure_size_with_target: tuple[float, float] = (16, 6),
+    figure_size_without_target: tuple[float, float] = (16, 5),
+    grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
+    grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
+    grid_wspace: float = 0.12,
+    grid_hspace_with_target: float = 0.28,
+    phase_xticks: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0, 360.0),
+    phase_marker_lines: tuple[float, ...] = (90.0, 270.0),
+    channel_label_fontsize: float = 6.0,
+    subplot_margins: tuple[float, float, float, float] = (0.06, 0.985, 0.90, 0.10),
+    save_dpi: int = 150,
+) -> None:
+    """Create a phase-normalized average EMG-PSD plot (left=flexor, right=extensor)."""
+    import src.pipeline.cbpa as cbpa
+    from dataclasses import replace
+
+    if not cfg.use_phase_normalization:
+        raise ValueError("plot_emg_psd_phase_average_plot requires phase normalization enabled.")
+
+    p_low, p_high = emg_percentile_limits
+    if not (0.0 <= p_low < p_high <= 100.0):
+        raise ValueError("emg_percentile_limits must satisfy 0 <= low < high <= 100.")
+
+    filemgmt.assert_dir(cfg.output_dir)
+
+    stats_df = cbpa.load_stats_frame(cfg.data_root)
+    subject_ids = sorted(stats_df["Subject ID"].astype(int).unique())
+    exclude = set(exclude_subjects or [])
+    subject_ids = [sid for sid in subject_ids if sid not in exclude]
+
+    def _load_subject_emg_profile(subject_id: int, file_identifier: str) -> np.ndarray | None:
+        local_cfg = replace(cfg, modality="PSD", modality_file_id=file_identifier)
+        try:
+            spectrogram, freqs, timestamps, log_df = cbpa._load_subject_data(local_cfg, subject_id)
+        except Exception as exc:
+            warnings.warn(
+                f"Subject {subject_id:02}: failed to load EMG PSD '{file_identifier}' ({exc}). Skipping."
+            )
+            return None
+
+        trial_spans = {int(k): v for k, v in cbpa._get_trial_spans(log_df).items()}
+        if len(trial_spans) == 0:
+            return None
+
+        band_power = cbpa._extract_band_power(local_cfg, spectrogram, freqs, channel_indices=None)
+        trial_cond_map = {trial_id: "ALL" for trial_id in trial_spans}
+        # todo: replace with data analysis function
+        cycles = cbpa._band_power_per_phase(
+            cfg=local_cfg,
+            band_power=band_power,
+            timestamps=timestamps,
+            trial_spans=trial_spans,
+            trial_cond_map=trial_cond_map,
+            log_df=log_df,
+        ).get("ALL", [])
+
+        if len(cycles) == 0:
+            return None
+
+        return np.nanmean(np.stack(cycles, axis=0), axis=0)
+
+    subject_flexor_profiles: dict[int, np.ndarray] = {}
+    subject_extensor_profiles: dict[int, np.ndarray] = {}
+
+    for subject_id in tqdm(subject_ids, desc='Importing Subject Data'):
+        flexor_profile = _load_subject_emg_profile(subject_id, flexor_file_identifier)
+        extensor_profile = _load_subject_emg_profile(subject_id, extensor_file_identifier)
+        if flexor_profile is None or extensor_profile is None:
+            continue
+        subject_flexor_profiles[subject_id] = flexor_profile
+        subject_extensor_profiles[subject_id] = extensor_profile
+
+    common_subjects = sorted(set(subject_flexor_profiles) & set(subject_extensor_profiles))
+    if len(common_subjects) == 0:
+        warnings.warn("No valid subjects for EMG-PSD phase plot. Nothing will be plotted.")
+        return
+
+    flexor_stack = np.stack([subject_flexor_profiles[sid] for sid in common_subjects], axis=0)
+    extensor_stack = np.stack([subject_extensor_profiles[sid] for sid in common_subjects], axis=0)
+
+    flexor_mean = np.nanmean(flexor_stack, axis=0)
+    extensor_mean = np.nanmean(extensor_stack, axis=0)
+
+    n_phase = flexor_mean.shape[0]
+    phase_grid = np.linspace(0.0, 360.0, n_phase, endpoint=False)
+
+    combined = np.concatenate([flexor_mean.ravel(), extensor_mean.ravel()])
+    emg_vmin = float(np.nanpercentile(combined, p_low))
+    emg_vmax = float(np.nanpercentile(combined, p_high))
+    if not np.isfinite(emg_vmin) or not np.isfinite(emg_vmax) or emg_vmin == emg_vmax:
+        emg_vmin, emg_vmax = None, None
+
+    fig, ax, cax, ax2, ax_tgt_left, ax_tgt_right = _create_cbpa_dual_panel_figure(
+        show_target_sine=cfg.show_target_sine,
+        figure_size_with_target=figure_size_with_target,
+        figure_size_without_target=figure_size_without_target,
+        grid_width_ratios=grid_width_ratios,
+        grid_height_ratios_with_target=grid_height_ratios_with_target,
+        grid_wspace=grid_wspace,
+        grid_hspace_with_target=grid_hspace_with_target,
+    )
+
+    if cfg.include_suptitle:
+        fig.suptitle(
+            f"EMG PSD phase-normalized average ({cfg.freq_band})\n"
+            f"Left: {flexor_file_identifier} | Right: {extensor_file_identifier} | "
+            f"n = {len(common_subjects)} subjects",
+            fontsize=10,
+        )
+
+    channel_labels = [f"Ch {idx + 1}" for idx in range(flexor_mean.shape[1])]
+    if flexor_mean.shape[1] == len(EEG_CHANNELS):
+        channel_labels = EEG_CHANNELS
+
+    im = ax.imshow(
+        flexor_mean.T,
+        aspect="auto",
+        origin="lower",
+        cmap="RdBu_r",
+        vmin=emg_vmin,
+        vmax=emg_vmax,
+        extent=(phase_grid[0], 360.0, -0.5, flexor_mean.shape[1] - 0.5),
+    )
+    plt.colorbar(im, cax=cax, label="EMG PSD (log10)")
+
+    if not cfg.show_target_sine:
+        ax.set_xlabel("Force Cycle Phase (°)")
+    ax.set_ylabel("Channel index")
+    ax.set_yticks(range(len(channel_labels)))
+    ax.set_yticklabels(channel_labels, fontsize=channel_label_fontsize)
+    ax.set_title("Phase-normalized average EMG PSD: Flexor")
+
+    ax2.imshow(
+        extensor_mean.T,
+        aspect="auto",
+        origin="lower",
+        cmap="RdBu_r",
+        vmin=emg_vmin,
+        vmax=emg_vmax,
+        extent=(phase_grid[0], 360.0, -0.5, extensor_mean.shape[1] - 0.5),
+    )
+    if not cfg.show_target_sine:
+        ax2.set_xlabel("Force Cycle Phase (°)")
+    ax2.set_ylabel("")
+    ax2.set_yticks(range(len(channel_labels)))
+    ax2.set_yticklabels([])
+    ax2.set_title("Phase-normalized average EMG PSD: Extensor")
+
+    if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
+        # Optionally load and average dynamometer force if requested
+        dyno_force = None
+        # todo: replace with data analysis function
+        if cfg.include_dynamometer_force:
+            experiment_results_dir = cfg.data_root / "data" / "experiment_results"
+            dyno_force = _load_avg_dynamometer_force_per_phase(
+                common_subjects, experiment_results_dir, phase_grid, cfg
+            )
+        _plot_target_sine_panel(ax_tgt_left, phase_grid, cfg, x_label="Force Cycle Phase (°)",
+                                show_ylabel=True, dynamometer_force_y=dyno_force)
+        _plot_target_sine_panel(ax_tgt_right, phase_grid, cfg, x_label="Force Cycle Phase (°)",
+                                show_ylabel=True, dynamometer_force_y=dyno_force)
+
+    phase_axes = [ax, ax2]
+    if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
+        phase_axes.extend([ax_tgt_left, ax_tgt_right])
+    _apply_phase_axis_style(
+        phase_axes,
+        phase_xticks=phase_xticks,
+        phase_marker_lines=phase_marker_lines,
+    )
+
+    margin_left, margin_right, margin_top, margin_bottom = subplot_margins
+    fig.subplots_adjust(
+        left=margin_left,
+        right=margin_right,
+        top=margin_top,
+        bottom=margin_bottom,
+    )
+
+    if cfg.save_plots:
+        out = cfg.output_dir / filemgmt.file_title("EMG_PSD_phase_average_plot", ".png")
+        fig.savefig(out, dpi=save_dpi, bbox_inches="tight")
+        print(f"  Plot saved: {out}")
+    if cfg.show_plots:
+        plt.show()
+    plt.close(fig)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  VISUALISATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+# todo: replace with data analysis function
+def _load_avg_dynamometer_force_per_phase(
+    subject_ids: list[int],
+    experiment_results_dir: Path,
+    phase_grid: np.ndarray,
+    cfg: CBPAConfig,
+) -> np.ndarray | None:
+    """Load enriched serial frames PER TRIAL and average dynamometer force per phase.
+
+    Loads Task-wise Scaled Force from each trial, phase-normalizes it per trial,
+    then averages across all trials from all subjects.
+
+    Parameters
+    ----------
+    subject_ids : list[int]
+        Subject indices to load data from.
+    experiment_results_dir : Path
+        Root directory containing subject_XX folders.
+    phase_grid : np.ndarray
+        Phase bins (0-360°) for interpolation.
+    cfg : CBPAConfig
+        Configuration with trial frequency settings.
+
+    Returns
+    -------
+    np.ndarray | None
+        Averaged dynamometer force per phase bin, or None if data cannot be loaded.
+        Shape: (len(phase_grid),)
+    """
+    def _task_freq_in_span(log_df: pd.DataFrame, t_start: pd.Timestamp, t_end: pd.Timestamp) -> float | None:
+        """Return modal task frequency in a trial span."""
+        mask = (log_df.index >= t_start) & (log_df.index < t_end)
+        col = log_df.loc[mask, "Task Frequency"].dropna()
+        if col.empty:
+            return None
+        return float(col.mode().iloc[0])
+
+    try:
+        all_cycles: list[np.ndarray] = []
+
+        for subj_id in subject_ids:
+            subj_exp_dir = experiment_results_dir / f"subject_{subj_id:02}"
+
+            try:
+                # Load enriched serial frame and log for this subject
+                serial_frame = data_integration.fetch_enriched_serial_frame(
+                    subj_exp_dir, set_time_index=True
+                )
+                log_df = data_integration.fetch_enriched_log_frame(
+                    subj_exp_dir, set_time_index=True, verbose=False
+                )
+            except (ValueError, FileNotFoundError):
+                # Skip if no enriched serial frame or log available
+                continue
+
+            if "Task-wise Scaled Force" not in serial_frame.columns:
+                continue
+
+            force_series = pd.to_numeric(serial_frame["Task-wise Scaled Force"], errors="coerce")
+            if force_series.notna().sum() < 2:
+                continue
+
+            s_idx = force_series.index  # ← hoisted: constant across all trials for this subject
+
+            try:
+                task_start_ends = data_integration.get_all_task_start_ends(
+                    log_df, output_type='dict'
+                )
+            except Exception:
+                continue
+
+            for _, (trial_start, trial_end) in task_start_ends.items():
+                try:
+                    task_freq = _task_freq_in_span(log_df, trial_start, trial_end)
+                    if task_freq is None or task_freq <= 0:
+                        continue
+
+                    # Align trial timestamps to serial index timezone, if needed.
+                    t_start = trial_start
+                    t_end = trial_end
+                    if isinstance(s_idx, pd.DatetimeIndex):
+                        if s_idx.tz is None and getattr(t_start, "tzinfo", None) is not None:
+                            t_start = t_start.tz_localize(None)
+                            t_end = t_end.tz_localize(None)
+                        elif s_idx.tz is not None and getattr(t_start, "tzinfo", None) is None:
+                            t_start = t_start.tz_localize(s_idx.tz)
+                            t_end = t_end.tz_localize(s_idx.tz)
+
+                    trial_force = force_series.loc[
+                        (force_series.index >= t_start) & (force_series.index < t_end)
+                        ].dropna()
+                    if len(trial_force) < 2:
+                        continue
+
+                    t_rel = np.array(
+                        [(ts - t_start).total_seconds() for ts in trial_force.index],
+                        dtype=float,
+                    )
+                    y_rel = trial_force.to_numpy(dtype=float)
+                    trial_dur_sec = (t_end - t_start).total_seconds()
+
+                    cycles = data_analysis.phase_normalize_cycles(
+                        signal=y_rel,
+                        t_rel=t_rel,
+                        task_freq=task_freq,
+                        trial_dur_sec=trial_dur_sec,
+                        phase_grid=phase_grid,
+                        min_samples_per_cycle=2,
+                        start_offset_sec=float(1.0 / task_freq),  # skip first cycle
+                    )
+                    all_cycles.extend(cycles)
+
+                except Exception:  # any per-trial failure skips only that trial
+                    continue
+
+        if not all_cycles:
+            return None
+
+        # Average across all valid cycles from all valid trials/subjects.
+        avg_force = np.nanmean(np.stack(all_cycles, axis=0), axis=0)
+        return avg_force
+
+    except Exception as e:
+        warnings.warn(f"Failed to load dynamometer force data: {e}")
+        return None
+
+
+def _target_sine_values(x: np.ndarray, cfg: CBPAConfig) -> np.ndarray:
+    """Compute target-force sine values for plotting.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Domain values. Interpreted as phase (degrees) when
+        ``cfg.use_phase_normalization`` is True, otherwise as time in seconds.
+    cfg : CBPAConfig
+        Configuration containing target sine min/max amplitude and frequency.
+
+    Returns
+    -------
+    np.ndarray
+        Target force values in percent MVC, same shape as ``x``.
+    """
+    x_arr = np.asarray(x, dtype=float)
+    mid = 0.5 * (cfg.target_sine_min_pct_mvc + cfg.target_sine_max_pct_mvc)
+    amp = 0.5 * (cfg.target_sine_max_pct_mvc - cfg.target_sine_min_pct_mvc)
+
+    if cfg.use_phase_normalization:
+        phase_rad = 2.0 * np.pi * (x_arr / 360.0)
+    else:
+        phase_rad = 2.0 * np.pi * cfg.target_sine_frequency_hz * x_arr
+
+    # Match experiment logic: start at mean at x=0.
+    return mid + amp * np.sin(phase_rad)
+
+
+def _plot_target_sine_panel(
+    ax,
+    x: np.ndarray,
+    cfg: CBPAConfig,
+    x_label: str,
+    show_ylabel: bool = True,
+    dynamometer_force_y: np.ndarray | None = None,
+) -> None:
+    """Draw one target-sine reference panel under a main plot.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axis to draw into.
+    x : np.ndarray
+        X-axis values (phase or time).
+    cfg : CBPAConfig
+        Configuration with target sine settings.
+    x_label : str
+        Label for the x-axis.
+    show_ylabel : bool, optional
+        Whether to render the y-axis label. Default is True.
+    dynamometer_force_y : np.ndarray | None, optional
+        If provided and cfg.include_dynamometer_force is True, overlay the
+        averaged per-cycle dynamometer force on the plot. Must have same
+        length as x. Default is None.
+    """
+    y = _target_sine_values(x, cfg)
+    ax.plot(x, y, color="dimgray", linewidth=1.2, label="Target sine")
+
+    pad = 0.1 * max(1e-6, cfg.target_sine_max_pct_mvc - cfg.target_sine_min_pct_mvc)
+    ax.set_ylim(cfg.target_sine_min_pct_mvc - pad, cfg.target_sine_max_pct_mvc + pad)
+    ax.set_ylabel("Force [% MVC]" if show_ylabel else "")
+    ax.set_xlabel(x_label)
+    ax.set_title("Target sine", fontsize=12)
+    ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
+    
+    # Optionally overlay dynamometer force data on a separate right y-axis
+    if dynamometer_force_y is not None and cfg.include_dynamometer_force:
+        # Create twin axis for force data
+        ax_force = ax.twinx()
+
+        # Plot native task-wise scaled force on right axis (0..1).
+        ax_force.plot(x, dynamometer_force_y, color="forestgreen", linewidth=1.2, alpha=0.9)
+
+        # Right axis in native force units.
+        ax_force.set_ylim(0, 1)
+        
+        # Set right y-axis label with green color
+        ax_force.set_ylabel("Dynamometer\nForce [0-1]", color="forestgreen", fontweight="bold")
+        ax_force.tick_params(axis="y", labelcolor="forestgreen")
+
+
+def plot_cbpa_results(results: dict, cfg: CBPAConfig) -> None:
+    """Render heatmap and cluster-summary figures for one CBPA result.
+
+    Parameters
+    ----------
+    results : dict
+        Output dictionary produced by :func:`run_cbpa`.
+    cfg : CBPAConfig
+        Plotting and output configuration.
+
+    Notes
+    -----
+    Produces two main panels: a t-statistic heatmap with cluster contours and
+    a cluster time-course panel. Optional target-sine panels are appended below.
+    """
+    t_obs        = results["t_obs"]
+    t_thresh     = results["t_thresh"]
+    clusters     = results["clusters"]
+    cluster_pv   = results["cluster_pv"]
+    good_inds    = results["good_cluster_inds"]
+    ch_names     = results["ch_names"]
+    time_grid    = results["time_grid"]
+    n_valid_subjects = results["n_valid_subjects"]
+
+    n_times, n_ch = t_obs.shape
+    t_ax = time_grid if time_grid is not None else np.arange(n_times)
+
+    fig, ax, cax, ax2, ax_tgt_left, ax_tgt_right = _create_cbpa_dual_panel_figure(
+        show_target_sine=cfg.show_target_sine,
+    )
+
+    if cfg.include_suptitle:
+        fig.suptitle(
+            f"{cfg.hypothesis_label}\n"
+            f"Contrast: '{cfg.condition_A}' − '{cfg.condition_B}'  |  "
+            f"{cfg.modality} {cfg.freq_band}  |  "
+            f"n = {n_valid_subjects} subjects, {cfg.n_permutations} permutations",
+            fontsize=10,
+        )
+
+    # ── Panel A: heatmap + cluster contours ──────────────────────────────────
+    # Use a fixed ±3 baseline for cross-plot comparability;
+    # expand only if the observed t-values exceed it
+    vlim = max(3.0, np.nanpercentile(np.abs(t_obs), 97))
+    im = ax.imshow(
+        t_obs.T, aspect="auto", origin="lower", cmap="RdBu_r",
+        vmin=-vlim, vmax=vlim,
+        extent=[t_ax[0], t_ax[-1], -0.5, n_ch - 0.5],
+    )
+    plt.colorbar(im, cax=cax, label="t-statistic")
+
+    for idx, cluster in enumerate(clusters):
+        mask = _resolve_cluster_mask(cluster, n_times=n_times, n_ch=n_ch)
+        color = "black" if idx in good_inds else "silver"
+        lw    = 1.8    if idx in good_inds else 0.8
+        # contour needs at least one True and one False cell to draw anything
+        if mask.any() and not mask.all():
+            ax.contour(
+                np.linspace(t_ax[0], t_ax[-1], n_times),
+                np.arange(n_ch),
+                mask.T.astype(float),
+                levels=[0.5], colors=color, linewidths=lw,
+            )
+
+    x_label = "Force Cycle Phase (°)" if cfg.use_phase_normalization else "Time within trial (s)"
+    if not cfg.show_target_sine:
+        ax.set_xlabel(x_label)
+    ax.set_ylabel("Channel index")
+    ax.set_yticks(range(n_ch))
+    ax.set_yticklabels(ch_names, fontsize=6)
+    ax.set_title("t-statistic map\n(black contour = significant cluster)")
+
+    # ── Panel B: significant cluster time courses ─────────────────────────────
+    if len(good_inds) == 0:
+        ax2.text(0.5, 0.5, "No significant clusters", ha="center", va="center",
+                 transform=ax2.transAxes, fontsize=12, color="grey")
+    else:
+        for idx in good_inds:
+            # Use shared resolver — fixes the previously unreshaped 1D mask here
+            mask = _resolve_cluster_mask(clusters[idx], n_times=n_times, n_ch=n_ch)
+
+            ch_in_cluster = mask.any(axis=0)   # (n_ch,) bool
+            t_in_cluster  = mask.any(axis=1)   # (n_times,) bool
+
+            if not ch_in_cluster.any():
+                continue
+
+            t_course = t_obs[:, ch_in_cluster].mean(axis=1)  # (n_times,)
+            ax2.plot(t_ax, t_course,
+                     label=f"Cluster #{idx + 1}  p={cluster_pv[idx]:.3f}")
+            ax2.fill_between(t_ax, 0, t_course, where=t_in_cluster, alpha=0.2)
+
+        ax2.axhline(0,         color="k",   linewidth=0.8, linestyle="--")
+        ax2.axhline( t_thresh, color="red", linewidth=0.8, linestyle=":",
+                     label=f"±t_thresh ({t_thresh:.2f})")
+        ax2.axhline(-t_thresh, color="red", linewidth=0.8, linestyle=":")
+        ax2.legend(fontsize=8)
+
+    if not cfg.show_target_sine:
+        ax2.set_xlabel(x_label)
+    ax2.set_ylabel("Mean t-statistic over cluster channels")
+    ax2.set_title("Significant cluster time courses")
+
+    if cfg.show_target_sine:
+        # Optionally load and average dynamometer force if requested
+        dyno_force = None
+        # todo: replace with data analysis function
+        if cfg.include_dynamometer_force and cfg.use_phase_normalization:
+            # Load force data from all valid subjects (guessing they're in data root)
+            data_root = cfg.data_root / "data" / "experiment_results"
+            # Get subject IDs from results (assuming they were used in the CBPA run)
+            valid_subject_ids = list(range(0, 13))  # Fallback to known subjects
+            dyno_force = _load_avg_dynamometer_force_per_phase(
+                valid_subject_ids, data_root, t_ax, cfg
+            )
+
+        _plot_target_sine_panel(ax_tgt_left, t_ax, cfg, x_label=x_label, show_ylabel=True,
+                                dynamometer_force_y=dyno_force)
+        _plot_target_sine_panel(ax_tgt_right, t_ax, cfg, x_label=x_label, show_ylabel=True,
+                                dynamometer_force_y=dyno_force)
+
+    if cfg.use_phase_normalization:
+        phase_axes = [ax, ax2]
+        if cfg.show_target_sine:
+            phase_axes.extend([ax_tgt_left, ax_tgt_right])
+        _apply_phase_axis_style(
+            phase_axes,
+            phase_xticks=(0.0, 90.0, 180.0, 270.0, 360.0),
+            phase_marker_lines=(90.0, 270.0),
+        )
+
+    fig.subplots_adjust(left=0.06, right=0.985, top=0.90, bottom=0.10)
+    if cfg.save_plots:
+        out = cfg.output_dir / filemgmt.file_title(cfg.hypothesis_label + "_clusters", ".png")
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        print(f"  Plot saved: {out}")
+    if cfg.show_plots:
+        plt.show()
+    plt.close(fig)
