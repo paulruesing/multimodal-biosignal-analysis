@@ -63,13 +63,8 @@ if __name__ == '__main__':
     ### scatter parameters:
     # x: spectral flux std, y: spectral flux mean
     scatter_x_y_combinations = [
-        ('Spectral Centroid Mean', 'Spectral Flux Std.'),
-        ('Spectral Centroid Mean', 'IOI Variance Coeff'),
-        ('BPM_manual', 'IOI Variance Coeff'),
-        ('BPM_manual', 'Spectral Centroid Mean'),
-        ('Spectral Flux Std.', 'IOI Variance Coeff'),
-        ('Spectral Flux Std.', 'Syncopation Ratio'),
-        ('IOI Variance Coeff', 'Syncopation Ratio'),
+        ('Spectral Centroid Mean', ('Spectral Flux Std.', 'Spectral Flux SD')),
+        (('IOI Variance Coeff', 'IOI Variance Coefficient'), ('BPM_manual', 'BPM')),
     ]
     # -> MI Candidates:
     #       'Spectral Centroid Mean', 'Spectral Flux Std.', 'IOI Variance Coeff',
@@ -416,6 +411,12 @@ if __name__ == '__main__':
     # analyse musical features via Scatter + KDE plots
     if plot_scatters:
         for x, y in scatter_x_y_combinations:
+            # unpack if display label provided:
+            if isinstance(x, tuple): x, x_label = x
+            else: x_label = x
+            if isinstance(y, tuple): y, y_label = y
+            else: y_label = y
+
             x_ind = feature_labels.index(x)
             y_ind = feature_labels.index(y)
             if target_label == 'Genre':
@@ -423,6 +424,6 @@ if __name__ == '__main__':
             elif target_label == 'Category':  # remove familiarity label
                 target_array = [cat.replace("Unfamiliar ", "").replace("Familiar ", "") for cat in categories]
             _ = visualizations.plot_scatter(x=feature_array[:, x_ind], y=feature_array[:, y_ind],
-                                            x_label=x, y_label=y,
+                                            x_label=x_label, y_label=y_label,
                                             category_list=target_array, category_label=target_label,
                                             cmap=list(song_colors.values()), save_dir=PLOT_DIR)
