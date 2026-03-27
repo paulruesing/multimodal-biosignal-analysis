@@ -3,6 +3,7 @@ import pandas as pd
 from scipy.interpolate import interp1d
 from typing import Literal, Union
 import logging
+from scipy.ndimage import uniform_filter1d
 
 ############################## DATA MANIPULATION / INTEGRATION METHODS ##############################
 def _normalize_to_datetimeindex(
@@ -10,7 +11,7 @@ def _normalize_to_datetimeindex(
     name: str = "timestamps",
 ) -> pd.DatetimeIndex:
     """
-    Normalize explicit timestamp inputs to pd.DatetimeIndex.
+    Convert timestamp-like input to ``pd.DatetimeIndex``.
 
     Parameters
     ----------
@@ -22,7 +23,7 @@ def _normalize_to_datetimeindex(
     Returns
     -------
     pd.DatetimeIndex
-        Normalized timestamps with nanosecond precision and UTC timezone.
+        Parsed datetime index in UTC.
 
     Raises
     ------
@@ -63,17 +64,18 @@ def _normalize_to_datetimeindex(
 
 
 def apply_window_operator(
-    window_timestamps: np.ndarray | pd.DatetimeIndex | list | tuple,
-    target_array: np.ndarray | pd.Series,
-    target_timestamps: np.ndarray | pd.DatetimeIndex | list | tuple | None = None,
-    window_size: float | None = None,
-    is_time_center: bool | None = None,
-    operation: Literal['min', 'max', 'mean', 'median', 'mode', 'std'] = 'mean',
-    axis: int = 0,
-    window_timestamps_ends: np.ndarray | pd.DatetimeIndex | list | tuple | None = None,
+        window_timestamps: np.ndarray | pd.DatetimeIndex | list | tuple,
+        target_array: np.ndarray | pd.Series,
+        target_timestamps: np.ndarray | pd.DatetimeIndex | list | tuple | None = None,
+        window_size: float | None = None,
+        is_time_center: bool | None = None,
+        operation: Literal['min', 'max', 'mean', 'median', 'mode', 'std'] = 'mean',
+        axis: int = 0,
+        first_valid_slot: int = 0,
+        window_timestamps_ends: np.ndarray | pd.DatetimeIndex | list | tuple | None = None,
 ) -> np.ndarray:
     """
-    Apply windowing operator to array along specified axis using timestamp-based windows.
+    Aggregate values inside timestamp-defined windows along a selected axis.
 
     Parameters
     ----------
@@ -250,6 +252,17 @@ def apply_window_operator(
     n_features = target_array_flat.shape[1]
     result = np.full((n_windows, n_features), np.nan, dtype=object)
 
+    # Helper: robust NULL check for any data type (numeric or string)
+    def _is_all_null(data):
+        """Check if all values in data are NULL/NaN/None."""
+        if data.dtype == object:
+            return np.all(pd.isna(data))
+        else:
+            try:
+                return np.all(np.isnan(data))
+            except TypeError:
+                return False
+
     for window_idx in range(n_windows):
         mask = (window_indices == window_idx)
 
@@ -257,6 +270,10 @@ def apply_window_operator(
             continue
 
         window_data = target_array_flat[mask, :]
+
+        # skip the NULL check for the pre-trial pad region (works for all dtypes)
+        if _is_all_null(window_data) and window_idx < first_valid_slot:
+            continue  # expected NaN pad, not a data error
 
         if (window_data.min() == 0.0) & (window_data.max() == 0.0):
             logging.warning(f"[data_analysis.apply_window_operator] Window {window_idx} only contains NULL values.")
@@ -302,7 +319,7 @@ def interpolate_per_window(
         return_type: Literal['pandas', 'numpy'] = 'numpy'
 ) -> np.ndarray | pd.Series:
     """
-    Interpolate target series values to match window_time_steps using temporal windows.
+    Interpolate a time-indexed series at requested window time points.
 
     Parameters
     ----------
@@ -438,7 +455,7 @@ def add_time_index(
         n_timesteps: Union[int, None] = None,
 ) -> Union[pd.Series, pd.DataFrame, pd.DatetimeIndex]:
     """
-    Add a time index to an array or DataFrame assuming constant sampling rate.
+    Create and attach an evenly spaced datetime index over a fixed time span.
 
     Creates a DatetimeIndex spanning from start_timestamp to end_timestamp with
     evenly-spaced periods. If data is provided, returns a Series or DataFrame
@@ -671,7 +688,7 @@ def make_timezone_aware(
     timezone: str = 'utc',
 ) -> Union[pd.DatetimeIndex, pd.Series, pd.Timestamp]:
     """
-    Ensure a DatetimeIndex, Series with DatetimeIndex, or Timestamp is timezone-aware.
+    Localize naive datetime objects to a timezone while keeping aware inputs unchanged.
 
     If the input is already timezone-aware, returns it unchanged. If it is
     timezone-naive, localizes it to the specified timezone.
@@ -816,6 +833,13 @@ def create_trial_bins(df, columns_to_bin, n_bins_dict,
         ordinal bin labels (1 to n_bins). NaN values in the original data will result
         in NaN bins.
 
+    Raises
+    ------
+    KeyError
+        If required grouping or binned columns are not present in ``df``.
+    ValueError
+        If binning operations fail due to invalid bin specifications.
+
     Examples
     --------
     >>> binned_df = create_trial_bins(
@@ -932,3 +956,207 @@ def create_trial_bins(df, columns_to_bin, n_bins_dict,
     return df_result
 
 
+############ PHASE NORMALIZATION LOGIC #############
+def phase_normalize_cycles(
+    signal: np.ndarray,
+    t_rel: np.ndarray,
+    task_freq: float,
+    trial_dur_sec: float,
+    phase_grid: np.ndarray,
+    min_samples_per_cycle: int,
+    start_offset_sec: float = 0.0,
+    min_cycle_coverage_ratio: float = 0.4,
+    use_interpolation: bool = True,
+    interpolation_kind: Literal['linear', 'nearest'] = 'linear',
+    show_debug_trial_wise_plots: bool = False,
+    show_debug_cycle_wise_plots: bool = False,
+) -> list[np.ndarray]:
+    # (docstring unchanged)
+
+    if show_debug_trial_wise_plots:
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots()
+        if signal.ndim == 2:
+            for ch in signal.transpose():
+                ax.plot(t_rel, ch, "r", alpha=.1)
+            ax.plot(t_rel, np.nanmean(signal, axis=1), 'b-o', label='Mean')
+        else:
+            ax.plot(t_rel, signal, 'b-o')
+        ax.set_title(f'Trial {task_freq:.2f} Hz')
+        plt.show()
+
+    if not (0.0 <= float(min_cycle_coverage_ratio) <= 1.0):
+        raise ValueError("min_cycle_coverage_ratio must be within [0, 1].")
+    if use_interpolation and interpolation_kind not in {'linear', 'nearest'}:
+        raise ValueError("interpolation_kind must be 'linear' or 'nearest'.")
+
+    signal_arr = np.asarray(signal)
+    t_rel_arr  = np.asarray(t_rel, dtype=float)
+
+    if signal_arr.shape[0] != t_rel_arr.shape[0]:
+        raise ValueError("signal and t_rel must have the same length along axis 0.")
+
+    if task_freq <= 0 or signal_arr.shape[0] < min_samples_per_cycle:
+        return []
+
+    is_1d         = signal_arr.ndim == 1
+    cycle_dur_sec = 1.0 / task_freq
+    eps           = 1e-9
+
+    first_cycle    = int(np.floor(start_offset_sec * task_freq))
+    n_total_cycles = int(np.floor(trial_dur_sec * task_freq + eps))
+    if n_total_cycles <= 0:
+        return []
+
+    phase_grid_arr = np.asarray(phase_grid, dtype=float)
+    if phase_grid_arr.size == 0:
+        return []
+
+    # Detect closed phase axis (e.g. 0 … 360 inclusive).
+    phase_span = np.mod(phase_grid_arr - phase_grid_arr[0], 360.0)
+    closed_phase_axis = (
+        len(phase_grid_arr) >= 2
+        and np.isclose(phase_span[-1], 0.0, atol=eps)
+    )
+
+    # Sort by time once.
+    order_t    = np.argsort(t_rel_arr)
+    t_rel_arr  = t_rel_arr[order_t]
+    signal_arr = signal_arr[order_t]
+
+    out: list[np.ndarray] = []
+
+    for cycle_idx in range(first_cycle, n_total_cycles):
+        t0       = cycle_idx * cycle_dur_sec
+        t1       = (cycle_idx + 1) * cycle_dur_sec
+        in_cycle = (t_rel_arr >= t0) & (t_rel_arr < t1)
+
+        if int(in_cycle.sum()) < min_samples_per_cycle:
+            continue
+
+        # Phase of each sample within this cycle: [0, 360).
+        t_cycle   = t_rel_arr[in_cycle]
+        sig_vals  = signal_arr[in_cycle]
+        phase_vals = np.clip(
+            ((t_cycle - t0) / cycle_dur_sec) * 360.0,
+            0.0, 360.0 - eps,
+        )
+
+        if show_debug_cycle_wise_plots:
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots()
+            if sig_vals.ndim == 2:
+                for ch in sig_vals.transpose():
+                    ax.plot(phase_vals, ch, "r", alpha=.1)
+                ax.plot(phase_vals, np.nanmean(sig_vals, axis=1), 'b-o', label='Mean')
+            else:
+                ax.plot(phase_vals, sig_vals, 'b-o')
+            ax.set_title(f'Cycle {cycle_idx}')
+            plt.show()
+
+        order      = np.argsort(phase_vals)
+        phase_vals = phase_vals[order]
+        sig_vals   = sig_vals[order]
+
+        cycle_coverage_ratio = (phase_vals[-1] - phase_vals[0]) / 360.0
+        if cycle_coverage_ratio < min_cycle_coverage_ratio:
+            continue
+
+        if use_interpolation:
+            # ---------------------------------------------------------- #
+            # Per-cycle phase-domain interpolation with wrap-around.      #
+            #                                                              #
+            # Pad observed data by copying points from the opposite end   #
+            # of the cycle (shifted ±360°) so the interpolator naturally  #
+            # covers the full [0, 360) range without cross-cycle bleed.   #
+            # Only applied when coverage is sufficient.                    #
+            # ---------------------------------------------------------- #
+            unique_ph, inv_idx, counts_ph = np.unique(
+                phase_vals, return_inverse=True, return_counts=True,
+            )
+            if unique_ph.size < 2:
+                continue
+
+            if is_1d:
+                avg_sig = np.bincount(inv_idx, weights=sig_vals) / counts_ph
+            else:
+                n_ch = sig_vals.shape[1]
+                avg_sig = np.zeros((len(unique_ph), n_ch), dtype=float)
+                for ch in range(n_ch):
+                    avg_sig[:, ch] = (
+                            np.bincount(inv_idx, weights=sig_vals[:, ch]) / counts_ph
+                    )
+
+            # ---- wrap-pad only for near-complete cycles ----
+            n_pad = max(1, len(unique_ph) // 4)
+
+            if cycle_coverage_ratio >= 0.85:
+                # Near-complete cycle: wrapping is physically justified.
+                pad_lo_ph = unique_ph[-n_pad:] - 360.0
+                pad_hi_ph = unique_ph[:n_pad] + 360.0
+                if is_1d:
+                    interp_ph = np.concatenate([pad_lo_ph, unique_ph, pad_hi_ph])
+                    interp_sig = np.concatenate([avg_sig[-n_pad:], avg_sig, avg_sig[:n_pad]])
+                else:
+                    interp_ph = np.concatenate([pad_lo_ph, unique_ph, pad_hi_ph])
+                    interp_sig = np.concatenate(
+                        [avg_sig[-n_pad:], avg_sig, avg_sig[:n_pad]], axis=0
+                    )
+            else:
+                # Partial cycle: no wrapping, boundary bins become NaN.
+                interp_ph = unique_ph
+                interp_sig = avg_sig
+
+            cycle_interp = interp1d(
+                interp_ph,
+                interp_sig,
+                kind=interpolation_kind,
+                axis=0,
+                bounds_error=False,
+                fill_value=np.nan,
+                assume_sorted=True,
+            )
+            profile = cycle_interp(phase_grid_arr)
+
+            if is_1d:
+                profile = np.asarray(profile, dtype=float)
+            else:
+                profile = np.asarray(profile, dtype=float).reshape(
+                    len(phase_grid_arr), -1
+                )
+
+        else:
+            # No interpolation: assign samples to nearest bin (circular).
+            phase_dist  = np.abs(phase_vals[:, None] - phase_grid_arr[None, :])
+            nearest_idx = np.minimum(phase_dist, 360.0 - phase_dist).argmin(axis=1)
+
+            if is_1d:
+                profile = np.full(len(phase_grid_arr), np.nan)
+                counts  = np.bincount(nearest_idx, minlength=len(phase_grid_arr))
+                sums    = np.bincount(nearest_idx, weights=sig_vals,
+                                      minlength=len(phase_grid_arr))
+                valid = counts > 0
+                profile[valid] = sums[valid] / counts[valid]
+            else:
+                n_ch    = sig_vals.shape[1]
+                profile = np.full((len(phase_grid_arr), n_ch), np.nan)
+                counts  = np.bincount(nearest_idx, minlength=len(phase_grid_arr))
+                valid   = counts > 0
+                for ch in range(n_ch):
+                    sums = np.bincount(nearest_idx, weights=sig_vals[:, ch],
+                                       minlength=len(phase_grid_arr))
+                    profile[valid, ch] = sums[valid] / counts[valid]
+
+        if closed_phase_axis:
+            profile[-1] = profile[0]
+
+        out.append(profile)
+
+    return out
+
+
+def circular_smooth(profile: np.ndarray, kernel_bins: int = 5) -> np.ndarray:
+    """Smooth a phase-averaged profile with wrap-around padding."""
+    padded = np.concatenate([profile[-kernel_bins:], profile, profile[:kernel_bins]])
+    smoothed = uniform_filter1d(padded, size=kernel_bins, mode='nearest')
+    return smoothed[kernel_bins:-kernel_bins]
