@@ -9,6 +9,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 import src.pipeline.visualizations as visualizations
+from src.pipeline.channel_layout import EEG_CHANNELS, EEG_CHANNELS_BY_AREA, EEG_CHANNEL_IND_DICT
 import src.pipeline.data_integration as data_integration
 import src.pipeline.data_analysis as data_analysis
 import src.utils.file_management as filemgmt
@@ -614,7 +615,7 @@ def _normalize_to_time_first(array: np.ndarray, axis: int) -> np.ndarray:
 # MAIN FUNCTION
 # ============================================================================
 
-def multitaper_magnitude_squared_coherence(
+def OLD_multitaper_magnitude_squared_coherence(
         eeg_array: np.ndarray,
         emg_array: np.ndarray,
         sampling_freq: float,
@@ -876,7 +877,417 @@ def multitaper_magnitude_squared_coherence(
     return result
 
 
-def compute_task_wise_aggregated_cmc(eeg_array: np.ndarray, emg_array: np.ndarray,
+def multitaper_magnitude_squared_coherence(
+        eeg_array: np.ndarray,
+        emg_array: np.ndarray,
+        sampling_freq: float,
+        nw: float = 3,
+        window_length_sec: float = 1.0,
+        overlap_frac: float = 0.5,
+        eeg_axis: Literal[0, 1] = 0,
+        emg_axis: Literal[0, 1] = 0,
+        taper_eigenvalue_threshold: float = 0.90,
+        use_jackknife: bool = True,
+        jackknife_alpha: float = 0.05,
+        apply_independence_threshold: bool = True,
+        apply_bonferroni_correction: bool = False,
+        significance_level: float = 0.05,
+        window_mask: np.ndarray | None = None,   # <-- NEW: bool array (n_windows,)
+        verbose: bool = False,
+) -> dict:
+    """
+    ... (existing docstring, add one entry) ...
+
+    window_mask : np.ndarray of bool, shape (n_windows,), optional
+        If provided, only windows where ``window_mask[i] is True`` are
+        computed.  All other windows are left as zeros in every output
+        array.  The mask must have exactly ``n_windows`` elements; a
+        ValueError is raised otherwise.
+
+        This is the correct mechanism for task-selective computation:
+        build the mask once from task timestamps (see
+        ``_build_task_window_mask``), pass it here, and the global
+        window grid remains intact — no slicing, no stitching.
+    """
+
+    # ---- INPUT VALIDATION & NORMALIZATION ----
+    eeg_array = _normalize_to_time_first(eeg_array, axis=eeg_axis)
+    emg_array = _normalize_to_time_first(emg_array, axis=emg_axis)
+
+    n_samples_eeg, n_eeg_channels = eeg_array.shape
+    n_samples_emg, n_emg_channels = emg_array.shape
+
+    if n_samples_eeg != n_samples_emg:
+        raise ValueError(
+            f"EEG and EMG must have same number of samples. "
+            f"Got EEG: {n_samples_eeg}, EMG: {n_samples_emg}"
+        )
+    n_samples = n_samples_eeg
+
+    # ---- WINDOW PARAMETERS ----
+    window_samples = int(window_length_sec * sampling_freq)
+    hop_samples    = int(window_samples * (1 - overlap_frac))
+    k              = int(2 * nw - 1)
+
+    # ---- INITIALIZE TAPERS ----
+    tapers, taper_eigs = signal.windows.dpss(
+        M=window_samples, NW=nw, Kmax=k, return_ratios=True
+    )
+    keep_mask         = taper_eigs > taper_eigenvalue_threshold
+    tapers_filtered   = tapers[keep_mask]
+    tapers_normalized = [t / np.sqrt(np.sum(t ** 2)) for t in tapers_filtered]
+    K                 = len(tapers_normalized)
+
+    freqs    = np.fft.rfftfreq(window_samples, d=1 / sampling_freq)
+    n_freqs  = len(freqs)
+    n_windows = (n_samples - window_samples) // hop_samples + 1
+
+    # ---- VALIDATE window_mask ----
+    if window_mask is not None:
+        window_mask = np.asarray(window_mask, dtype=bool)
+        if window_mask.shape != (n_windows,):
+            raise ValueError(
+                f"window_mask must have shape ({n_windows},), "
+                f"got {window_mask.shape}"
+            )
+        n_active = int(window_mask.sum())
+        if verbose:
+            print(f"window_mask: {n_active}/{n_windows} windows will be computed "
+                  f"({100 * n_active / n_windows:.1f}%)")
+    else:
+        n_active = n_windows
+
+    if verbose:
+        print(f"Using {K} high-quality tapers (λ > {taper_eigenvalue_threshold})")
+        print(
+            f"Computing MSC: {n_eeg_channels} EEG × {n_emg_channels} EMG channels"
+        )
+        print(
+            f"Window: {window_length_sec:.3f}s, Overlap: {overlap_frac * 100:.1f}%, "
+            f"Tapers: {K}"
+        )
+
+    # ---- PRE-ALLOCATE OUTPUT ARRAYS (full grid, zeros for skipped windows) ----
+    coherences_raw = np.zeros(
+        (n_windows, n_freqs, n_eeg_channels, n_emg_channels), dtype=np.float32
+    )
+    time_centers = np.zeros(n_windows, dtype=np.float64)
+
+    if use_jackknife:
+        coherences_ci_lower = np.zeros_like(coherences_raw)
+        coherences_ci_upper = np.zeros_like(coherences_raw)
+
+    if apply_independence_threshold:
+        coherences_significant = np.zeros(
+            (n_windows, n_freqs, n_eeg_channels, n_emg_channels), dtype=bool
+        )
+
+    # ---- MAIN WINDOW LOOP ----
+    for win_idx in tqdm(range(n_windows), disable=not verbose, desc="Window"):
+
+        # Always fill time_centers — callers rely on this even for skipped windows.
+        start_idx = win_idx * hop_samples
+        time_centers[win_idx] = (start_idx + window_samples / 2) / sampling_freq
+
+        # *** SKIP non-task windows ***
+        if window_mask is not None and not window_mask[win_idx]:
+            continue
+
+        end_idx    = start_idx + window_samples
+        eeg_window = eeg_array[start_idx:end_idx, :]
+        emg_window = emg_array[start_idx:end_idx, :]
+
+        psd_eeg_sum = np.zeros((n_freqs, n_eeg_channels), dtype=np.float64)
+        psd_emg_sum = np.zeros((n_freqs, n_emg_channels), dtype=np.float64)
+        csd_sum     = np.zeros((n_freqs, n_eeg_channels, n_emg_channels), dtype=np.complex128)
+
+        for taper in tapers_normalized:
+            eeg_tapered = eeg_window * taper[:, np.newaxis]
+            emg_tapered = emg_window * taper[:, np.newaxis]
+
+            eeg_fft = np.fft.rfft(eeg_tapered, axis=0)
+            emg_fft = np.fft.rfft(emg_tapered, axis=0)
+
+            psd_eeg = np.abs(eeg_fft) ** 2 / (sampling_freq * window_samples)
+            psd_emg = np.abs(emg_fft) ** 2 / (sampling_freq * window_samples)
+
+            psd_eeg_sum += psd_eeg
+            psd_emg_sum += psd_emg
+
+            csd = (
+                np.conj(eeg_fft)[:, :, np.newaxis] * emg_fft[:, np.newaxis, :]
+                / (sampling_freq * window_samples)
+            )
+            csd_sum += csd
+
+        psd_eeg_mean = psd_eeg_sum / K
+        psd_emg_mean = psd_emg_sum / K
+        csd_mean     = csd_sum / K
+
+        # ---- STEP 1: RAW COHERENCE ----
+        numerator      = np.abs(csd_mean) ** 2
+        denominator    = psd_eeg_mean[:, :, np.newaxis] * psd_emg_mean[:, np.newaxis, :]
+        eps            = np.finfo(np.float64).tiny
+        coherence_raw  = np.clip(numerator / np.maximum(denominator, eps), 0, 1)
+
+        # ---- STEP 2: JACKKNIFE CI ----
+        if use_jackknife:
+            coherence_mean, ci_lower, ci_upper = jackknife_coherence_and_ci(
+                tapers_normalized, eeg_window, emg_window,
+                sampling_freq, window_samples,
+                jackknife_alpha=jackknife_alpha,
+            )
+            coherences_raw[win_idx]        = coherence_mean
+            coherences_ci_lower[win_idx]   = ci_lower
+            coherences_ci_upper[win_idx]   = ci_upper
+        else:
+            coherences_raw[win_idx] = coherence_raw
+
+        # ---- STEP 3: IT FILTERING ----
+        if apply_independence_threshold:
+            n_comparisons = (
+                n_eeg_channels * n_emg_channels
+                if apply_bonferroni_correction else None
+            )
+            significant_mask, _ = apply_threshold_filtering(
+                coherences_raw[win_idx], K=K,
+                alpha=significance_level,
+                n_comparisons=n_comparisons,
+                apply_bonferroni=apply_bonferroni_correction,
+            )
+            coherences_significant[win_idx] = significant_mask
+
+    # ---- BUILD RESULTS (unchanged from original) ----
+    result = {
+        "coherence_raw":  coherences_raw,
+        "time_centers":   time_centers,
+        "freqs":          freqs,
+        "metadata": {
+            "K_tapers":                     K,
+            "n_windows":                    n_windows,
+            "n_active_windows":             n_active,
+            "window_length_sec":            window_length_sec,
+            "overlap_frac":                 overlap_frac,
+            "use_jackknife":                use_jackknife,
+            "apply_independence_threshold": apply_independence_threshold,
+            "apply_bonferroni_correction":  apply_bonferroni_correction,
+            "significance_level":           significance_level,
+        },
+    }
+
+    if use_jackknife:
+        result["coherence_ci_lower"] = coherences_ci_lower
+        result["coherence_ci_upper"] = coherences_ci_upper
+
+    if apply_independence_threshold:
+        result["coherence_significant"] = coherences_significant
+        IT_unadjusted = compute_cmc_independence_threshold(K, alpha=significance_level)
+        result["metadata"]["IT_unadjusted"] = float(IT_unadjusted)
+        if apply_bonferroni_correction:
+            n_comp = n_eeg_channels * n_emg_channels
+            result["metadata"]["IT_bonferroni"] = float(
+                compute_cmc_independence_threshold(K, alpha=significance_level / n_comp)
+            )
+            result["metadata"]["n_comparisons"] = n_comp
+        result["metadata"]["n_significant"] = int(np.sum(coherences_significant))
+
+    if verbose:
+        print(f"\n✓ Done!")
+        if apply_independence_threshold:
+            print(f"  IT (unadjusted): {result['metadata']['IT_unadjusted']:.3f}")
+            print(f"  Significant: {result['metadata']['n_significant']}")
+
+    return result
+
+
+def _build_task_window_mask(
+        time_centers_sec: np.ndarray,
+        log_frame: pd.DataFrame,
+        pre_buffer_sec: float,
+        post_buffer_sec: float,
+) -> np.ndarray:
+    """
+    Return a boolean mask (shape: n_windows) marking windows whose centre
+    falls within any task period expanded by the requested buffers.
+
+    Works entirely in floating-point seconds-since-recording-start space,
+    which is the same space as ``time_centers_sec``.  No DataFrame or
+    Timestamp arithmetic at window granularity.
+
+    Parameters
+    ----------
+    time_centers_sec : np.ndarray, shape (n_windows,)
+        Centre time of each window in seconds from recording start,
+        as returned by ``multitaper_magnitude_squared_coherence``.
+    log_frame : pd.DataFrame
+        Task log with timing columns (same format used elsewhere).
+    pre_buffer_sec, post_buffer_sec : float
+        Seconds to expand each task period before / after its edges.
+        Mirrors the buffer semantics of the old task-wise approach.
+
+    Returns
+    -------
+    mask : np.ndarray of bool, shape (n_windows,)
+    """
+    measurement_start, _ = data_integration.get_qtc_measurement_start_end(log_frame)
+    measurement_start_aware = data_analysis.make_timezone_aware(
+        pd.Timestamp(measurement_start)
+    )
+    trial_start_ends = data_integration.get_all_task_start_ends(
+        log_frame, output_type='list'
+    )
+
+    mask = np.zeros(len(time_centers_sec), dtype=bool)
+
+    for trial_start, trial_end in trial_start_ends:
+        # Convert absolute timestamps → seconds from recording start.
+        # This is the same reference frame as time_centers_sec.
+        t0 = (trial_start - measurement_start_aware).total_seconds() - pre_buffer_sec
+        t1 = (trial_end   - measurement_start_aware).total_seconds() + post_buffer_sec
+        mask |= (time_centers_sec >= t0) & (time_centers_sec <= t1)
+
+    n_active = int(mask.sum())
+    print(
+        f"Task window mask: {n_active}/{len(mask)} windows selected "
+        f"({100 * n_active / len(mask):.1f}%) across "
+        f"{len(trial_start_ends)} trials "
+        f"[±{pre_buffer_sec}s / +{post_buffer_sec}s buffers]"
+    )
+    return mask
+
+
+def compute_task_wise_aggregated_cmc(
+        eeg_array: np.ndarray,
+        emg_array: np.ndarray,
+        sampling_freq: int,
+        muscle_group: str,
+        log_frame: pd.DataFrame | None = None,
+        eeg_channel_subset: list[str] | None = None,
+        window_size_sec: float = 2.0,
+        window_overlap_ratio: float = 0.5,
+        enforce_independence_threshold: bool = False,
+        independence_threshold_alpha: float = 0.2,
+        use_jackknife: bool = True,
+        jackknife_alpha: float = 0.05,
+        save_dir: str | Path | None = None,
+        pre_trial_computation_buffer_sec: float = 3.0,
+        post_trial_computation_buffer_sec: float = 3.0,
+) -> tuple:
+    """
+    Compute channel-aggregated CMC between EEG and EMG signals.
+
+    Uses a single global sliding window grid (identical to multitaper_psd).
+    When log_frame is provided, a boolean window mask marks only windows
+    whose centre falls within a task period ± the requested buffers; all
+    other windows are skipped and left as zeros.  This eliminates the
+    slice-and-stitch approach used previously and fixes all geometry
+    mismatch / index drift issues.
+    """
+    # ---- channel subset ----
+    if eeg_channel_subset:
+        eeg_channel_subset_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in eeg_channel_subset]
+        print(f"Reducing EEG to {len(eeg_channel_subset)} channels: {eeg_channel_subset}")
+        eeg_array = eeg_array[:, eeg_channel_subset_inds]
+
+    n_samples_eeg, n_eeg_channels = eeg_array.shape
+    n_samples_emg, n_emg_channels = emg_array.shape
+    if n_samples_eeg != n_samples_emg:
+        raise ValueError(
+            f"EEG and EMG must have same number of samples. "
+            f"Got EEG: {n_samples_eeg}, EMG: {n_samples_emg}"
+        )
+
+    # ---- build task mask (same global grid as multitaper_psd) ----
+    if log_frame is not None:
+        # Pre-compute the global time_centers so we can build the mask
+        # before calling the coherence function.  This mirrors how
+        # multitaper_psd builds window_starts up front.
+        window_samples  = int(window_size_sec * sampling_freq)
+        hop_samples     = int(window_samples * (1 - window_overlap_ratio))
+        if hop_samples <= 0:
+            raise ValueError("window_overlap_ratio too high: hop_samples becomes <= 0")
+        n_windows       = (n_samples_eeg - window_samples) // hop_samples + 1
+        window_starts   = np.arange(n_windows) * hop_samples
+        time_centers_preview = (window_starts + window_samples / 2) / sampling_freq
+
+        window_mask = _build_task_window_mask(
+            time_centers_sec=time_centers_preview,
+            log_frame=log_frame,
+            pre_buffer_sec=pre_trial_computation_buffer_sec,
+            post_buffer_sec=post_trial_computation_buffer_sec,
+        )
+    else:
+        window_mask = None  # compute every window
+
+    # ---- single coherence call over the full arrays ----
+    output_dict = multitaper_magnitude_squared_coherence(
+        eeg_array, emg_array,
+        sampling_freq=sampling_freq,
+        window_length_sec=window_size_sec,
+        overlap_frac=window_overlap_ratio,
+        significance_level=independence_threshold_alpha,
+        apply_independence_threshold=enforce_independence_threshold,
+        use_jackknife=use_jackknife,
+        jackknife_alpha=jackknife_alpha,
+        window_mask=window_mask,
+        verbose=True,
+    )
+
+    time_centers = output_dict['time_centers']
+    freqs        = output_dict['freqs']
+
+    # ---- mask by significance (if requested) ----
+    values = (
+        np.where(output_dict['coherence_significant'], output_dict['coherence_raw'], 0.0)
+        if enforce_independence_threshold
+        else output_dict['coherence_raw']
+    )
+
+    # ---- sanity-check CI bounds ----
+    if use_jackknife:
+        assert np.all(output_dict['coherence_raw'] >= output_dict['coherence_ci_lower']), \
+            "CI lower bound exceeded coherence mean"
+        assert np.all(output_dict['coherence_raw'] <= output_dict['coherence_ci_upper']), \
+            "CI upper bound below coherence mean"
+
+    # ---- aggregate over EMG channels (max across EMG axis) ----
+    if use_jackknife:
+        values, values_lower, values_upper = max_cmc_spectrograms_over_channels(
+            values,
+            output_dict['coherence_ci_lower'],
+            output_dict['coherence_ci_upper'],
+            channel_ax=3,
+            verbose=True,
+        )
+    else:
+        values = max_cmc_spectrograms_over_channels(
+            values, channel_ax=3, verbose=True,
+        )
+
+    # ---- save ----
+    if save_dir is not None:
+        channel_suffix = (
+            f"Channels_{'_'.join(eeg_channel_subset)}"
+            if eeg_channel_subset else "All_Channels"
+        )
+        label = (
+            f"{muscle_group.capitalize()} CMC"
+            f"{' Trial-wise' if log_frame is not None else ''}"
+        )
+        save_spectrograms(
+            values, time_centers, freqs,
+            save_dir=save_dir,
+            modality=label,
+            identifier_suffix=channel_suffix,
+        )
+
+    # ---- return ----
+    if use_jackknife:
+        return values, values_lower, values_upper, time_centers, freqs
+    return values, time_centers, freqs
+
+
+def OLD_compute_task_wise_aggregated_cmc(eeg_array: np.ndarray, emg_array: np.ndarray,
                                      sampling_freq: int,
                                      muscle_group: str,
                                      log_frame: pd.DataFrame | None = None,  # if provided -> task-wise computation
@@ -983,7 +1394,7 @@ def compute_task_wise_aggregated_cmc(eeg_array: np.ndarray, emg_array: np.ndarra
     if eeg_channel_subset is not None:
         if len(eeg_channel_subset) > 0:
             # prepare channel inds:
-            eeg_channel_subset_inds = [visualizations.EEG_CHANNEL_IND_DICT[ch] for ch in eeg_channel_subset]
+            eeg_channel_subset_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in eeg_channel_subset]
             print(
                 f"Reducing EEG channels for CMC computation to {len(eeg_channel_subset)} channels: {eeg_channel_subset}\n")
 
@@ -1003,78 +1414,54 @@ def compute_task_wise_aggregated_cmc(eeg_array: np.ndarray, emg_array: np.ndarra
     # derive window parameters:
     window_samples = int(window_size_sec * sampling_freq)
     hop_samples = int(window_samples * (1 - window_overlap_ratio))
+    if hop_samples <= 0:
+        raise ValueError("window_overlap_ratio too high: hop_samples becomes <= 0")
     n_windows = (n_samples - window_samples) // hop_samples + 1
 
     if log_frame is not None:
+
         # derive frequencies:
         freqs = np.fft.rfftfreq(window_samples, d=1 / sampling_freq)
         n_freqs = len(freqs)
 
         # pre-allocate other arrays:
         output_values = np.zeros((n_windows, n_freqs, n_eeg_channels), dtype=np.float32)
-        output_time_centers = np.zeros(n_windows, dtype=np.float64)
+        output_time_centers = np.full(n_windows, np.nan, dtype=np.float64)
         if use_jackknife:
             output_values_lower = np.zeros((n_windows, n_freqs, n_eeg_channels), dtype=np.float32)
             output_values_upper = np.zeros((n_windows, n_freqs, n_eeg_channels), dtype=np.float32)
 
-        # derive task starts:
-        trial_start_ends = data_integration.get_all_task_start_ends(log_frame, output_type='list')
-
-        # turn time centers into timestamps:
-        measurement_start, measurement_end = data_integration.get_qtc_measurement_start_end(log_frame)
-        window_indices = data_analysis.add_time_index(
-            start_timestamp=measurement_start + pd.Timedelta(seconds=window_size_sec / 2),
-            end_timestamp=measurement_end - pd.Timedelta(seconds=window_size_sec / 2),
-            target_array=np.arange(0, n_windows),  # counts upwards -> window indices
+        task_specs, measurement_start, time_indexed_eeg_df, time_indexed_emg_df, window_size_sec_ret, hop_sec_ret = _prepare_taskwise_cmc_context(
+            log_frame=log_frame,
+            n_windows=n_windows,
+            window_size_sec=window_size_sec,
+            window_overlap_ratio=window_overlap_ratio,
+            sampling_freq=sampling_freq,
+            pre_trial_computation_buffer_sec=pre_trial_computation_buffer_sec,
+            post_trial_computation_buffer_sec=post_trial_computation_buffer_sec,
+            eeg_array=eeg_array,
+            emg_array=emg_array,
         )
-        window_indices = data_analysis.make_timezone_aware(window_indices)
-
-        # extend window to prevent data loss:
-        if pre_trial_computation_buffer_sec > 0:
-            print(f"Starting pre-trial CMC computation {pre_trial_computation_buffer_sec} seconds before trial start to prevent data loss.")
-        if post_trial_computation_buffer_sec > 0:
-            print(f"Ending post-trial CMC computation {post_trial_computation_buffer_sec} seconds after trial end to prevent data loss.")
-
-        adjusted_trial_start_ends = [
-            (start - pd.Timedelta(seconds=pre_trial_computation_buffer_sec),
-             end + pd.Timedelta(seconds=post_trial_computation_buffer_sec)) for start, end in trial_start_ends
-        ]
-
-        # derive task-specific window indices:
-        trial_window_start_end_indices: list[tuple[int, int]] = []
-        for start, end in adjusted_trial_start_ends:
-            window_indices_subset = window_indices[start:end]
-            start_window_idx, end_window_idx = window_indices_subset.min(), window_indices_subset.max()
-            trial_window_start_end_indices.append((start_window_idx, end_window_idx))
-
-        # iterator for the below loop:
-        iterator = tqdm(zip(adjusted_trial_start_ends, trial_window_start_end_indices), desc="Computing Trial-wise CMC",
-                        total=len(adjusted_trial_start_ends))
-
-        # prepare EEG and EMG data for time slicing:
-        time_indexed_eeg_df = data_analysis.add_time_index(
-            start_timestamp=measurement_start, end_timestamp=measurement_end, target_array=pd.DataFrame(eeg_array),)
-        time_indexed_eeg_df.index = data_analysis.make_timezone_aware(time_indexed_eeg_df.index)
-
-        time_indexed_emg_df = data_analysis.add_time_index(
-            start_timestamp=measurement_start, end_timestamp=measurement_end, target_array=pd.DataFrame(emg_array),)
-        time_indexed_emg_df.index = data_analysis.make_timezone_aware(time_indexed_emg_df.index)
+        iterator = tqdm(task_specs, desc="Computing Trial-wise CMC", total=len(task_specs))
 
     else:  # no task-wise processing intended
-        iterator = [((None, None), (0, n_windows-1)), ]
+        iterator = [(None, None, 0, n_windows - 1)]
 
 
 
     ##### LOOP START #####
     # loop over all tasks (if log_frame provided) or do single iteration (if not):
-    for (start_timestamp, end_timestamp), (start_window_idx, end_window_idx) in iterator:
+    for start_timestamp, end_timestamp, start_window_idx, end_window_idx in iterator:
         # prepare eeg and emg array:
         if start_timestamp is None or end_timestamp is None:  # don't slice arrays:
             subset_eeg = eeg_array
             subset_emg = emg_array
         else:  # slice arrays and reconvert to numpy
-            subset_eeg = time_indexed_eeg_df.loc[start_timestamp:end_timestamp, :].to_numpy()
-            subset_emg = time_indexed_emg_df.loc[start_timestamp:end_timestamp, :].to_numpy()
+            # Right-exclusive slicing: [start, end) 
+            eeg_mask = (time_indexed_eeg_df.index >= start_timestamp) & (time_indexed_eeg_df.index < end_timestamp)
+            emg_mask = (time_indexed_emg_df.index >= start_timestamp) & (time_indexed_emg_df.index < end_timestamp)
+            subset_eeg = time_indexed_eeg_df.loc[eeg_mask, :].to_numpy()
+            subset_emg = time_indexed_emg_df.loc[emg_mask, :].to_numpy()
 
 
         ### COMPUTATION START
@@ -1112,13 +1499,19 @@ def compute_task_wise_aggregated_cmc(eeg_array: np.ndarray, emg_array: np.ndarra
 
         ### Assign values to respective window slice
         if log_frame is not None:  # task-wise processing
-            if start_window_idx + len(values) != end_window_idx:
-                print(f"[WARNING] Span between start {start_window_idx} and end {end_window_idx} window index (={end_window_idx-start_window_idx}) does not match length of computed task-wise values: {len(values)}!")
-            output_values[start_window_idx:start_window_idx+len(values)] = values
-            output_time_centers[start_window_idx:start_window_idx+len(values)] = time_centers
-            if use_jackknife:
-                output_values_lower[start_window_idx:start_window_idx+len(values)] = values_lower
-                output_values_upper[start_window_idx:start_window_idx+len(values)] = values_upper
+            _assign_taskwise_cmc_outputs(
+                output_values=output_values,
+                output_time_centers=output_time_centers,
+                start_window_idx=start_window_idx,
+                end_window_idx=end_window_idx,
+                values=values,
+                time_centers=time_centers,
+                slice_offset_sec=(start_timestamp - measurement_start).total_seconds(),
+                output_values_lower=output_values_lower if use_jackknife else None,
+                output_values_upper=output_values_upper if use_jackknife else None,
+                values_lower=values_lower if use_jackknife else None,
+                values_upper=values_upper if use_jackknife else None,
+            )
 
         else:  # total processing
             output_values = values
@@ -1129,14 +1522,150 @@ def compute_task_wise_aggregated_cmc(eeg_array: np.ndarray, emg_array: np.ndarra
     ##### LOOP END #####
 
     # save:
-    save_spectrograms(output_values, output_time_centers, freqs,
-                               save_dir=save_dir, modality=f"{muscle_group.capitalize()} CMC{' Trial-wise' if log_frame is not None else ''}",
-                               identifier_suffix=f"Channels_{"_".join(eeg_channel_subset)}"
-                               )
+    if save_dir is not None:
+        channel_suffix = f"Channels_{'_'.join(eeg_channel_subset)}" if eeg_channel_subset else "All_Channels"
+        save_spectrograms(output_values, output_time_centers, freqs,
+                                   save_dir=save_dir, modality=f"{muscle_group.capitalize()} CMC{' Trial-wise' if log_frame is not None else ''}",
+                                   identifier_suffix=channel_suffix
+                                   )
 
     # return
     if use_jackknife: return output_values, output_values_lower, output_values_upper, output_time_centers, freqs
     else: return output_values, output_time_centers, freqs
+
+def OLD_prepare_taskwise_cmc_context(
+        log_frame: pd.DataFrame,
+        n_windows: int,
+        window_size_sec: float,
+        pre_trial_computation_buffer_sec: float,
+        post_trial_computation_buffer_sec: float,
+        eeg_array: np.ndarray,
+        emg_array: np.ndarray,
+        window_overlap_ratio: float | None = None,
+        sampling_freq: int | None = None,
+        hop_sec: float | None = None,
+) -> tuple[list[tuple[pd.Timestamp, pd.Timestamp, int, int]], pd.Timestamp, pd.DataFrame, pd.DataFrame]:
+    """Build task-wise slice specs and time-indexed signal DataFrames."""
+    trial_start_ends = data_integration.get_all_task_start_ends(log_frame, output_type='list')
+    measurement_start, measurement_end = data_integration.get_qtc_measurement_start_end(log_frame)
+
+    # derive hop in seconds either directly or from overlap settings
+    if hop_sec is None:
+        if sampling_freq is None or window_overlap_ratio is None:
+            raise ValueError(
+                "Either hop_sec or both sampling_freq and window_overlap_ratio must be provided."
+            )
+        window_samples = int(window_size_sec * sampling_freq)
+        hop_samples = int(window_samples * (1 - window_overlap_ratio))
+        if hop_samples <= 0:
+            raise ValueError("window_overlap_ratio too high: hop_samples becomes <= 0")
+        hop_sec = hop_samples / sampling_freq
+
+    first_center = data_analysis.make_timezone_aware(
+        pd.Timestamp(measurement_start + pd.Timedelta(seconds=window_size_sec / 2))
+    )
+    window_centers = pd.DatetimeIndex([
+        first_center + pd.Timedelta(seconds=hop_sec * i) for i in range(n_windows)
+    ])
+    window_indices = pd.Series(np.arange(0, n_windows), index=window_centers)
+
+    if pre_trial_computation_buffer_sec > 0:
+        print(f"Starting pre-trial CMC computation {pre_trial_computation_buffer_sec} seconds before trial start to prevent data loss.")
+    if post_trial_computation_buffer_sec > 0:
+        print(f"Ending post-trial CMC computation {post_trial_computation_buffer_sec} seconds after trial end to prevent data loss.")
+
+    # build time-indexed DataFrames for downstream slicing in compute_task_wise_aggregated_cmc
+    time_indexed_eeg_df = data_analysis.add_time_index(
+        start_timestamp=measurement_start,
+        end_timestamp=measurement_end,
+        target_array=pd.DataFrame(eeg_array),
+    )
+    time_indexed_eeg_df.index = data_analysis.make_timezone_aware(time_indexed_eeg_df.index)
+
+    time_indexed_emg_df = data_analysis.add_time_index(
+        start_timestamp=measurement_start,
+        end_timestamp=measurement_end,
+        target_array=pd.DataFrame(emg_array),
+    )
+    time_indexed_emg_df.index = data_analysis.make_timezone_aware(time_indexed_emg_df.index)
+
+    task_specs: list[tuple[pd.Timestamp, pd.Timestamp, int, int]] = []
+    half_window = pd.Timedelta(seconds=window_size_sec / 2)
+    measurement_start_aware = data_analysis.make_timezone_aware(pd.Timestamp(measurement_start))
+
+    for start, end in trial_start_ends:
+        adj_start = start - pd.Timedelta(seconds=pre_trial_computation_buffer_sec)
+        adj_end   = end   + pd.Timedelta(seconds=post_trial_computation_buffer_sec)
+
+        # Find exact slots whose centers fall within [center_start, center_end].
+        # Use direct timestamp matching instead of label-based slicing to avoid off-by-one.
+        center_start = adj_start + half_window
+        center_end = adj_end - half_window
+        
+        valid_mask = (window_indices.index >= center_start) & (window_indices.index <= center_end)
+        valid_indices = window_indices[valid_mask]
+        if len(valid_indices) == 0:
+            continue
+        start_window_idx = int(valid_indices.min())
+        # Convert to right-exclusive: last included index + 1
+        end_window_idx = int(valid_indices.max()) + 1
+
+        # DIAGNOSTIC: verify stored time centers map to expected absolute time.
+        expected_first_center_sec = (center_start - measurement_start_aware).total_seconds()
+        slot_timestamp = valid_indices.index.min()
+        slot_time_sec = (slot_timestamp - measurement_start_aware).total_seconds()
+        delta_ms = abs(slot_time_sec - expected_first_center_sec) * 1000.0
+        print(
+            f"Trial {start.time()} | start_slot={start_window_idx} | "
+            f"slot_time≈{slot_timestamp.time()} | "
+            f"expected_first_center≈{expected_first_center_sec:.3f}s | "
+            f"delta={delta_ms:.1f}ms"
+        )
+
+        task_specs.append((adj_start, adj_end, start_window_idx, end_window_idx))
+
+    return task_specs, measurement_start, time_indexed_eeg_df, time_indexed_emg_df, window_size_sec, hop_sec
+
+
+def OLD_assign_taskwise_cmc_outputs(
+            output_values: np.ndarray,
+            output_time_centers: np.ndarray,
+            start_window_idx: int,
+            end_window_idx: int,
+            values: np.ndarray,
+            time_centers: np.ndarray,
+            slice_offset_sec: float,
+            output_values_lower: np.ndarray | None = None,
+            output_values_upper: np.ndarray | None = None,
+            values_lower: np.ndarray | None = None,
+            values_upper: np.ndarray | None = None,
+    ) -> None:
+        """Assign one task block into global output arrays with bounds-safe slicing."""
+        expected_span = end_window_idx - start_window_idx
+        actual_values_count = len(values)
+        
+        # Key fix: Truncate or pad to match expected span
+        if actual_values_count != expected_span:
+            print(
+                f"[GEOMETRY MISMATCH] start_idx={start_window_idx}, end_idx={end_window_idx}, "
+                f"expected_span={expected_span}, but multitaper returned {actual_values_count} windows. "
+                f"Truncating to match expected span."
+            )
+            assign_len = min(expected_span, actual_values_count)
+        else:
+            assign_len = actual_values_count
+
+        target_slice = slice(start_window_idx, start_window_idx + assign_len)
+
+        output_values[target_slice] = values[:assign_len]
+        output_time_centers[target_slice] = time_centers[:assign_len] + slice_offset_sec
+
+        if (
+            output_values_lower is not None and output_values_upper is not None
+            and values_lower is not None and values_upper is not None
+        ):
+            output_values_lower[target_slice] = values_lower[:assign_len]
+            output_values_upper[target_slice] = values_upper[:assign_len]
 
 
 
@@ -1236,6 +1765,10 @@ def max_cmc_spectrograms_over_channels(
         axis=channel_ax
     ).squeeze(axis=channel_ax)  # (time, freq, eeg)
 
+    if cmc_array_lower_ci is None or cmc_array_upper_ci is None:
+        if verbose: print(f"  Shapes: {cmc_maxed.shape}")
+        return cmc_maxed
+
     cmc_maxed_lower = np.take_along_axis(
         cmc_array_lower_ci,
         max_emg_idx[..., np.newaxis],
@@ -1251,7 +1784,7 @@ def max_cmc_spectrograms_over_channels(
     if verbose: print(f"  Shapes: {cmc_maxed.shape}")
     # Now all three come from the SAME EMG channel!
 
-    return cmc_maxed if (cmc_array_lower_ci is None or cmc_array_upper_ci is None) else cmc_maxed, cmc_maxed_lower, cmc_maxed_upper
+    return cmc_maxed, cmc_maxed_lower, cmc_maxed_upper
 
 
 def aggregate_spectrogram_over_frequency_band(
@@ -2412,8 +2945,8 @@ if __name__ == '__main__':
 
     # area to scrutinize:
     use_ch_subset = False
-    ch_subset = visualizations.EEG_CHANNELS_BY_AREA['Fronto-Central']
-    ch_subset_inds = [visualizations.EEG_CHANNEL_IND_DICT[ch]-1 for ch in ch_subset]  # -1 to convert to computer-indices (0 = start)
+    ch_subset = EEG_CHANNELS_BY_AREA['Fronto-Central']
+    ch_subset_inds = [EEG_CHANNEL_IND_DICT[ch]-1 for ch in ch_subset]  # -1 to convert to computer-indices (0 = start)
 
     ### load data:
     print('Loading data...')
@@ -2447,7 +2980,7 @@ if __name__ == '__main__':
     fig, ax = plt.subplots()
     for ch in range(n_channels):
         ax.plot(timestamps, freq_averaged_psd_dict['beta'][ch, :],
-                 label=visualizations.EEG_CHANNELS[ch])
+                 label=EEG_CHANNELS[ch])
     plt.xlabel('Time [s]'); plt.ylabel('Power [V^2/Hz]')
     plt.legend()
     plt.show()
