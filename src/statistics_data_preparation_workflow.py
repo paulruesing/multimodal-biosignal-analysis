@@ -4,7 +4,7 @@ import numpy as np
 import src.pipeline.signal_features as features
 import src.pipeline.data_integration as data_integration
 import src.pipeline.data_analysis as data_analysis
-from src.pipeline.visualizations import EEG_CHANNEL_IND_DICT, EEG_CHANNELS_BY_AREA
+from src.pipeline.channel_layout import EEG_CHANNEL_IND_DICT, EEG_CHANNELS_BY_AREA
 import src.utils.file_management as filemgmt
 
 
@@ -155,8 +155,12 @@ if __name__ == "__main__":
                     seg_starts_range = pd.date_range(start, end, periods=n_within_trial_segments + 1, inclusive='both')
                     for ind, seg_start in enumerate(seg_starts_range.values[:-1]):
                         seg_ids.append(ind)
-                        seg_starts.append(seg_start)
-                        seg_ends.append(seg_starts_range.values[ind + 1])
+                        seg_starts.append(pd.Timestamp(seg_start))
+                        seg_ends.append(pd.Timestamp(seg_starts_range.values[ind + 1]))
+                
+                # Ensure seg_starts and seg_ends are timezone-aware for proper comparison with acc_start
+                seg_starts = [data_analysis.make_timezone_aware(ts) for ts in seg_starts]
+                seg_ends = [data_analysis.make_timezone_aware(ts) for ts in seg_ends]
 
                 ### PREPARE DATAFRAME
                 single_subject_data_frame = pd.DataFrame(index=range(len(seg_starts)))
@@ -211,13 +215,23 @@ if __name__ == "__main__":
                         cmc_spectrograms, cmc_times, cmc_freqs = features.fetch_stored_spectrograms(
                             subject_cmc_save_dir, modality='CMC', file_identifier=muscle)
                         #   -> shape: (n_windows, n_freqs, n_channels), (n_windows), (n_freqs)
-                        # convert CMC second time-centers into timestamps:
-                        cmc_timestamps = data_analysis.add_time_index(
-                            start_timestamp=qtc_start + pd.Timedelta(seconds=cmc_time_window_size_sec / 2),
-                            end_timestamp=qtc_end - pd.Timedelta(seconds=cmc_time_window_size_sec / 2),
-                            n_timesteps=len(cmc_times)
-                        )
+                        if len(cmc_times) != cmc_spectrograms.shape[0]:
+                            raise ValueError(
+                                f"CMC time-center length mismatch for subject {subject_ind:02}, {muscle}: "
+                                f"len(cmc_times)={len(cmc_times)} vs n_windows={cmc_spectrograms.shape[0]}"
+                            )
+
+                        # Use stored time-centers directly; keep NaT where no task-wise slot was assigned.
+                        cmc_times = np.asarray(cmc_times, dtype=np.float64)
+                        cmc_timestamps = pd.DatetimeIndex([
+                            qtc_start + pd.Timedelta(seconds=float(sec)) if np.isfinite(sec) else pd.NaT
+                            for sec in cmc_times
+                        ])
                         cmc_timestamps = data_analysis.make_timezone_aware(cmc_timestamps)
+
+                        # PHASE-4 PROBE: disabled (requires CMC recomputation to see fixed deltas)
+                        # The stored CMC data was computed before the slot-boundary fix.
+                        # To validate the fix, recompute CMC with the updated _prepare_taskwise_cmc_context logic.
 
                         # takes shapes (n_windows, n_freqs, n_channels)
                         cmc_aggregated = features.aggregate_psd_spectrogram(cmc_spectrograms, cmc_freqs,
@@ -231,17 +245,46 @@ if __name__ == "__main__":
                                                                             )
                         # returns shape (n_windows, )
 
-                        # split per segment:
-                        cmc_per_segment = data_analysis.apply_window_operator(
-                            window_timestamps=seg_starts,
-                            window_timestamps_ends=seg_ends,
+                        # split per segment using only valid task-wise centers (NaN/NaT slots are intentionally skipped)
+                        # Convert to pd.Series with datetime index: NaT slots are auto-skipped by apply_window_operator.
+                        cmc_series = pd.Series(cmc_aggregated, index=cmc_timestamps)
 
-                            target_array=cmc_aggregated,
-                            target_timestamps=cmc_timestamps,
-
-                            operation='mean',
-                            axis=0,  # time axis
-                        )  # (n_trials, )
+                        # CMC data is task-wise: only covers trial windows, not full measurement span.
+                        # Filter segments to those with overlap to available CMC data.
+                        cmc_valid_mask = ~cmc_timestamps.isna()
+                        if np.any(cmc_valid_mask):
+                            cmc_data_start = cmc_timestamps[cmc_valid_mask].min()
+                            cmc_data_end = cmc_timestamps[cmc_valid_mask].max()
+                            
+                            # Extract segments with overlap to CMC data span
+                            seg_cmc_starts = []
+                            seg_cmc_ends = []
+                            seg_cmc_indices = []
+                            for seg_idx, (seg_start, seg_end) in enumerate(zip(seg_starts, seg_ends)):
+                                # Check overlap: [seg_start, seg_end] ∩ [cmc_data_start, cmc_data_end]
+                                if seg_end > cmc_data_start and seg_start < cmc_data_end:
+                                    seg_cmc_starts.append(seg_start)
+                                    seg_cmc_ends.append(seg_end)
+                                    seg_cmc_indices.append(seg_idx)
+                            
+                            # Aggregate only overlapping segments
+                            if seg_cmc_indices:
+                                cmc_overlap = data_analysis.apply_window_operator(
+                                    window_timestamps=seg_cmc_starts,
+                                    window_timestamps_ends=seg_cmc_ends,
+                                    target_array=cmc_series,
+                                    target_timestamps=None,
+                                    operation='mean',
+                                    axis=0,
+                                )
+                                # Fill all segments; overlapping ones get aggregated values, others stay NaN
+                                cmc_per_segment = np.full(len(seg_starts), np.nan)
+                                for local_idx, seg_idx in enumerate(seg_cmc_indices):
+                                    cmc_per_segment[seg_idx] = cmc_overlap[local_idx]
+                            else:
+                                cmc_per_segment = np.full(len(seg_starts), np.nan)
+                        else:
+                            cmc_per_segment = np.full(len(seg_starts), np.nan)
 
                         # save to dataframe:
                         single_subject_data_frame[f"CMC_{muscle}_{operator}_{band}"] = cmc_per_segment
@@ -336,16 +379,35 @@ if __name__ == "__main__":
                         continue
 
                     # Assign uniform timestamps over effective accuracy span
-                    accuracy_timestamps = data_analysis.add_time_index(
-                        start_timestamp=acc_start,
-                        end_timestamp=full_end,
-                        n_timesteps=len(accuracy_array),
+                    acc_t_rel = data_integration.build_accuracy_relative_time_axis(
+                        n_samples=len(accuracy_array),
+                        trial_dur_sec=(full_end - full_start).total_seconds(),
+                        start_offset_sec=data_integration.TRIAL_ACCURACY_START_OFFSET_SEC,
+                        endpoint=True,
                     )
+                    if acc_t_rel.size == 0:
+                        continue
+                    accuracy_timestamps = full_start + pd.to_timedelta(acc_t_rel, unit='s')
 
-                    # Aggregate per segment using cutoff-aware windows;
-                    # taps in the transient zone fall outside all windows and are silently excluded
-                    trial_seg_starts = [seg_starts[i] for i in row_indices]
-                    trial_seg_ends = [seg_ends[i] for i in row_indices]
+                    # Aggregate per segment with clipped windows to include partial overlaps.
+                    # This avoids dropping early segments and lets np.nanmean handle missing values.
+                    valid_row_indices = []
+                    trial_seg_starts = []
+                    trial_seg_ends = []
+                    for row_idx in row_indices:
+                        seg_start = seg_starts[row_idx]
+                        seg_end = seg_ends[row_idx]
+
+                        # Skip segments without any overlap with available accuracy timestamps.
+                        if seg_end < acc_start or seg_start > full_end:
+                            continue
+
+                        valid_row_indices.append(row_idx)
+                        trial_seg_starts.append(max(seg_start, acc_start))
+                        trial_seg_ends.append(min(seg_end, full_end))
+
+                    if not valid_row_indices:
+                        continue  # No overlap with available accuracy data in this trial
 
                     accuracy_agg = np.sqrt(  # since logged accuracy is SQUARED error
                         data_analysis.apply_window_operator(
@@ -357,7 +419,7 @@ if __name__ == "__main__":
                             axis=0,
                         ).astype(float))  # shape: (n_trial_segments,)
 
-                    for local_idx, row_idx in enumerate(row_indices):
+                    for local_idx, row_idx in enumerate(valid_row_indices):
                         val = accuracy_agg[local_idx]
                         accuracy_per_segment[row_idx] = float(val) if not pd.isna(val) else float('nan')
 
