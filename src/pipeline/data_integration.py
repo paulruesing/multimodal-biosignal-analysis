@@ -14,6 +14,32 @@ from src.pipeline.data_analysis import make_timezone_aware
 TRIAL_ACCURACY_START_OFFSET_SEC: float = 5.0
 
 
+def build_accuracy_relative_time_axis(
+    n_samples: int,
+    trial_dur_sec: float,
+    start_offset_sec: float = TRIAL_ACCURACY_START_OFFSET_SEC,
+    *,
+    endpoint: bool = False,
+) -> np.ndarray:
+    """Build relative timestamps for trial accuracy samples.
+
+    The returned axis is restricted to the effective accuracy window
+    ``[start_offset_sec, trial_dur_sec]`` relative to trial start.
+    """
+    if n_samples <= 0:
+        return np.array([], dtype=float)
+
+    trial_dur = float(trial_dur_sec)
+    start_offset = float(start_offset_sec)
+    if not np.isfinite(trial_dur) or not np.isfinite(start_offset):
+        raise ValueError("trial_dur_sec and start_offset_sec must be finite numbers.")
+    if trial_dur <= start_offset:
+        return np.array([], dtype=float)
+
+    effective_dur = trial_dur - start_offset
+    return start_offset + np.linspace(0.0, effective_dur, int(n_samples), endpoint=endpoint)
+
+
 ############################## LOG FRAME HANDLING ##############################
 def fetch_experiment_log(subject_data_dir: Path) -> pd.DataFrame:
     """
@@ -104,6 +130,21 @@ def _process_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def prepare_log_frame(log_frame: pd.DataFrame, set_time_index: bool = True) -> pd.DataFrame:
+    """Parse and enrich a raw experiment log with trial-level metadata.
+
+    Parameters
+    ----------
+    log_frame : pd.DataFrame
+        Raw log frame containing at least ``Music``, ``Questionnaire`` and
+        timestamp information.
+    set_time_index : bool, optional
+        If True, parse ``Time`` and set it as DataFrame index before returning.
+
+    Returns
+    -------
+    pd.DataFrame
+        Enriched log frame including derived music/task/trial columns.
+    """
     ############### Derive Values from Status Strings ###############
     def derive_song_category_string(input: str) -> str:
         """ apply to music column"""
@@ -501,7 +542,30 @@ def turn_song_or_silence_id_into_trial_id(log_df: pd.DataFrame,
 
 
 def get_song_start_end(df: pd.DataFrame,
-                       song_id: int | None = None, song_title: str | None = None) -> tuple[pd.Timestamp, pd.Timestamp]:
+                       song_id: int | None = None, song_title: str | None = None,
+                       verbose: bool = False) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Return first and last timestamp for one song sequence.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Enriched log frame with either DatetimeIndex or ``Time`` column.
+    song_id : int | None, optional
+        Song identifier used for lookup.
+    song_title : str | None, optional
+        Song title used for lookup when ``song_id`` is not provided.
+
+    Returns
+    -------
+    tuple[pd.Timestamp, pd.Timestamp]
+        Start and end timestamp of the selected song sequence.
+
+    Raises
+    ------
+    ValueError
+        If neither selector is provided, song is missing/ambiguous, or time
+        information is not available.
+    """
     if song_id is None and song_title is None: raise ValueError("Either song_id or song_title must be specified")
 
     # locate song
@@ -517,7 +581,7 @@ def get_song_start_end(df: pd.DataFrame,
             raise ValueError(f"Song title appeared multiple times with Song IDs: {unique_song_ids.tolist()}\nChoose one and call this method with song_id!")
 
     if (subset_df['Song Skipped']).any():
-        print(f"[INFO] Song {int(song_id)} got skipped, no corresponding task was executed.")
+        if verbose: print(f"[INFO] Song {int(song_id)} got skipped, no corresponding task was executed.")
 
     if len(subset_df) == 0:
         raise ValueError("Specific song not found!")
@@ -537,7 +601,9 @@ def get_task_start_end(df: pd.DataFrame,
                        song_id: int | None = None, song_title: str | None = None,
                        trial_id: int | None = None,
                        silence_id: int | None = None,
-                       cut_off_sec_to_prevent_transients: float = 2.0) -> tuple[pd.Timestamp, pd.Timestamp]:
+                       assumed_latency_sec: float = 3.25,  # how much delay to we assume between log = 'Starting Task' and window = 'Opening'
+                       cut_off_sec_to_prevent_transients: float = 2.0,
+                       verbose: bool = False,) -> tuple[pd.Timestamp, pd.Timestamp]:
     """
     Return start and end timestamps for a single motor task window.
 
@@ -602,9 +668,9 @@ def get_task_start_end(df: pd.DataFrame,
 
         # check for trial exclusion or skipping:
         if (subset_df['Song Skipped']).any():
-            print(f"[INFO] Song {int(song_id)} got skipped, no corresponding task was executed.")
+            if verbose: print(f"[INFO] Song {int(song_id)} got skipped, no corresponding task was executed.")
         if subset_df['Trial Exclusion Bool'].any():
-            print(f"[INFO] Song {int(song_id)} marked for exclusion!")
+            if verbose: print(f"[INFO] Song {int(song_id)} marked for exclusion!")
 
         # reduce to task time (where Task Frequency is not na):
         subset_df = subset_df.loc[~subset_df['Task Frequency'].isna()]
@@ -613,7 +679,7 @@ def get_task_start_end(df: pd.DataFrame,
         subset_df = df.loc[df['Silence ID'] == silence_id]
         # check for trial exclusion:
         if subset_df['Trial Exclusion Bool'].any():
-            print(f"[INFO] Silence trial {int(silence_id)} marked for exclusion!")
+            if verbose: print(f"[INFO] Silence trial {int(silence_id)} marked for exclusion!")
 
 
     # raise value errors for task omission (skipped or excluded)
@@ -633,6 +699,11 @@ def get_task_start_end(df: pd.DataFrame,
 
     start, end = times.min(), times.max()
 
+    # add latency assumption
+    if assumed_latency_sec > 0:
+        start += pd.Timedelta(seconds=assumed_latency_sec)
+        end += pd.Timedelta(seconds=assumed_latency_sec)
+
     if cut_off_sec_to_prevent_transients > 0:
         end = end - pd.Timedelta(seconds=cut_off_sec_to_prevent_transients)
 
@@ -641,6 +712,7 @@ def get_task_start_end(df: pd.DataFrame,
 
 def get_all_task_start_ends(enriched_log_df: pd.DataFrame,
                             output_type: Literal['dict', 'list'] = 'dict',
+                            assumed_latency_sec: float = 3.25,
                             cut_off_sec_to_prevent_transients: float = 2.0,
                             ) -> dict[int, tuple[pd.Timestamp, pd.Timestamp]] | list[tuple[pd.Timestamp, pd.Timestamp]]:
     """
@@ -674,6 +746,7 @@ def get_all_task_start_ends(enriched_log_df: pd.DataFrame,
         if pd.isna(trial): continue
         try:
             start, end = get_task_start_end(enriched_log_df, trial_id=trial,
+                                            assumed_latency_sec=assumed_latency_sec,
                                             cut_off_sec_to_prevent_transients=cut_off_sec_to_prevent_transients)
             start = make_timezone_aware(start)
             end = make_timezone_aware(end)
@@ -880,6 +953,22 @@ def get_qtc_measurement_start_end(df: pd.DataFrame, verbose: bool = True,
 def validate_force_measurements(log_df: pd.DataFrame, serial_df: pd.DataFrame,
                                    freeze_threshold_seconds: float = .2,
                                    ) -> pd.DataFrame:
+    """Check force traces per trial for prolonged constant-value segments.
+
+    Parameters
+    ----------
+    log_df : pd.DataFrame
+        Enriched experiment log used to derive task windows.
+    serial_df : pd.DataFrame
+        Serial measurement frame with force values in ``fsr`` column.
+    freeze_threshold_seconds : float, optional
+        Minimum duration of unchanged values that is flagged as frozen.
+
+    Returns
+    -------
+    pd.DataFrame
+        The original ``serial_df`` (function is validation/reporting only).
+    """
     # ensure DatetimeIndex:
     if not isinstance(log_df.index, pd.DatetimeIndex): log_df = log_df.set_index('Time')
     if not isinstance(serial_df.index, pd.DatetimeIndex): serial_df = serial_df.set_index('Time')
@@ -1304,6 +1393,21 @@ def validate_trial_questionnaires(df: pd.DataFrame,
 
 
 def repair_trial_questionnaire_mismatches(df: pd.DataFrame, questionnaire_validation_report: dict):
+    """Patch mismatching questionnaire-derived fields using validation output.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Enriched log frame to repair.
+    questionnaire_validation_report : dict
+        Report produced by ``validate_trial_questionnaires`` containing
+        ``mismatches`` entries with corrected values.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of ``df`` with corrected trial fields.
+    """
     df = df.copy()
     for mismatch_dict in questionnaire_validation_report['mismatches']:
         # fetch trial type and ID:
@@ -1383,6 +1487,28 @@ def remove_single_row_by_timestamp(log_frame: pd.DataFrame, timestamp: pd.Timest
 def annotate_trial(log_df, comment: str, exclude: bool,
                    song_id: int | None = None, silence_id: int | None = None, trial_id: int | None = None,
                    ):
+    """Attach comment and exclusion flag to one trial.
+
+    Parameters
+    ----------
+    log_df : pd.DataFrame
+        Enriched log frame containing ``Trial ID``.
+    comment : str
+        Annotation text written to ``Trial Comment``.
+    exclude : bool
+        Value written to ``Trial Exclusion Bool``.
+    song_id : int | None, optional
+        Song identifier used to resolve trial when ``trial_id`` is omitted.
+    silence_id : int | None, optional
+        Silence identifier used to resolve trial when ``trial_id`` is omitted.
+    trial_id : int | None, optional
+        Trial identifier to annotate directly.
+
+    Returns
+    -------
+    pd.DataFrame
+        Updated copy of ``log_df``.
+    """
     log_df = log_df.copy()
     if trial_id is None:
         trial_id = turn_song_or_silence_id_into_trial_id(log_df, song_id, silence_id)
@@ -1605,6 +1731,31 @@ def fetch_trial_accuracy(experiment_data_dir: str | Path,
                          error_handling: Literal['raise', 'continue'] = 'continue',
                          verbose: bool = False,
                          ) -> np.ndarray | None:
+    """Load per-sample trial accuracy values from a trial result CSV.
+
+    Parameters
+    ----------
+    experiment_data_dir : str | Path
+        Subject experiment directory containing trial folders.
+    song_id : int | None, optional
+        Song identifier for trial resolution.
+    silence_id : int | None, optional
+        Silence identifier for trial resolution.
+    log_df : pd.DataFrame | None, optional
+        Enriched log frame used when resolving ``trial_id``.
+    trial_id : int | None, optional
+        Trial identifier resolved via ``log_df``.
+    error_handling : {'raise', 'continue'}, optional
+        Whether to raise when file is missing or return ``None``.
+    verbose : bool, optional
+        If True, print non-fatal missing-file messages.
+
+    Returns
+    -------
+    np.ndarray | None
+        Accuracy vector for the trial, or ``None`` if unavailable and
+        ``error_handling='continue'``.
+    """
     trial_dir = fetch_trial_dir(experiment_data_dir, song_id, silence_id, trial_id, log_df)
 
     # try fetching accuracy:
@@ -1653,6 +1804,23 @@ def fetch_song_information(experiment_data_dir: str | Path,
                          song_id: int | None = None,
                          error_handling: Literal['raise', 'continue'] = 'continue',
                          ) -> np.ndarray | None:
+    """Load stored song metadata JSON for one song trial.
+
+    Parameters
+    ----------
+    experiment_data_dir : str | Path
+        Subject experiment directory.
+    song_id : int | None, optional
+        Song identifier used to locate the trial folder.
+    error_handling : {'raise', 'continue'}, optional
+        Error mode when metadata file is missing.
+
+    Returns
+    -------
+    dict | None
+        Parsed song metadata dictionary, or ``None`` when missing and
+        ``error_handling='continue'``.
+    """
     trial_dir = fetch_trial_dir(experiment_data_dir, song_id, silence_id=None, )
 
     # try fetching song info:
@@ -1672,6 +1840,18 @@ def fetch_song_information(experiment_data_dir: str | Path,
 
 
 def fetch_onboarding_questionnaire(experiment_data_dir: str | Path,) -> dict:
+    """Load onboarding (subject data) questionnaire JSON.
+
+    Parameters
+    ----------
+    experiment_data_dir : str | Path
+        Subject experiment directory.
+
+    Returns
+    -------
+    dict
+        Parsed onboarding questionnaire content.
+    """
     onboarding_filepath = filemgmt.most_recent_file(experiment_data_dir, ".json", ["Subject", "Data"])
 
     with open(onboarding_filepath, "r") as f:
@@ -1681,6 +1861,18 @@ def fetch_onboarding_questionnaire(experiment_data_dir: str | Path,) -> dict:
 
 
 def fetch_offboarding_questionnaire(experiment_data_dir: str | Path,) -> dict:
+    """Load offboarding (post-study feedback) questionnaire JSON.
+
+    Parameters
+    ----------
+    experiment_data_dir : str | Path
+        Subject experiment directory.
+
+    Returns
+    -------
+    dict
+        Parsed offboarding questionnaire content.
+    """
     offboarding_filepath = filemgmt.most_recent_file(experiment_data_dir, ".json", ["Post-Study Feedback Data"])
 
     with open(offboarding_filepath, "r") as f:
@@ -1690,6 +1882,18 @@ def fetch_offboarding_questionnaire(experiment_data_dir: str | Path,) -> dict:
 
 
 def fetch_excluded_trials(enriched_log_df: pd.DataFrame) -> list[int]:
+    """Collect trial IDs marked for exclusion in an enriched log frame.
+
+    Parameters
+    ----------
+    enriched_log_df : pd.DataFrame
+        Enriched log frame containing ``Trial ID`` and ``Trial Exclusion Bool``.
+
+    Returns
+    -------
+    list[int]
+        Trial IDs with at least one exclusion marker.
+    """
     excluded_trials: list[int] = []
     if enriched_log_df['Trial Exclusion Bool'].any():
         for trial_id in range(int(enriched_log_df['Trial ID'].max()) + 1):
@@ -1700,6 +1904,18 @@ def fetch_excluded_trials(enriched_log_df: pd.DataFrame) -> list[int]:
 
 
 def fetch_skipped_trials(enriched_log_df: pd.DataFrame) -> list[int]:
+    """Collect trial IDs flagged as skipped in an enriched log frame.
+
+    Parameters
+    ----------
+    enriched_log_df : pd.DataFrame
+        Enriched log frame containing ``Trial ID`` and ``Song Skipped``.
+
+    Returns
+    -------
+    list[int]
+        Trial IDs where skip flag is present.
+    """
     skipped_trials: list[int] = []
     if enriched_log_df['Song Skipped'].any():
         for trial_id in range(int(enriched_log_df['Trial ID'].max()) + 1):
@@ -1875,6 +2091,33 @@ def fetch_music_features(log_df: pd.DataFrame, music_lookup_table_path: str | Pa
                                                           'Spectral Centroid Mean', 'IOI Variance Coeff',
                                                            'Syncopation Ratio'),
                          ) -> list[float]:
+    """Fetch song-level music features for a trial from a lookup table.
+
+    Parameters
+    ----------
+    log_df : pd.DataFrame
+        Enriched log frame used to resolve song metadata.
+    music_lookup_table_path : str | Path | None, optional
+        Path to lookup CSV. If None, latest table in
+        ``data/song_characteristics`` is used.
+    song_id : int | None, optional
+        Song identifier to resolve feature row.
+    trial_id : int | None, optional
+        Trial identifier used to derive ``song_id`` when omitted.
+    features_to_return : tuple[str, ...], optional
+        Column names to read from lookup table.
+
+    Returns
+    -------
+    list[float]
+        Requested feature values in input order. For silence trials, returns
+        ``np.nan`` values matching requested length.
+
+    Raises
+    ------
+    ValueError
+        If song/trial resolution fails or lookup row is missing/ambiguous.
+    """
     if music_lookup_table_path is None:  # use hardcoded definition if not provided
         music_lookup_dir = Path().resolve().parent / "data" / "song_characteristics"
         music_lookup_table_path = filemgmt.most_recent_file(music_lookup_dir, ".csv", ["Lookup Table"])
