@@ -15,7 +15,8 @@ from scipy import signal
 import src.pipeline.signal_features as features
 import src.pipeline.data_surrogation as surrogation
 import src.pipeline.visualizations as visualizations
-from src.pipeline.visualizations import plot_freq_domain, EEG_CHANNELS, EEG_CHANNEL_IND_DICT
+from src.pipeline.visualizations import plot_freq_domain
+from src.pipeline.channel_layout import EEG_CHANNELS, EEG_CHANNEL_IND_DICT
 import src.utils.file_management as filemgmt
 
 # constant parameters:
