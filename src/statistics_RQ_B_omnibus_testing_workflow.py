@@ -10,7 +10,7 @@ import src.utils.file_management as filemgmt
 
 # ============================================================================
 # FEATURE COLUMN LISTS
-# Mirror columns produced by statistics_data_preparation.py
+# Mirror columns produced by statistics_data_preparation_workflow.py
 # ============================================================================
 
 _CMC_COLS: list[str] = [
@@ -115,7 +115,7 @@ if __name__ == '__main__':
     # operate on subset of subjects?
     exclude_subjects: list[int] = []
 
-    # Accuracy column name as written by statistics_data_preparation.py
+    # Accuracy column name as written by statistics_data_preparation_workflow.py
     ACCURACY_COL: str = 'RMS_Accuracy'
 
     # Neural predictor configuration
