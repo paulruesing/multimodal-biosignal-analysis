@@ -17,7 +17,7 @@ from src.pipeline.data_analysis import make_timezone_aware
 from src.pipeline.data_integration import fetch_enriched_log_frame
 
 from src.pipeline.preprocessing import BiosignalPreprocessor
-from src.pipeline.visualizations import EEG_CHANNEL_IND_DICT, EEG_CHANNELS_BY_AREA
+from src.pipeline.channel_layout import EEG_CHANNEL_IND_DICT, EEG_CHANNELS_BY_AREA
 
 
 if __name__=="__main__":
