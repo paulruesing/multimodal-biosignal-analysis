@@ -16,11 +16,9 @@ import src.pipeline.signal_features as features
 import src.pipeline.data_surrogation as surrogation
 import src.pipeline.visualizations as visualizations
 from src.pipeline.visualizations import plot_freq_domain
-from src.pipeline.channel_layout import EEG_CHANNELS, EEG_CHANNEL_IND_DICT
+from src.pipeline.channel_layout import EEG_CHANNELS, EEG_CHANNEL_IND_DICT, EMG_CHANNELS
 import src.utils.file_management as filemgmt
 
-# constant parameters:
-EMG_CHANNELS = [f"EMG{i:02d}" for i in range(64)]
 
 class BiosignalPreprocessor:
     """
