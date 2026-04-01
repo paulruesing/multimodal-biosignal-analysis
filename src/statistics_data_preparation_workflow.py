@@ -1,6 +1,7 @@
 from pathlib import Path
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
 import src.pipeline.signal_features as features
 import src.pipeline.data_integration as data_integration
 import src.pipeline.data_analysis as data_analysis
@@ -22,7 +23,7 @@ if __name__ == "__main__":
     # statistical frame parameters:
     current_subject_count: int = 12
     overwrite: bool = True  # True: ALWAYS compute new frame
-    n_within_trial_segments_list: list[int] = [1, 2, 3, 4, 5, 8, 10, 20]  # of ~40sec trials
+    n_within_trial_segments_list: list[int] = [1, 2, 5, 10]  # of ~40sec trials
 
     # Onset transient exclusion: discard this many seconds from the start of
     # each trial AFTER the latency correction already applied by
@@ -31,10 +32,10 @@ if __name__ == "__main__":
     # only the segment boundaries shift forward.  Set to 0.0 for the original
     # behaviour.  Accuracy's own 5.5 s warm-up offset is independent and
     # remains in effect regardless of this parameter.
-    n_onset_seconds_to_discard: float = 5.5
+    n_onset_seconds_to_discard: float = 6.5
 
     # Print per-trial timing breakdown for every subject
-    verbose_trial_timing: bool = True
+    verbose_trial_timing: bool = False
 
     # Keep these explicit to make verbose timing diagnostics transparent.
     # Values need to match get_task_start_end / get_all_task_start_ends defaults in src/pipeline/data_integration.py
@@ -48,7 +49,7 @@ if __name__ == "__main__":
 
 
     ######## ITERATE OVER TIME-RESOLUTIONS #########
-    for n_within_trial_segments in n_within_trial_segments_list:
+    for n_within_trial_segments in tqdm(n_within_trial_segments_list, desc='Time-Resolution Outer Loop'):
 
         ### TRY FETCHING EXISTING FRAME
         recompute = False
@@ -122,7 +123,7 @@ if __name__ == "__main__":
             ### DATA AGGREGATION PARAMETERS
             # how many segments:
             print(
-                f"Will split 45sec trial into {n_within_trial_segments} segments (each ~{40 / n_within_trial_segments:.1f}sec)")
+                f"Will split trials into {n_within_trial_segments} segments (each ~{(45 - task_end_transient_cutoff_sec - n_onset_seconds_to_discard) / n_within_trial_segments:.1f}sec)")
             # below two are transformed via key-word (modality) search in columns:
             modalities_to_standardize_per_subject: list[str] = []  # ['PSD', 'Force']  # will change that columns
             modalities_to_center_over_subjects: list[str] = [
@@ -138,12 +139,12 @@ if __name__ == "__main__":
 
             ########### ITERATE OVER ALL PARTICIPANTS ###########
             all_subject_data_frame = pd.DataFrame(columns=['Subject ID'])
-            for subject_ind in range(current_subject_count):
+            for subject_ind in tqdm(range(current_subject_count), desc='Subject Inner Loop'):
 
                 print("\n")
-                print("-" * 100)
-                print(f"------------     Aggregating data for subject\t\t{subject_ind:02}     ------------- ")
-                print("-" * 100)
+                # print("-" * 100)
+                # print(f"------------     Aggregating data for subject\t\t{subject_ind:02}     ------------- ")
+                # print("-" * 100)
 
                 # dependent directories:
                 subject_psd_save_dir = FEATURE_OUTPUT_DATA / f"subject_{subject_ind:02}"
@@ -151,7 +152,7 @@ if __name__ == "__main__":
                 subject_experiment_data_dir = EXPERIMENT_DATA / f"subject_{subject_ind:02}"
 
                 ### IMPORT LOG AND SERIAL DATAFRAMES
-                log_df = data_integration.fetch_enriched_log_frame(subject_experiment_data_dir)
+                log_df = data_integration.fetch_enriched_log_frame(subject_experiment_data_dir, verbose=False)
                 serial_df = data_integration.fetch_enriched_serial_frame(subject_experiment_data_dir)
                 # make time-zone aware:
                 log_df.index = data_analysis.make_timezone_aware(log_df.index)
@@ -290,89 +291,49 @@ if __name__ == "__main__":
 
                     # save to dataframe:
                     single_subject_data_frame[f"PSD_{modality}_{region_label}_{band}"] = psd_per_segment
+                ### END PSD LOOP
 
-                    ### IMPORT AND AGGREGATE CMC DATA PER HYPOTHESIS (muscle_operator_band_cmc_list)
-                    # loop over configurations:
-                    for muscle, operator, band in muscle_operator_band_cmc_list:
-                        # import CMC:
-                        cmc_spectrograms, cmc_times, cmc_freqs = features.fetch_stored_spectrograms(
-                            subject_cmc_save_dir, modality='CMC', file_identifier=muscle)
-                        #   -> shape: (n_windows, n_freqs, n_channels), (n_windows), (n_freqs)
-                        if len(cmc_times) != cmc_spectrograms.shape[0]:
-                            raise ValueError(
-                                f"CMC time-center length mismatch for subject {subject_ind:02}, {muscle}: "
-                                f"len(cmc_times)={len(cmc_times)} vs n_windows={cmc_spectrograms.shape[0]}"
-                            )
+                ### IMPORT AND AGGREGATE CMC DATA PER HYPOTHESIS (muscle_operator_band_cmc_list)
+                for muscle, operator, band in muscle_operator_band_cmc_list:
+                    # import CMC:
+                    cmc_spectrograms, cmc_times, cmc_freqs = features.fetch_stored_spectrograms(
+                        subject_cmc_save_dir, modality='CMC', file_identifier=muscle)
+                    #   -> shape: (n_windows, n_freqs, n_channels), (n_windows), (n_freqs)
 
-                        # Reconstruct CMC timestamps via uniform stretching across the
-                        # measured QTC span (mirrors PSD handling and avoids cumulative
-                        # drift when stored time-centers were generated from nominal fs).
-                        cmc_timestamps = data_analysis.add_time_index(
-                            start_timestamp=qtc_start + pd.Timedelta(seconds=cmc_time_window_size_sec / 2),
-                            end_timestamp=qtc_end - pd.Timedelta(seconds=cmc_time_window_size_sec / 2),
-                            n_timesteps=len(cmc_times)
-                        )
-                        cmc_timestamps = data_analysis.make_timezone_aware(cmc_timestamps)
+                    # Reconstruct timestamps uniformly across QTC span — identical
+                    # to PSD handling; stored cmc_times are nominal and not used directly.
+                    cmc_timestamps = data_analysis.add_time_index(
+                        start_timestamp=qtc_start + pd.Timedelta(seconds=cmc_time_window_size_sec / 2),
+                        end_timestamp=qtc_end - pd.Timedelta(seconds=cmc_time_window_size_sec / 2),
+                        n_timesteps=len(cmc_times)
+                    )
+                    cmc_timestamps = data_analysis.make_timezone_aware(cmc_timestamps)
 
-                        # PHASE-4 PROBE: disabled (requires CMC recomputation to see fixed deltas)
-                        # The stored CMC data was computed before the slot-boundary fix.
-                        # To validate the fix, recompute CMC with the updated _prepare_taskwise_cmc_context logic.
+                    # takes shape (n_windows, n_freqs, n_channels)
+                    cmc_aggregated = features.aggregate_psd_spectrogram(
+                        cmc_spectrograms, cmc_freqs,
+                        normalize_mvc=False,
+                        is_log_scaled=False,
+                        freq_slice=band,
+                        aggregation_ops=[
+                            ('max', 1),  # max within freq band
+                            (operator, 1),  # mean or max over channels
+                        ],
+                    )
+                    # returns shape (n_windows,)
 
-                        # takes shapes (n_windows, n_freqs, n_channels)
-                        cmc_aggregated = features.aggregate_psd_spectrogram(cmc_spectrograms, cmc_freqs,
-                                                                            normalize_mvc=False,
-                                                                            is_log_scaled=False, freq_slice=band,
-                                                                            aggregation_ops=[('max', 1),
-                                                                                             # mean within freq band
-                                                                                             # either take peak or average over channels
-                                                                                             (operator, 1),
-                                                                                             ]
-                                                                            )
-                        # returns shape (n_windows, )
+                    # split per segment:
+                    cmc_per_segment = data_analysis.apply_window_operator(
+                        window_timestamps=seg_starts,
+                        window_timestamps_ends=seg_ends,
+                        target_array=cmc_aggregated,
+                        target_timestamps=cmc_timestamps,
+                        operation='mean',
+                        axis=0,
+                    )  # (n_segments,)
 
-                        # split per segment using only valid task-wise centers (NaN/NaT slots are intentionally skipped)
-                        # Convert to pd.Series with datetime index: NaT slots are auto-skipped by apply_window_operator.
-                        cmc_series = pd.Series(cmc_aggregated, index=cmc_timestamps)
-
-                        # CMC data is task-wise: only covers trial windows, not full measurement span.
-                        # Filter segments to those with overlap to available CMC data.
-                        cmc_valid_mask = ~cmc_timestamps.isna()
-                        if np.any(cmc_valid_mask):
-                            cmc_data_start = cmc_timestamps[cmc_valid_mask].min()
-                            cmc_data_end = cmc_timestamps[cmc_valid_mask].max()
-                            
-                            # Extract segments with overlap to CMC data span
-                            seg_cmc_starts = []
-                            seg_cmc_ends = []
-                            seg_cmc_indices = []
-                            for seg_idx, (seg_start, seg_end) in enumerate(zip(seg_starts, seg_ends)):
-                                # Check overlap: [seg_start, seg_end] ∩ [cmc_data_start, cmc_data_end]
-                                if seg_end > cmc_data_start and seg_start < cmc_data_end:
-                                    seg_cmc_starts.append(seg_start)
-                                    seg_cmc_ends.append(seg_end)
-                                    seg_cmc_indices.append(seg_idx)
-                            
-                            # Aggregate only overlapping segments
-                            if seg_cmc_indices:
-                                cmc_overlap = data_analysis.apply_window_operator(
-                                    window_timestamps=seg_cmc_starts,
-                                    window_timestamps_ends=seg_cmc_ends,
-                                    target_array=cmc_series,
-                                    target_timestamps=None,
-                                    operation='mean',
-                                    axis=0,
-                                )
-                                # Fill all segments; overlapping ones get aggregated values, others stay NaN
-                                cmc_per_segment = np.full(len(seg_starts), np.nan)
-                                for local_idx, seg_idx in enumerate(seg_cmc_indices):
-                                    cmc_per_segment[seg_idx] = cmc_overlap[local_idx]
-                            else:
-                                cmc_per_segment = np.full(len(seg_starts), np.nan)
-                        else:
-                            cmc_per_segment = np.full(len(seg_starts), np.nan)
-
-                        # save to dataframe:
-                        single_subject_data_frame[f"CMC_{muscle}_{operator}_{band}"] = cmc_per_segment
+                    single_subject_data_frame[f"CMC_{muscle}_{operator}_{band}"] = cmc_per_segment
+                # END CMC loop
 
                 ### SUBJECT-LEVEL VARIABLE AGGREGATION
                 subject_level_data_dict = data_integration.fetch_personal_data(subject_experiment_data_dir)
@@ -451,7 +412,8 @@ if __name__ == "__main__":
                     # log_df.index is already timezone-aware at this point in the pipeline
                     try:
                         full_start, full_end = data_integration.get_task_start_end(
-                            log_df, trial_id=trial_id, cut_off_sec_to_prevent_transients=0.0
+                            log_df, trial_id=trial_id, cut_off_sec_to_prevent_transients=0.0,
+                            assumed_latency_sec=task_latency_assumption_sec,  # assign explicitly to prevent mismatches
                         )
                     except ValueError: continue
 
