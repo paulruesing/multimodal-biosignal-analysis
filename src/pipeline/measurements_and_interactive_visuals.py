@@ -254,7 +254,8 @@ def sampling_process(shared_dict,
     record_bool : bool, optional
         Whether to record the processed values with timestamps (default is True).
     sampling_rate_hz : int, optional
-        Desired sampling frequency in Hz (default is 1000).
+        Desired sampling frequency in Hz (default is 1000). IS NOT UTILISED -> python overhead automatically constrains
+        it to 360 Hz anyways.
     save_recordings_path : str or Path, optional
         Directory path where data recordings will be saved (default is None).
     store_every_n_measurements : int, optional
