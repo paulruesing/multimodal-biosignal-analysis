@@ -45,14 +45,14 @@ if __name__=="__main__":
 
         # PSD computation:
         do_compute_psd: bool = False
-        fetch_precomputed_psd: bool = False
+        fetch_precomputed_psd: bool = True
         psd_window_size_sec: float = .25  # -> 4 Hz resolution
         save_psd: bool = True
         plot_psd_results: bool = True  # False for workflow behavior
 
 
         # CMC computation:
-        do_compute_cmc: bool = True
+        do_compute_cmc: bool = False
         only_extensor: bool = False
         fetch_precomputed_cmc: bool = False
         cmc_eeg_channel_subset = [  # will be mirrored for left-handed subject
@@ -72,7 +72,7 @@ if __name__=="__main__":
 
 
         # Compute Heart Rate (HR), HR Variability and Task-wise Scaled Force -> aka. "Enriched Serial Frame"
-        compute_enriched_serial_frame: bool = True
+        compute_enriched_serial_frame: bool = False
         heart_refractory_period: str = '300ms'
         min_bpm: float = 30.0
         max_bpm: float = 200.0
