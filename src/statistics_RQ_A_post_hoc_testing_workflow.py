@@ -47,7 +47,7 @@ if __name__ == "__main__":
 
     # workflow control:
     analyse_cbp: bool = False
-    analyse_cmc_accuracy_phase_plot: bool = False
+    analyse_cmc_accuracy_phase_plot: bool = True
     analyse_emg_psd_phase_plot: bool = True
 
     analyse_subject_heterogeneity: bool = False
