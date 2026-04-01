@@ -47,10 +47,10 @@ if __name__ == "__main__":
 
     # workflow control:
     analyse_cbp: bool = False
-    analyse_cmc_accuracy_phase_plot: bool = True
-    analyse_emg_psd_phase_plot: bool = True
+    analyse_cmc_accuracy_phase_plot: bool = False
+    analyse_emg_psd_phase_plot: bool = False
 
-    analyse_subject_heterogeneity: bool = False
+    analyse_subject_heterogeneity: bool = True
     dep_vars_to_analyse: list[str] = [
         "CMC_Flexor_mean_beta", "CMC_Extensor_mean_beta",
         "CMC_Flexor_mean_gamma", "CMC_Extensor_mean_gamma",
@@ -78,7 +78,7 @@ if __name__ == "__main__":
     cmc_accuracy_plot_cfg = CBPAConfig(
         modality="CMC",
         modality_file_id="Flexor",
-        freq_band="gamma",
+        freq_band="beta",
         channels=None,
         use_phase_normalization=True,
         n_phase_bins=36,  # -> 10º buckets
@@ -125,11 +125,12 @@ if __name__ == "__main__":
 
         ### DEFINE CONTRASTS TO SCRUTINISE
         # Only run CBPA for effects already established by LME.
-        # Add / remove / comment out entries here.
+        # n_within_trial_segs=1 entries mirror 1-seg LME findings;
+        # n_within_trial_segs=5 entries are added for 5-seg-primary effects (resolution-specific).
 
         CONTRASTS: list[CBPAConfig] = [
 
-
+            ######### n_within_trial_segs = 1 — all original contrasts unchanged #########
 
             # ── H1: CMC Extensor beta, Classic vs Silence ─────────────────────────
             CBPAConfig(
@@ -146,7 +147,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_beta_Classic_vs_Silence",
             ),
 
@@ -165,7 +166,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_beta_Happy_vs_Classic",
             ),
 
@@ -184,12 +185,12 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_beta_Groovy_vs_Classic",
             ),
 
             #### HAPPY VS SILENCE
-            # ── H1: CMC Flexor beta, Happy vs Silence ────────────────────────────
+            # ── H1: CMC Flexor beta, Happy vs Silence ─────────────────────────────
             CBPAConfig(
                 modality="CMC",
                 modality_file_id="Flexor",
@@ -204,11 +205,11 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H1_CMC_Flexor_beta_Happy_vs_Silence",
             ),
 
-            # ── H1: CMC Extensor beta, Happy vs Silence ────────────────────────────
+            # ── H1: CMC Extensor beta, Happy vs Silence ───────────────────────────
             CBPAConfig(
                 modality="CMC",
                 modality_file_id="Extensor",
@@ -223,10 +224,9 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_beta_Happy_vs_Silence",
             ),
-
 
             # ── H1: CMC Extensor gamma, Happy vs Silence ──────────────────────────
             CBPAConfig(
@@ -243,7 +243,7 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_gamma_Happy_vs_Silence",
             ),
 
@@ -262,11 +262,11 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H1_CMC_Flexor_gamma_Happy_vs_Silence",
             ),
 
-            #### Groovy VS SILENCE
+            #### GROOVY VS SILENCE
             # ── H1: CMC Flexor beta, Groovy vs Silence ────────────────────────────
             CBPAConfig(
                 modality="CMC",
@@ -282,11 +282,11 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H1_CMC_Flexor_beta_Groovy_vs_Silence",
             ),
 
-            # ── H1: CMC Extensor beta, Groovy vs Silence ────────────────────────────
+            # ── H1: CMC Extensor beta, Groovy vs Silence ──────────────────────────
             CBPAConfig(
                 modality="CMC",
                 modality_file_id="Extensor",
@@ -301,11 +301,11 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_beta_Groovy_vs_Silence",
             ),
 
-            # ── H1: CMC Extensor gamma, Groovy vs Silence ──────────────────────────
+            # ── H1: CMC Extensor gamma, Groovy vs Silence ─────────────────────────
             CBPAConfig(
                 modality="CMC",
                 modality_file_id="Extensor",
@@ -320,11 +320,11 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H1_CMC_Extensor_gamma_Groovy_vs_Silence",
             ),
 
-            # ── H1: CMC Flexor gamma, Groovy vs Silence ────────────────────────────
+            # ── H1: CMC Flexor gamma, Groovy vs Silence ───────────────────────────
             CBPAConfig(
                 modality="CMC",
                 modality_file_id="Flexor",
@@ -339,11 +339,11 @@ if __name__ == "__main__":
                 use_spatio_temporal=True,
                 use_phase_normalization=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H1_CMC_Flexor_gamma_Groovy_vs_Silence",
             ),
 
-            # ── H2: Fronto-central–centro-parietal–temporal theta, Happy vs Silence
+            # ── H2: FC–CP–T theta, Happy vs Silence ───────────────────────────────
             # Covers PSD_eeg_FC_CP_T_theta (Level 1 Happy effect)
             CBPAConfig(
                 modality="PSD",
@@ -363,8 +363,31 @@ if __name__ == "__main__":
                 n_permutations=1000,
                 use_spatio_temporal=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H2_theta_FC_CP_T_Happy_vs_Silence",
+            ),
+
+            # ── H3: Frontal–Central beta, Happy vs Silence ────────────────────────
+            # Covers PSD_eeg_F_C_beta (Level 1 Happy effect, d=0.44) — newly significant at 5-seg.
+            # Added at n=1 to test whether effect is spatially localisable even without temporal resolution.
+            CBPAConfig(
+                modality="PSD",
+                modality_file_id="eeg",
+                freq_band="beta",
+                channels=(
+                        EEG_CHANNELS_BY_AREA["Frontal"]
+                        + EEG_CHANNELS_BY_AREA["Central"]
+                ),
+                condition_column="Category or Silence",
+                condition_A="Happy",
+                condition_B="Silence",
+                n_within_trial_segs=1,
+                tail=0,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H3_beta_FC_Happy_vs_Silence",
             ),
 
             # ── H5: Global gamma, Happy vs Silence ────────────────────────────────
@@ -382,8 +405,226 @@ if __name__ == "__main__":
                 n_permutations=1000,
                 use_spatio_temporal=True,
                 data_root=ROOT,
-                output_dir=OUTPUT, exclude_subjects = exclude_subjects,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
                 hypothesis_label="H5_gamma_Global_Happy_vs_Silence",
+            ),
+
+            ######### n_within_trial_segs = 5 — 5-seg primary resolution contrasts #########
+            # Added for effects that are resolution-specific (significant at 5-seg, not at 1-seg).
+            # Mirrors the n_segments=5 logic in power_configs.
+
+            #### HAPPY VS SILENCE — 5-seg
+            # ── H1: CMC Extensor beta, Happy vs Silence (5-seg) ───────────────────
+            # Motivated by: Extensor_mean_beta (d=0.23, resolution-specific) and
+            # Extensor_max_beta (d=0.24) — both newly significant at 5-seg primary.
+            CBPAConfig(
+                modality="CMC",
+                modality_file_id="Extensor",
+                freq_band="beta",
+                channels=None,
+                condition_column="Category or Silence",
+                condition_A="Happy",
+                condition_B="Silence",
+                n_within_trial_segs=5,
+                tail=1,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                use_phase_normalization=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H1_CMC_Extensor_beta_Happy_vs_Silence_5seg",
+            ),
+
+            # ── H1: CMC Extensor gamma, Happy vs Silence (5-seg) ──────────────────
+            # Motivated by: Extensor_max_gamma (d=0.26, resolution-specific, 0 sig at 1-seg).
+            CBPAConfig(
+                modality="CMC",
+                modality_file_id="Extensor",
+                freq_band="gamma",
+                channels=None,
+                condition_column="Category or Silence",
+                condition_A="Happy",
+                condition_B="Silence",
+                n_within_trial_segs=5,
+                tail=1,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                use_phase_normalization=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H1_CMC_Extensor_gamma_Happy_vs_Silence_5seg",
+            ),
+
+            # ── H1: CMC Flexor beta, Happy vs Silence (5-seg) ─────────────────────
+            # Motivated by: Flexor_mean_beta (d=0.55 medium, resolution-specific,
+            # was not sig at 1-seg). Strongest new CMC effect in the 5-seg report.
+            CBPAConfig(
+                modality="CMC",
+                modality_file_id="Flexor",
+                freq_band="beta",
+                channels=None,
+                condition_column="Category or Silence",
+                condition_A="Happy",
+                condition_B="Silence",
+                n_within_trial_segs=5,
+                tail=1,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                use_phase_normalization=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H1_CMC_Flexor_beta_Happy_vs_Silence_5seg",
+            ),
+
+            # ── H1: CMC Flexor gamma, Happy vs Silence (5-seg) ────────────────────
+            # Motivated by: Flexor_max_gamma (d=0.50, resolution-specific, was 0 sig at 1-seg)
+            # and Flexor_mean_gamma Happy (d=0.48, resolution-specific).
+            CBPAConfig(
+                modality="CMC",
+                modality_file_id="Flexor",
+                freq_band="gamma",
+                channels=None,
+                condition_column="Category or Silence",
+                condition_A="Happy",
+                condition_B="Silence",
+                n_within_trial_segs=5,
+                tail=1,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                use_phase_normalization=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H1_CMC_Flexor_gamma_Happy_vs_Silence_5seg",
+            ),
+
+            #### GROOVY VS SILENCE — 5-seg
+            # ── H1: CMC Flexor beta, Groovy vs Silence (5-seg) ────────────────────
+            # Motivated by: Flexor_mean_beta Groovy (d=0.32, resolution-specific, not sig at 1-seg).
+            CBPAConfig(
+                modality="CMC",
+                modality_file_id="Flexor",
+                freq_band="beta",
+                channels=None,
+                condition_column="Category or Silence",
+                condition_A="Groovy",
+                condition_B="Silence",
+                n_within_trial_segs=5,
+                tail=1,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                use_phase_normalization=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H1_CMC_Flexor_beta_Groovy_vs_Silence_5seg",
+            ),
+
+            # ── H1: CMC Flexor gamma, Groovy vs Silence (5-seg) ───────────────────
+            # Motivated by: Flexor_mean_gamma Groovy (d=0.29, resolution-specific, not sig at 1-seg).
+            # NOTE: No Extensor gamma Groovy added — Groovy not a main effect for any Extensor DV at 5-seg.
+            CBPAConfig(
+                modality="CMC",
+                modality_file_id="Flexor",
+                freq_band="gamma",
+                channels=None,
+                condition_column="Category or Silence",
+                condition_A="Groovy",
+                condition_B="Silence",
+                n_within_trial_segs=5,
+                tail=1,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                use_phase_normalization=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H1_CMC_Flexor_gamma_Groovy_vs_Silence_5seg",
+            ),
+
+            #### CLASSIC VS SILENCE — 5-seg
+            # ── H1: CMC Extensor beta, Classic vs Silence (5-seg) ─────────────────
+            # Motivated by: Extensor_max_beta Classic main effect (d=-0.21, resolution-specific).
+            # NOTE: No Flexor beta Classic added — Classic is not a main effect for any Flexor DV at 5-seg.
+            CBPAConfig(
+                modality="CMC",
+                modality_file_id="Extensor",
+                freq_band="beta",
+                channels=None,
+                condition_column="Category or Silence",
+                condition_A="Classic",
+                condition_B="Silence",
+                n_within_trial_segs=5,
+                tail=1,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                use_phase_normalization=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H1_CMC_Extensor_beta_Classic_vs_Silence_5seg",
+            ),
+
+            #### EEG PSD — 5-seg
+            # ── H2: FC–CP–T theta, Happy vs Silence (5-seg) ───────────────────────
+            # Resolution-specific: sig at 5-seg (d=0.40) and 10-seg, not at 1-seg.
+            CBPAConfig(
+                modality="PSD",
+                modality_file_id="eeg",
+                freq_band="theta",
+                channels=(
+                        EEG_CHANNELS_BY_AREA["Frontal"]
+                        + EEG_CHANNELS_BY_AREA["Central"]
+                        + EEG_CHANNELS_BY_AREA["Centro-Parietal"]
+                        + EEG_CHANNELS_BY_AREA["Temporal"]
+                ),
+                condition_column="Category or Silence",
+                condition_A="Happy",
+                condition_B="Silence",
+                n_within_trial_segs=5,
+                tail=0,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H2_theta_FC_CP_T_Happy_vs_Silence_5seg",
+            ),
+
+            # ── H3: Frontal–Central beta, Happy vs Silence (5-seg) ────────────────
+            # Resolution-specific: sig at 5-seg (d=0.44) and 10-seg, not at 1-seg.
+            CBPAConfig(
+                modality="PSD",
+                modality_file_id="eeg",
+                freq_band="beta",
+                channels=(
+                        EEG_CHANNELS_BY_AREA["Frontal"]
+                        + EEG_CHANNELS_BY_AREA["Central"]
+                ),
+                condition_column="Category or Silence",
+                condition_A="Happy",
+                condition_B="Silence",
+                n_within_trial_segs=5,
+                tail=0,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H3_beta_FC_Happy_vs_Silence_5seg",
+            ),
+
+            # ── H5: Global gamma, Happy vs Silence (5-seg) ────────────────────────
+            # Resolution-specific: sig at 5-seg (d=0.39) and 10-seg, not at 1-seg.
+            CBPAConfig(
+                modality="PSD",
+                modality_file_id="eeg",
+                freq_band="gamma",
+                channels=EEG_CHANNELS,
+                condition_column="Category or Silence",
+                condition_A="Happy",
+                condition_B="Silence",
+                n_within_trial_segs=5,
+                tail=0,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H5_gamma_Global_Happy_vs_Silence_5seg",
             ),
         ]
 
@@ -391,6 +632,7 @@ if __name__ == "__main__":
         # cumulative timestamp drift from nominal-fs-derived stored time-centers.
         for contrast_cfg in CONTRASTS:
             contrast_cfg.use_stretched_window_timestamps = True
+            contrast_cfg.phase_start_offset_sec = None  # excludes first cycle automatically
 
 
 
