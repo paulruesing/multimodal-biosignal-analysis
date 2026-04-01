@@ -155,7 +155,7 @@ class CBPAConfig:
     to be included in the contrast."""
 
     # Optional target-sine subplot (below each main panel)
-    show_target_sine: bool = True
+    show_target_sine: bool | None = None
     target_sine_min_pct_mvc: float = 7.5
     target_sine_max_pct_mvc: float = 22.5
     target_sine_frequency_hz: float = 0.1
@@ -637,6 +637,7 @@ def _band_power_per_phase(
     trial_spans: dict[int, tuple],
     trial_cond_map: dict[int, str],
     log_df: pd.DataFrame,
+        min_cycle_coverage_ratio: float = 0.8,
 ) -> dict[str, list[np.ndarray]]:
     phase_grid = np.linspace(0, 360, cfg.n_phase_bins, endpoint=False)
     cycles_by_condition: dict[str, list[np.ndarray]] = {}
@@ -695,6 +696,7 @@ def _band_power_per_phase(
             trial_dur_sec=trial_dur_sec,
             phase_grid=phase_grid,
             min_samples_per_cycle=cfg.min_samples_per_cycle,
+            min_cycle_coverage_ratio=min_cycle_coverage_ratio,
             start_offset_sec=phase_offset,
             show_debug_cycle_wise_plots=False,
             show_debug_trial_wise_plots=False,
@@ -702,7 +704,7 @@ def _band_power_per_phase(
         for cycle_profile in cycles:
             cycles_by_condition.setdefault(condition, []).append(cycle_profile)
 
-    return cycles_by_condition  # ← was missing in version 1
+    return cycles_by_condition
 
 
 
@@ -834,6 +836,7 @@ def build_contrast_array(
             cycles_by_cond = _band_power_per_phase(
                 cfg, band_power, timestamps,
                 trial_spans_int, trial_cond_map, log_df,
+                min_cycle_coverage_ratio=.8,
             )
 
             cycles_A = cycles_by_cond.get(cfg.condition_A, [])
