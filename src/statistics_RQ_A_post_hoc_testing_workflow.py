@@ -47,7 +47,7 @@ if __name__ == "__main__":
 
     # workflow control:
     analyse_cbp: bool = False
-    analyse_cmc_accuracy_phase_plot: bool = True
+    analyse_cmc_accuracy_phase_plot: bool = False
     analyse_emg_psd_phase_plot: bool = True
 
     analyse_subject_heterogeneity: bool = False
@@ -78,10 +78,10 @@ if __name__ == "__main__":
     cmc_accuracy_plot_cfg = CBPAConfig(
         modality="CMC",
         modality_file_id="Flexor",
-        freq_band="beta",
+        freq_band="gamma",
         channels=None,
         use_phase_normalization=True,
-        n_phase_bins=180,  # -> 10º buckets
+        n_phase_bins=36,  # -> 10º buckets
         min_samples_per_cycle=2,
         overlap_ratio=0.5,
         data_root=ROOT,

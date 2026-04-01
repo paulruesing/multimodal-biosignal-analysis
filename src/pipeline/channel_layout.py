@@ -32,3 +32,4 @@ EEG_CHANNELS_BY_AREA = {
 }
 EEG_CHANNEL_IND_DICT = {ch: ind for ind, ch in enumerate(EEG_CHANNELS)}
 
+EMG_CHANNELS = [f"EMG{i:02d}" for i in range(64)]

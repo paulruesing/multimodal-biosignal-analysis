@@ -30,7 +30,7 @@ from src.utils.str_conversion import enter_line_breaks
 import src.pipeline.data_analysis as data_analysis
 import src.pipeline.signal_features as features
 import src.pipeline.data_integration as data_integration
-from src.pipeline.channel_layout import EEG_CHANNELS, EEG_CHANNELS_BY_AREA, EEG_CHANNEL_IND_DICT
+from src.pipeline.channel_layout import EEG_CHANNELS, EEG_CHANNELS_BY_AREA, EEG_CHANNEL_IND_DICT, EMG_CHANNELS
 
 if TYPE_CHECKING:
     from src.pipeline.cbpa import CBPAConfig
@@ -3463,14 +3463,21 @@ def plot_cmc_accuracy_phase_average(
     ax.set_ylabel("Channel index")
     ax.set_yticks(range(len(ch_names)))
     ax.set_yticklabels(ch_names, fontsize=channel_label_fontsize)
+    ax.set_xlim(0, 360)
     ax.set_title("Averaged phase-normalized CMC map")
 
     acc_band = accuracy_sd_factor * acc_std_smooth
-    ax2.plot(phase_grid, acc_mean_smooth, color="tab:blue", linewidth=1.8, label="Mean RMSE")
+
+    # Close the circular phase plot visually by repeating the first point at 360°.
+    phase_grid_wrapped = np.concatenate([phase_grid, [360.0]])
+    acc_mean_wrapped = np.concatenate([acc_mean_smooth, [acc_mean_smooth[0]]])
+    acc_band_wrapped = np.concatenate([acc_band, [acc_band[0]]])
+
+    ax2.plot(phase_grid_wrapped, acc_mean_wrapped, color="tab:blue", linewidth=1.8, label="Mean RMSE")
     ax2.fill_between(
-        phase_grid,
-        acc_mean_smooth - acc_band,
-        acc_mean_smooth + acc_band,
+        phase_grid_wrapped,
+        acc_mean_wrapped - acc_band_wrapped,
+        acc_mean_wrapped + acc_band_wrapped,
         color="tab:blue",
         alpha=0.2,
         label=f"±{accuracy_sd_factor:g} x SD",
@@ -3479,6 +3486,7 @@ def plot_cmc_accuracy_phase_average(
         ax2.set_xlabel("Force Cycle Phase (°)")
     ax2.set_ylabel("Task Error (RMSE)")
     ax2.set_title("Averaged phase-normalized accuracy")
+    ax2.set_xlim(0, 360)
     ax2.legend(fontsize=legend_fontsize)
 
     if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
@@ -3522,22 +3530,23 @@ def plot_cmc_accuracy_phase_average(
 
 
 def plot_emg_psd_phase_average_plot(
-    cfg: CBPAConfig,
-    *,
-    flexor_file_identifier: str = "emg_1_flexor",
-    extensor_file_identifier: str = "emg_2_extensor",
-    emg_percentile_limits: tuple[float, float] = (3.0, 97.0),
-    figure_size_with_target: tuple[float, float] = (16, 6),
-    figure_size_without_target: tuple[float, float] = (16, 5),
-    grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
-    grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
-    grid_wspace: float = 0.12,
-    grid_hspace_with_target: float = 0.28,
-    phase_xticks: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0, 360.0),
-    phase_marker_lines: tuple[float, ...] = (90.0, 270.0),
-    channel_label_fontsize: float = 6.0,
-    subplot_margins: tuple[float, float, float, float] = (0.06, 0.985, 0.90, 0.10),
-    save_dpi: int = 150,
+        cfg: CBPAConfig,
+        *,
+        flexor_file_identifier: str = "emg_1_flexor",
+        extensor_file_identifier: str = "emg_2_extensor",
+        emg_percentile_limits: tuple[float, float] = (3.0, 97.0),
+        figure_size_with_target: tuple[float, float] = (16, 6),
+        figure_size_without_target: tuple[float, float] = (16, 5),
+        grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
+        grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
+        grid_wspace: float = 0.12,
+        grid_hspace_with_target: float = 0.28,
+        phase_xticks: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0, 360.0),
+        phase_marker_lines: tuple[float, ...] = (90.0, 270.0),
+        channel_label_fontsize: float = 6.0,
+        show_channel_labels: bool = True,
+        subplot_margins: tuple[float, float, float, float] = (0.06, 0.985, 0.90, 0.10),
+        save_dpi: int = 150,
         use_unscaled_force: bool = True,
 ) -> None:
     """Create a phase-normalized average EMG-PSD plot (left=flexor, right=extensor)."""
@@ -3639,8 +3648,12 @@ def plot_emg_psd_phase_average_plot(
         )
 
     channel_labels = [f"Ch {idx + 1}" for idx in range(flexor_mean.shape[1])]
-    if flexor_mean.shape[1] == len(EEG_CHANNELS):
-        channel_labels = EEG_CHANNELS
+    if flexor_mean.shape[1] == 64:
+        channel_labels = EMG_CHANNELS
+        # Show only every 8th channel label to reduce clutter.
+        channel_tick_idx = list(range(0, len(channel_labels), 8))
+        if channel_tick_idx[-1] != len(channel_labels) - 1:  # also show the last:
+            channel_tick_idx.append(len(channel_labels) - 1)
 
     im = ax.imshow(
         flexor_mean.T,
@@ -3656,8 +3669,8 @@ def plot_emg_psd_phase_average_plot(
     if not cfg.show_target_sine:
         ax.set_xlabel("Force Cycle Phase (°)")
     ax.set_ylabel("Channel index")
-    ax.set_yticks(range(len(channel_labels)))
-    ax.set_yticklabels(channel_labels, fontsize=channel_label_fontsize)
+    ax.set_yticks(channel_tick_idx)
+    ax.set_yticklabels([channel_labels[i] for i in channel_tick_idx] if show_channel_labels else [''] * len(channel_tick_idx), fontsize=channel_label_fontsize)
     ax.set_title("Phase-normalized average EMG PSD: Flexor")
 
     ax2.imshow(
@@ -3672,8 +3685,10 @@ def plot_emg_psd_phase_average_plot(
     if not cfg.show_target_sine:
         ax2.set_xlabel("Force Cycle Phase (°)")
     ax2.set_ylabel("")
-    ax2.set_yticks(range(len(channel_labels)))
-    ax2.set_yticklabels([])
+    ax2.set_yticks(channel_tick_idx)
+    ax2.set_yticklabels(
+        [channel_labels[i] for i in channel_tick_idx] if show_channel_labels else [''] * len(channel_tick_idx),
+        fontsize=channel_label_fontsize)
     ax2.set_title("Phase-normalized average EMG PSD: Extensor")
 
     if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
@@ -3722,14 +3737,14 @@ def plot_emg_psd_phase_average_plot(
 #  VISUALISATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-# todo: replace with data analysis function
 def _load_avg_dynamometer_force_per_phase(
-    subject_ids: list[int],
-    experiment_results_dir: Path,
-    phase_grid: np.ndarray,
-    cfg: CBPAConfig,
+        subject_ids: list[int],
+        experiment_results_dir: Path,
+        phase_grid: np.ndarray,
+        cfg: CBPAConfig,
         use_unscaled_force: bool = True,
-) -> np.ndarray | None:
+        return_std: bool = False,
+) -> np.ndarray | tuple[np.ndarray | None, np.ndarray | None] | None:
     """Load enriched serial frames PER TRIAL and average dynamometer force per phase.
 
     Loads Task-wise Scaled Force from each trial, phase-normalizes it per trial,
@@ -3848,15 +3863,21 @@ def _load_avg_dynamometer_force_per_phase(
                     continue
 
         if not all_cycles:
-            return None
+            return (None, None) if return_std else None
 
         # Average across all valid cycles from all valid trials/subjects.
         avg_force = np.nanmean(np.stack(all_cycles, axis=0), axis=0)
+
+        # eventually return standard as well
+        if return_std:
+            std_force = np.nanstd(np.stack(all_cycles, axis=0), axis=0)
+            return avg_force, std_force
+
         return avg_force
 
     except Exception as e:
         warnings.warn(f"Failed to load dynamometer force data: {e}")
-        return None
+        return (None, None) if return_std else None
 
 
 def _target_sine_values(x: np.ndarray, cfg: CBPAConfig) -> np.ndarray:
@@ -3897,6 +3918,8 @@ def _plot_target_sine_panel(
         dynamometer_force_y: np.ndarray | None = None,
         is_unscaled_force: bool = True,
         show_legend: bool = True,
+        dynamometer_force_std_y: np.ndarray | None = None,
+        dynamometer_force_std_factor: float = 0.5,
 ) -> None:
     """Draw one target-sine reference panel under a main plot.
 
@@ -3917,8 +3940,18 @@ def _plot_target_sine_panel(
         averaged per-cycle dynamometer force on the plot. Must have same
         length as x. Default is None.
     """
-    y = _target_sine_values(x, cfg)
-    ax.plot(x, y, color="dimgray", linewidth=1.2, label="Target" if is_unscaled_force else None)
+    x_arr = np.asarray(x, dtype=float)
+    y_target = _target_sine_values(x_arr, cfg)
+
+    # Circular wraparound for phase plots: repeat first sample at 360°.
+    if cfg.use_phase_normalization and x_arr.size > 1:
+        x_plot = np.concatenate([x_arr, [360.0]])
+        y_target_plot = np.concatenate([y_target, [y_target[0]]])
+    else:
+        x_plot = x_arr
+        y_target_plot = y_target
+
+    ax.plot(x_plot, y_target_plot, color="dimgray", linewidth=1.2, label="Target" if is_unscaled_force else None)
 
     pad = 0.1 * max(1e-6, cfg.target_sine_max_pct_mvc - cfg.target_sine_min_pct_mvc)
     ax.set_ylim(cfg.target_sine_min_pct_mvc - pad, cfg.target_sine_max_pct_mvc + pad)
@@ -3926,24 +3959,74 @@ def _plot_target_sine_panel(
     ax.set_xlabel(x_label)
     ax.set_title("Target sine", fontsize=12)
     ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
-    
-    # Optionally overlay dynamometer force data on a separate right y-axis
+
+    if cfg.use_phase_normalization:
+        ax.set_xlim(0, 360)
+
+    # Optionally overlay dynamometer force data.
     if dynamometer_force_y is not None and cfg.include_dynamometer_force:
-        ax.plot(x, dynamometer_force_y, color="forestgreen", linewidth=1.2, alpha=0.9, label="Measurement" if is_unscaled_force else None)
+        force_mean = np.asarray(dynamometer_force_y, dtype=float)
+
+        if cfg.use_phase_normalization and force_mean.size > 1:
+            force_plot = np.concatenate([force_mean, [force_mean[0]]])
+        else:
+            force_plot = force_mean
+
+        ax.plot(
+            x_plot,
+            force_plot,
+            color="forestgreen",
+            linewidth=1.2,
+            alpha=0.9,
+            label="Measurement" if is_unscaled_force else None,
+        )
+
+        # Optional variability band around force mean.
+        if dynamometer_force_std_y is not None and dynamometer_force_std_factor > 0:
+            force_std = np.asarray(dynamometer_force_std_y, dtype=float)
+            if cfg.use_phase_normalization and force_std.size > 1:
+                force_std_plot = np.concatenate([force_std, [force_std[0]]])
+            else:
+                force_std_plot = force_std
+
+            half_band = dynamometer_force_std_factor * force_std_plot
+            ax.fill_between(
+                x_plot,
+                force_plot - half_band,
+                force_plot + half_band,
+                color="forestgreen",
+                alpha=0.15,
+                linewidth=0.0,
+                label=f"Measurement ±{dynamometer_force_std_factor:g}x SD" if is_unscaled_force else None,
+            )
 
         # Right axis in native force units.
         if not is_unscaled_force:
-            # ceate scaled ex if necessary:
             ax_force = ax.twinx()
+            ax_force.plot(x_plot, force_plot, color="forestgreen", linewidth=1.2, alpha=0.9)
 
-            ax_force.plot(x, dynamometer_force_y, color="forestgreen", linewidth=1.2, alpha=0.9)
+            if dynamometer_force_std_y is not None and dynamometer_force_std_factor > 0:
+                force_std = np.asarray(dynamometer_force_std_y, dtype=float)
+                if cfg.use_phase_normalization and force_std.size > 1:
+                    force_std_plot = np.concatenate([force_std, [force_std[0]]])
+                else:
+                    force_std_plot = force_std
+                half_band = dynamometer_force_std_factor * force_std_plot
+                ax_force.fill_between(
+                    x_plot,
+                    force_plot - half_band,
+                    force_plot + half_band,
+                    color="forestgreen",
+                    alpha=0.12,
+                    linewidth=0.0,
+                )
+
             ax_force.set_ylim(0, 1)
-
-            # Set right y-axis label with green color
             ax_force.set_ylabel("Dynamometer\nForce [0-1]", color="forestgreen", fontweight="bold")
             ax_force.tick_params(axis="y", labelcolor="forestgreen")
-
-        else:  # legend required
+            if cfg.use_phase_normalization:
+                ax_force.set_xlim(0, 360)
+        else:
             if show_legend:
                 ax.legend(loc='center right', bbox_to_anchor=(1.275, 0.5))
 
@@ -4054,7 +4137,6 @@ def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool =
     if cfg.show_target_sine:
         # Optionally load and average dynamometer force if requested
         dyno_force = None
-        # todo: replace with data analysis function
         if cfg.include_dynamometer_force and cfg.use_phase_normalization:
             # Load force data from all valid subjects (guessing they're in data root)
             data_root = cfg.data_root / "data" / "experiment_results"
