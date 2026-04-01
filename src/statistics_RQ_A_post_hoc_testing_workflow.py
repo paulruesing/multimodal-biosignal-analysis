@@ -78,10 +78,10 @@ if __name__ == "__main__":
     cmc_accuracy_plot_cfg = CBPAConfig(
         modality="CMC",
         modality_file_id="Flexor",
-        freq_band="gamma",
+        freq_band="beta",
         channels=None,
         use_phase_normalization=True,
-        n_phase_bins=36,  # -> 5º buckets
+        n_phase_bins=180,  # -> 10º buckets
         min_samples_per_cycle=2,
         overlap_ratio=0.5,
         data_root=ROOT,
@@ -89,15 +89,19 @@ if __name__ == "__main__":
         save_plots=True,
         show_plots=True,
         include_dynamometer_force=True,
+        exclude_subjects=exclude_subjects,
+        # Align CMC cycles with the accuracy warm-up window so both modalities
+        # exclude the same leading edge of each trial.
+        phase_start_offset_sec=data_integration.TRIAL_ACCURACY_START_OFFSET_SEC,
+        force_phase_start_offset_sec=None,  # adaptive 1/task_freq (cycle-aligned)
+        use_stretched_window_timestamps=True,
     )
 
     emg_psd_plot_cfg = CBPAConfig(
-        modality="CMC",
-        modality_file_id="Flexor",
-        freq_band="gamma",
+        freq_band="beta",
         channels=None,
         use_phase_normalization=True,
-        n_phase_bins=180,  # -> 5º buckets
+        n_phase_bins=180,  # -> 2º buckets
         min_samples_per_cycle=2,
         overlap_ratio=0.5,
         data_root=ROOT,
@@ -105,6 +109,13 @@ if __name__ == "__main__":
         save_plots=True,
         show_plots=True,
         include_dynamometer_force=True,
+        exclude_subjects=exclude_subjects,
+
+        # Skip cycle 0 (incomplete — trial boundary ≠ force-sine zero crossing).
+        # None → adaptive 1/task_freq, which is always cycle-aligned.
+        phase_start_offset_sec=None,
+        force_phase_start_offset_sec=None,
+        use_stretched_window_timestamps=True,
     )
 
     # ══════════════════════════════════════════════════════════════════════════════
@@ -376,6 +387,11 @@ if __name__ == "__main__":
             ),
         ]
 
+        # Use uniform window-center stretching for all CBPA contrasts to avoid
+        # cumulative timestamp drift from nominal-fs-derived stored time-centers.
+        for contrast_cfg in CONTRASTS:
+            contrast_cfg.use_stretched_window_timestamps = True
+
 
 
         ### RUN
@@ -390,13 +406,13 @@ if __name__ == "__main__":
         plot_cmc_accuracy_phase_average(
             cfg=cmc_accuracy_plot_cfg,
             experiment_results_dir=EXPERIMENT_RESULTS,
-            exclude_subjects=exclude_subjects,
+            channel_pooling='max',
+            freq_pooling='max',
         )
 
     if analyse_emg_psd_phase_plot:
         plot_emg_psd_phase_average_plot(
             cfg=emg_psd_plot_cfg,
-            exclude_subjects=exclude_subjects,
         )
 
 
