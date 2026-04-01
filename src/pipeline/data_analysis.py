@@ -965,11 +965,13 @@ def phase_normalize_cycles(
     phase_grid: np.ndarray,
     min_samples_per_cycle: int,
     start_offset_sec: float = 0.0,
-    min_cycle_coverage_ratio: float = 0.6,
+    min_cycle_coverage_ratio: float = 0.8,
     use_interpolation: bool = True,
     interpolation_kind: Literal['linear', 'nearest'] = 'linear',
     show_debug_trial_wise_plots: bool = False,
     show_debug_cycle_wise_plots: bool = False,
+        phase_wraparound_coverage_threshold: float = 0.8,
+        verbose: bool = True,
 ) -> list[np.ndarray]:
     # todo: insert docstring
 
@@ -1094,7 +1096,11 @@ def phase_normalize_cycles(
             # ---- wrap-pad only for near-complete cycles ----
             n_pad = max(1, len(unique_ph) // 4)
 
-            if cycle_coverage_ratio >= 0.85:
+            if verbose:  # print sanity check:
+                if phase_wraparound_coverage_threshold > min_cycle_coverage_ratio:
+                    print(f"src.pipeline.data_analysis.phase_normalize_cycles [WARNING] Currently min_cycle_coverage_ratio={min_cycle_coverage_ratio:.2f} is less than phase_wraparound_coverage_threshold={phase_wraparound_coverage_threshold:.2f}. This means that cycles with coverage ratio between {min_cycle_coverage_ratio:.2f} and {phase_wraparound_coverage_threshold:.2f} will be included in the output but will not have wrap-around padding applied, which may lead to NaN values at the boundaries of the phase grid. Consider setting min_cycle_coverage_ratio >= phase_wraparound_coverage_threshold to ensure consistent interpolation behavior across all included cycles.")
+
+            if cycle_coverage_ratio >= phase_wraparound_coverage_threshold:
                 # Near-complete cycle: wrapping is physically justified.
                 pad_lo_ph = unique_ph[-n_pad:] - 360.0
                 pad_hi_ph = unique_ph[:n_pad] + 360.0
