@@ -2293,7 +2293,7 @@ def draw_time_resolution_forest_plot(
     ax.set_ylim(-0.5, max_y + 0.5)
 
     # --- x-axis ---
-    ax.set_xlabel('Coefficient (β)', fontsize=11, fontweight='bold')
+    ax.set_xlabel(f'{display_parameter} β', fontsize=max(min(250/len(display_parameter), 11), 6), fontweight='bold')
     ax.tick_params(axis='x', labelsize=10)
 
     # --- grid & spines ---
@@ -2307,7 +2307,7 @@ def draw_time_resolution_forest_plot(
     # --- title = hypothesis if provided, else parameter name ---
     title_text = hypothesis if hypothesis is not None else display_parameter
     ax.set_title('\n'.join(textwrap.wrap(title_text, width=40)),
-                 fontsize=7, fontweight='bold', pad=10)
+                 fontsize=8, fontweight='bold', pad=10)
 
     # --- x limits ---
     x_margin = x_range * 0.15
@@ -3417,7 +3417,7 @@ def plot_cmc_accuracy_phase_average(
         acc_std_smooth = data_analysis.circular_smooth(acc_std, kernel_bins=5)
 
     fig, ax, cax, ax2, ax_tgt_left, ax_tgt_right = _create_cbpa_dual_panel_figure(
-        show_target_sine=cfg.show_target_sine,
+        show_target_sine=cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization,
         figure_size_with_target=figure_size_with_target,
         figure_size_without_target=figure_size_without_target,
         grid_width_ratios=grid_width_ratios,
@@ -3450,7 +3450,7 @@ def plot_cmc_accuracy_phase_average(
         extent=(phase_grid[0], 360.0, -0.5, len(ch_names) - 0.5),
     )
     plt.colorbar(im, cax=cax, label=f"{cfg.freq_band.lower()}-band CMC Value")
-    if not cfg.show_target_sine:
+    if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
         ax.set_xlabel("Force Cycle Phase (°)")
     ax.set_ylabel("Channel index")
     ax.set_yticks(range(len(ch_names)))
@@ -3538,12 +3538,12 @@ def plot_cmc_accuracy_phase_average(
         ax2.legend(fontsize=legend_fontsize)
         ax2.set_title("Averaged phase-normalized accuracy")
 
-    if not cfg.show_target_sine:
+    if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
         ax2.set_xlabel("Force Cycle Phase (°)")
     ax2.set_ylabel("Task Error (RMSE)")
     ax2.set_xlim(0, 360)
 
-    if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
+    if (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization) and ax_tgt_left is not None and ax_tgt_right is not None:
         dyno_force = None
         if cfg.include_dynamometer_force:
             dyno_force = _load_avg_dynamometer_force_per_phase(
@@ -3574,7 +3574,7 @@ def plot_cmc_accuracy_phase_average(
         )
 
     phase_axes = [ax, ax2]
-    if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
+    if (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization) and ax_tgt_left is not None and ax_tgt_right is not None:
         phase_axes.extend([ax_tgt_left, ax_tgt_right])
     _apply_phase_axis_style(
         phase_axes,
@@ -3700,7 +3700,7 @@ def plot_emg_psd_phase_average_plot(
         emg_vmin, emg_vmax = None, None
 
     fig, ax, cax, ax2, ax_tgt_left, ax_tgt_right = _create_cbpa_dual_panel_figure(
-        show_target_sine=cfg.show_target_sine,
+        show_target_sine=(cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization),
         figure_size_with_target=figure_size_with_target,
         figure_size_without_target=figure_size_without_target,
         grid_width_ratios=grid_width_ratios,
@@ -3736,7 +3736,7 @@ def plot_emg_psd_phase_average_plot(
     )
     plt.colorbar(im, cax=cax, label=f"{cfg.freq_band.lower()}-band EMG PSD (log10)")
 
-    if not cfg.show_target_sine:
+    if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
         ax.set_xlabel("Force Cycle Phase (°)")
     ax.set_ylabel("Channel index")
     ax.set_yticks(channel_tick_idx)
@@ -3752,7 +3752,7 @@ def plot_emg_psd_phase_average_plot(
         vmax=emg_vmax,
         extent=(phase_grid[0], 360.0, -0.5, extensor_mean.shape[1] - 0.5),
     )
-    if not cfg.show_target_sine:
+    if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
         ax2.set_xlabel("Force Cycle Phase (°)")
     ax2.set_ylabel("")
     ax2.set_yticks(channel_tick_idx)
@@ -3761,7 +3761,7 @@ def plot_emg_psd_phase_average_plot(
         fontsize=channel_label_fontsize)
     ax2.set_title("Phase-normalized average EMG PSD: Extensor")
 
-    if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
+    if (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization) and ax_tgt_left is not None and ax_tgt_right is not None:
         # Optionally load and average dynamometer force if requested
         dyno_force = None
         # todo: replace with data analysis function
@@ -3778,7 +3778,7 @@ def plot_emg_psd_phase_average_plot(
                                 )
 
     phase_axes = [ax, ax2]
-    if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
+    if (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization) and ax_tgt_left is not None and ax_tgt_right is not None:
         phase_axes.extend([ax_tgt_left, ax_tgt_right])
     _apply_phase_axis_style(
         phase_axes,
@@ -4129,7 +4129,170 @@ def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool =
     t_ax = time_grid if time_grid is not None else np.arange(n_times)
 
     fig, ax, cax, ax2, ax_tgt_left, ax_tgt_right = _create_cbpa_dual_panel_figure(
-        show_target_sine=cfg.show_target_sine,
+        show_target_sine=(cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization),
+    )
+
+    if cfg.include_suptitle:
+        fig.suptitle(
+            f"{cfg.hypothesis_label}\n"
+            f"Contrast: '{cfg.condition_A}' − '{cfg.condition_B}'  |  "
+            f"{cfg.modality} {cfg.freq_band}  |  "
+            f"n = {n_valid_subjects} subjects, {cfg.n_permutations} permutations",
+            fontsize=10,
+        )
+
+    # ── Panel A: heatmap + cluster contours ──────────────────────────────────
+    # Use a fixed ±3 baseline for cross-plot comparability;
+    # expand only if the observed t-values exceed it
+    vlim = max(3.0, np.nanpercentile(np.abs(t_obs), 97))
+
+    # FIX 3: extend right extent to 360.0 so the last bin visually fills to the
+    # axis edge, consistent with plot_cmc_accuracy_phase_average and
+    # plot_emg_psd_phase_average_plot. In clock-time mode t_ax[-1] is correct.
+    extent_right = 360.0 if cfg.use_phase_normalization else t_ax[-1]
+    im = ax.imshow(
+        t_obs.T, aspect="auto", origin="lower", cmap="RdBu_r",
+        vmin=-vlim, vmax=vlim,
+        extent=[t_ax[0], extent_right, -0.5, n_ch - 0.5],
+    )
+    plt.colorbar(im, cax=cax, label="t-statistic")
+
+    for idx, cluster in enumerate(clusters):
+        mask = _resolve_cluster_mask(cluster, n_times=n_times, n_ch=n_ch)
+        color = "black" if idx in good_inds else "silver"
+        lw    = 1.8    if idx in good_inds else 0.8
+        # contour needs at least one True and one False cell to draw anything
+        if mask.any() and not mask.all():
+            # FIX 3 (contour): mirror the imshow extent fix so cluster contour
+            # lines align with the heatmap pixels all the way to 360°.
+            contour_right = 360.0 if cfg.use_phase_normalization else t_ax[-1]
+            ax.contour(
+                np.linspace(t_ax[0], contour_right, n_times),
+                np.arange(n_ch),
+                mask.T.astype(float),
+                levels=[0.5], colors=color, linewidths=lw,
+            )
+
+    x_label = "Force Cycle Phase (°)" if cfg.use_phase_normalization else "Time within trial (s)"
+    if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
+        ax.set_xlabel(x_label)
+    ax.set_ylabel("Channel index")
+    ax.set_yticks(range(n_ch))
+    ax.set_yticklabels(ch_names, fontsize=6)
+    ax.set_title("t-statistic map\n(black contour = significant cluster)")
+
+    # ── Panel B: significant cluster time courses ─────────────────────────────
+    if len(good_inds) == 0:
+        ax2.text(0.5, 0.5, "No significant clusters", ha="center", va="center",
+                 transform=ax2.transAxes, fontsize=12, color="grey")
+    else:
+        for idx in good_inds:
+            mask = _resolve_cluster_mask(clusters[idx], n_times=n_times, n_ch=n_ch)
+
+            ch_in_cluster = mask.any(axis=0)   # (n_ch,)   bool
+            t_in_cluster  = mask.any(axis=1)   # (n_times,) bool
+
+            if not ch_in_cluster.any():
+                continue
+
+            t_course = t_obs[:, ch_in_cluster].mean(axis=1)  # (n_times,)
+
+            # FIX 2: wrap the time-course line and fill mask to close the
+            # 350°→360° gap, mirroring the circular wrap used in
+            # plot_cmc_accuracy_phase_average. In clock-time mode no wrap is needed.
+            if cfg.use_phase_normalization:
+                t_ax_plot          = np.concatenate([t_ax,          [360.0]])
+                t_course_plot      = np.concatenate([t_course,      [t_course[0]]])
+                t_in_cluster_plot  = np.concatenate([t_in_cluster,  [t_in_cluster[0]]])
+            else:
+                t_ax_plot         = t_ax
+                t_course_plot     = t_course
+                t_in_cluster_plot = t_in_cluster
+
+            ax2.plot(t_ax_plot, t_course_plot,
+                     label=f"Cluster #{idx + 1}  p={cluster_pv[idx]:.3f}")
+            ax2.fill_between(t_ax_plot, 0, t_course_plot,
+                             where=t_in_cluster_plot, alpha=0.2)
+
+        ax2.axhline(0,         color="k",   linewidth=0.8, linestyle="--")
+        ax2.axhline( t_thresh, color="red", linewidth=0.8, linestyle=":",
+                     label=f"±t_thresh ({t_thresh:.2f})")
+        ax2.axhline(-t_thresh, color="red", linewidth=0.8, linestyle=":")
+        ax2.legend(fontsize=8)
+
+    if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
+        ax2.set_xlabel(x_label)
+    ax2.set_ylabel("Mean t-statistic over cluster channels")
+    ax2.set_title("Significant cluster time courses")
+
+    if (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
+        dyno_force = None
+        if cfg.include_dynamometer_force and cfg.use_phase_normalization:
+            data_root = cfg.data_root / "data" / "experiment_results"
+            valid_subject_ids = list(range(0, 13))  # Fallback to known subjects
+            dyno_force = _load_avg_dynamometer_force_per_phase(
+                valid_subject_ids, data_root, t_ax, cfg,
+                use_unscaled_force=use_unscaled_force,
+            )
+
+        _plot_target_sine_panel(
+            ax_tgt_left, t_ax, cfg, x_label=x_label, show_ylabel=True,
+            dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force,
+        )
+        _plot_target_sine_panel(
+            ax_tgt_right, t_ax, cfg, x_label=x_label, show_ylabel=True,
+            dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force,
+            show_legend=False,  # legend only for left plot
+        )
+
+    if cfg.use_phase_normalization:
+        phase_axes = [ax, ax2]
+        if (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
+            phase_axes.extend([ax_tgt_left, ax_tgt_right])
+        _apply_phase_axis_style(
+            phase_axes,
+            phase_xticks=(0.0, 90.0, 180.0, 270.0, 360.0),
+            phase_marker_lines=(90.0, 270.0),
+        )
+
+    fig.subplots_adjust(left=0.06, right=0.985, top=0.90, bottom=0.10)
+    if cfg.save_plots:
+        out = cfg.output_dir / filemgmt.file_title(cfg.hypothesis_label + "_clusters", ".png")
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        print(f"  Plot saved: {out}")
+    if cfg.show_plots:
+        plt.show()
+    plt.close(fig)
+
+def old_plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool = True) -> None:
+    """Render heatmap and cluster-summary figures for one CBPA result.
+
+    Parameters
+    ----------
+    results : dict
+        Output dictionary produced by :func:`run_cbpa`.
+    cfg : CBPAConfig
+        Plotting and output configuration.
+
+    Notes
+    -----
+    Produces two main panels: a t-statistic heatmap with cluster contours and
+    a cluster time-course panel. Optional target-sine panels are appended below.
+    """
+    t_obs        = results["t_obs"]
+    t_thresh     = results["t_thresh"]
+    clusters     = results["clusters"]
+    cluster_pv   = results["cluster_pv"]
+    good_inds    = results["good_cluster_inds"]
+    ch_names     = results["ch_names"]
+    time_grid    = results["time_grid"]
+    n_valid_subjects = results["n_valid_subjects"]
+
+    n_times, n_ch = t_obs.shape
+    t_ax = time_grid if time_grid is not None else np.arange(n_times)
+
+    fig, ax, cax, ax2, ax_tgt_left, ax_tgt_right = _create_cbpa_dual_panel_figure(
+        show_target_sine=(cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization),
     )
 
     if cfg.include_suptitle:
@@ -4166,7 +4329,7 @@ def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool =
             )
 
     x_label = "Force Cycle Phase (°)" if cfg.use_phase_normalization else "Time within trial (s)"
-    if not cfg.show_target_sine:
+    if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
         ax.set_xlabel(x_label)
     ax.set_ylabel("Channel index")
     ax.set_yticks(range(n_ch))
@@ -4199,12 +4362,12 @@ def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool =
         ax2.axhline(-t_thresh, color="red", linewidth=0.8, linestyle=":")
         ax2.legend(fontsize=8)
 
-    if not cfg.show_target_sine:
+    if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
         ax2.set_xlabel(x_label)
     ax2.set_ylabel("Mean t-statistic over cluster channels")
     ax2.set_title("Significant cluster time courses")
 
-    if cfg.show_target_sine:
+    if (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
         # Optionally load and average dynamometer force if requested
         dyno_force = None
         if cfg.include_dynamometer_force and cfg.use_phase_normalization:
@@ -4225,7 +4388,7 @@ def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool =
 
     if cfg.use_phase_normalization:
         phase_axes = [ax, ax2]
-        if cfg.show_target_sine:
+        if (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
             phase_axes.extend([ax_tgt_left, ax_tgt_right])
         _apply_phase_axis_style(
             phase_axes,
