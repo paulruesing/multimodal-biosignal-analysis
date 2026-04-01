@@ -343,7 +343,8 @@ def load_emg_psd_both_muscles(
         subject_ind: int,
         feature_data_dir: Path,
         experiment_data_dir: Path,
-        emg_frequency_band: Tuple[float, float] = (30, 250)
+        emg_frequency_band: Tuple[float, float] = (30, 250),
+psd_time_window_size_sec: float = .25
 ) -> Dict[str, Tuple[np.ndarray, pd.DatetimeIndex]]:
     """
     Load precomputed EMG PSD for both flexor and extensor muscles.
@@ -430,17 +431,12 @@ def load_emg_psd_both_muscles(
 
             import src.pipeline.data_analysis as data_analysis
             psd_times_absolute = data_analysis.add_time_index(
-                start_timestamp=qtc_start,
-                end_timestamp=qtc_end,
+                # Statistics script
+                start_timestamp=qtc_start + pd.Timedelta(seconds=psd_time_window_size_sec / 2),  # +0.125s
+                end_timestamp=qtc_end - pd.Timedelta(seconds=psd_time_window_size_sec / 2),  # -0.125s
                 n_timesteps=n_windows,
             )
 
-            """  # WITHOUT STRETCHING:
-            # Convert to absolute timestamps
-            psd_times_absolute = pd.to_datetime(
-                qtc_start + pd.to_timedelta(psd_times_sec, unit='s')
-            )"""
-            
             # Extract power in frequency band
             freq_mask = (psd_freqs >= emg_frequency_band[0]) & (psd_freqs <= emg_frequency_band[1])
             emg_psd_band = emg_psd[:, freq_mask, :]
@@ -1157,7 +1153,7 @@ if __name__ == "__main__":
     filemgmt.assert_dir(ALIGNMENT_REPORTS)
 
     # Workflow control
-    subjects_to_check = range(11, 12)
+    subjects_to_check = range(9, 10)
     save_reports = True
 
     # Workflow control flags
