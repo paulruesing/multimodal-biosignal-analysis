@@ -117,13 +117,14 @@ if __name__ == '__main__':
                                              'Familiarity [0-7]': 4,
                                              'Trial ID': 4}
     # creates bin index for per subject values to be used as categories (new col. will be named "{OLD_COL}_bin")
-    cmc_plot_categories: list[str] = ['Category or Silence', 'Liking_bin', 'Liking_centered_squared_bin', 'Trial ID_bin',
-                                      'Median Unscaled Force [% MVC]_bin', 'Familiarity [0-7]_bin']
+    cmc_plot_categories: list[str] = ['Category or Silence',# 'Liking_bin', 'Liking_centered_squared_bin', 'Trial ID_bin',
+                                      #'Median Unscaled Force [% MVC]_bin', 'Familiarity [0-7]_bin'
+                                      ]
     # color list:
     cmc_plot_colors = ['darkorange', 'red', 'green', 'blue', 'purple']
-    cmc_plot_n_segments = 10
+    cmc_plot_n_segments = 5
     # subject wise line plots:
-    plot_cmc_lineplots_normalised: bool = False
+    plot_cmc_lineplots_normalised: bool = True
     plot_cmc_lineplots_per_category: bool = True
     save_cmc_lineplots: bool = True
     # compound scatters:
