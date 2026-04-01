@@ -965,17 +965,17 @@ def phase_normalize_cycles(
     phase_grid: np.ndarray,
     min_samples_per_cycle: int,
     start_offset_sec: float = 0.0,
-    min_cycle_coverage_ratio: float = 0.4,
+    min_cycle_coverage_ratio: float = 0.6,
     use_interpolation: bool = True,
     interpolation_kind: Literal['linear', 'nearest'] = 'linear',
     show_debug_trial_wise_plots: bool = False,
     show_debug_cycle_wise_plots: bool = False,
 ) -> list[np.ndarray]:
-    # (docstring unchanged)
+    # todo: insert docstring
 
     if show_debug_trial_wise_plots:
         import matplotlib.pyplot as plt
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=(12, 6))
         if signal.ndim == 2:
             for ch in signal.transpose():
                 ax.plot(t_rel, ch, "r", alpha=.1)
@@ -983,6 +983,10 @@ def phase_normalize_cycles(
         else:
             ax.plot(t_rel, signal, 'b-o')
         ax.set_title(f'Trial {task_freq:.2f} Hz')
+
+        for cycle_start in np.arange(t_rel.min(), t_rel.max(), 1/task_freq):
+            ax.axvline(x=cycle_start, color='k', linestyle='--')
+
         plt.show()
 
     if not (0.0 <= float(min_cycle_coverage_ratio) <= 1.0):
@@ -1064,12 +1068,12 @@ def phase_normalize_cycles(
 
         if use_interpolation:
             # ---------------------------------------------------------- #
-            # Per-cycle phase-domain interpolation with wrap-around.      #
-            #                                                              #
-            # Pad observed data by copying points from the opposite end   #
-            # of the cycle (shifted ±360°) so the interpolator naturally  #
-            # covers the full [0, 360) range without cross-cycle bleed.   #
-            # Only applied when coverage is sufficient.                    #
+            #   Per-cycle phase-domain interpolation with wrap-around.   #
+            #                                                            #
+            # Pad observed data by copying points from the opposite end  #
+            # of the cycle (shifted ±360°) so the interpolator naturally #
+            # covers the full [0, 360) range without cross-cycle bleed.  #
+            # Only applied when coverage is sufficient.                  #
             # ---------------------------------------------------------- #
             unique_ph, inv_idx, counts_ph = np.unique(
                 phase_vals, return_inverse=True, return_counts=True,
