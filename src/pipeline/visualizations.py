@@ -3064,14 +3064,27 @@ def _phase_normalize_accuracy_cycles(
     trial_dur_sec: float,
     min_samples_per_cycle: int,
     start_offset_sec: float,
+    end_cutoff_sec: float = 0.0,
     expected_sampling_rate: float | None = None,
 ) -> list[np.ndarray]:
-    """Phase-normalize accuracy samples into per-cycle profiles.
+    """
+    Phase-normalize accuracy samples into per-cycle profiles.
 
     Accuracy is recorded only after the warm-up offset, so the synthetic time
     axis starts at ``start_offset_sec``. The sampling interval is inferred from
     the effective duration and sample count, which reflects the true elapsed
     time regardless of Python loop overhead.
+
+    Parameters
+    ----------
+    end_cutoff_sec : float
+        Seconds to discard from the *end* of the reconstructed time axis before
+        phase normalization.  Other modalities are protected from post-task
+        transients by ``get_task_start_end()``'s ``cut_off_sec_to_prevent_transients``;
+        because accuracy timestamps are reconstructed (not sliced), this parameter
+        provides the equivalent tail exclusion.  Should match the cutoff used
+        when computing the other modalities' trial spans (default 0.0; set via
+        the caller's ``accuracy_trial_end_cutoff_sec``).
     """
     if accuracy is None or len(accuracy) == 0 or task_freq <= 0:
         return []
@@ -3080,6 +3093,7 @@ def _phase_normalize_accuracy_cycles(
     if effective_dur <= 0:
         return []
 
+    # amount of timesteps:
     n = len(accuracy)
 
     # Infer actual sampling rate from known duration and sample count.
@@ -3094,16 +3108,36 @@ def _phase_normalize_accuracy_cycles(
                 f"({deviation * 100:.1f}% deviation). Using inferred rate."
             )
 
+    # reconstruct relative time axis:
     t_rel = start_offset_sec + np.arange(n) / inferred_rate
+
+    # DEBUG STATEMENT:
+    # print(f"Assumed duration of accuracy sampling: {effective_dur:.2f} sec.\nResulting sampling rate: {inferred_rate:.2f} Hz.")
+
+    # Discard post-task transients from the tail, mirroring the end-cutoff that
+    # get_task_start_end() applies to CMC/PSD/force via cut_off_sec_to_prevent_transients.
+    # The reconstructed time axis may extend into this tail (by design, to correct
+    # cycle counting); we trim it here before phase normalization.
+    effective_end = trial_dur_sec - end_cutoff_sec
+    if end_cutoff_sec > 0.0 and effective_end > start_offset_sec:
+        keep = t_rel < effective_end
+        accuracy = accuracy[keep]
+        t_rel = t_rel[keep]
+        if len(accuracy) == 0:
+            return []
+    else:
+        effective_end = trial_dur_sec
 
     return data_analysis.phase_normalize_cycles(
         signal=accuracy,
         t_rel=t_rel,
         task_freq=task_freq,
-        trial_dur_sec=trial_dur_sec,
+        trial_dur_sec=effective_end,
         phase_grid=phase_grid,
         min_samples_per_cycle=min_samples_per_cycle,
         start_offset_sec=start_offset_sec,
+        use_interpolation=True,
+        min_cycle_coverage_ratio=.9,
     )
 
 
@@ -3200,24 +3234,29 @@ def _resolve_cluster_mask(cluster, n_times: int, n_ch: int) -> np.ndarray:
 
 
 def plot_cmc_accuracy_phase_average(
-    cfg: CBPAConfig,
-    experiment_results_dir: Path,
-    exclude_subjects: list[int] | None = None,
-    *,
-    accuracy_sd_factor: float = 0.5,
-    cmc_percentile_limits: tuple[float, float] = (3.0, 97.0),
-    figure_size_with_target: tuple[float, float] = (16, 6),
-    figure_size_without_target: tuple[float, float] = (16, 5),
-    grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
-    grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
-    grid_wspace: float = 0.12,
-    grid_hspace_with_target: float = 0.28,
-    phase_xticks: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0, 360.0),
-    phase_marker_lines: tuple[float, ...] = (90.0, 270.0),
-    channel_label_fontsize: float = 6.0,
-    legend_fontsize: float = 8.0,
-    subplot_margins: tuple[float, float, float, float] = (0.06, 0.985, 0.90, 0.10),
-    save_dpi: int = 150,
+        cfg: CBPAConfig,
+        experiment_results_dir: Path,
+        *,
+        accuracy_sd_factor: float = 0.5,
+        cmc_percentile_limits: tuple[float, float] = (3.0, 97.0),
+        figure_size_with_target: tuple[float, float] = (16, 6),
+        figure_size_without_target: tuple[float, float] = (16, 5),
+        grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
+        grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
+        grid_wspace: float = 0.12,
+        grid_hspace_with_target: float = 0.28,
+        phase_xticks: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0, 360.0),
+        phase_marker_lines: tuple[float, ...] = (90.0, 270.0),
+        channel_label_fontsize: float = 6.0,
+        legend_fontsize: float = 8.0,
+        subplot_margins: tuple[float, float, float, float] = (0.06, 0.985, 0.90, 0.10),
+        save_dpi: int = 150,
+
+        freq_pooling: Literal["max", "mean"] = "max",
+        channel_pooling: Literal["max", "mean"] = "max",
+        use_unscaled_force: bool = True,
+        accuracy_trial_dur_offset_sec: float = 6.0,
+        accuracy_trial_end_cutoff_sec: float = 2.0,
 ) -> None:
     """Create a CBPA-like plot with mean CMC map and phase-normalized accuracy.
 
@@ -3289,7 +3328,7 @@ def plot_cmc_accuracy_phase_average(
 
     stats_df = cbpa.load_stats_frame(cfg.data_root)
     subject_ids = sorted(stats_df["Subject ID"].astype(int).unique())
-    exclude = set(exclude_subjects or [])
+    exclude = set(cfg.exclude_subjects or [])
     subject_ids = [sid for sid in subject_ids if sid not in exclude]
 
     phase_grid = np.linspace(0, 360, cfg.n_phase_bins, endpoint=False)
@@ -3311,7 +3350,8 @@ def plot_cmc_accuracy_phase_average(
             warnings.warn(f"Subject {subj:02}: no trial spans found. Skipping.")
             continue
 
-        band_power = cbpa._extract_band_power(cfg, spectrogram, freqs, channel_indices=None,)
+        band_power = cbpa._extract_band_power(cfg, spectrogram, freqs, channel_indices=None,
+                                              freq_pooling=freq_pooling, channel_pooling=channel_pooling)
         trial_cond_map = {trial_id: "ALL" for trial_id in trial_spans}
         cmc_cycles = cbpa._band_power_per_phase(
             cfg=cfg,
@@ -3343,15 +3383,25 @@ def plot_cmc_accuracy_phase_average(
                 continue
 
             trial_dur_sec = (t_end - t_start).total_seconds()
-            # todo: replace with data analysis function
+            # trial_dur_sec comes from the CBPA trial span, which is shortened by
+            # the transient-exclusion corrections applied inside get_task_start_end()
+            # (assumed_latency_sec, cut_off_sec_to_prevent_transients, and the task-
+            # frequency window's avg_end_delay_seconds).  Accuracy samples carry no
+            # individual timestamps; their time axis is reconstructed by assuming they
+            # span the *actual* (uncorrected) trial duration.  accuracy_trial_dur_offset_sec
+            # compensates for the aggregate shortening so that phase_normalize_cycles()
+            # maps all samples to correct cycle phases without compressing the inferred
+            # time axis.  Within phase_normalize_cycles, start_offset_sec then coherently
+            # excludes the initial warm-up window from cycle averaging.
             accuracy_cycles.extend(
                 _phase_normalize_accuracy_cycles(
                     accuracy=accuracy,
                     phase_grid=phase_grid,
                     task_freq=float(task_freq),
-                    trial_dur_sec=float(trial_dur_sec),
+                    trial_dur_sec=float(trial_dur_sec) + accuracy_trial_dur_offset_sec,
                     min_samples_per_cycle=cfg.min_samples_per_cycle,
                     start_offset_sec=float(data_integration.TRIAL_ACCURACY_START_OFFSET_SEC),
+                    end_cutoff_sec=accuracy_trial_end_cutoff_sec,
                 )
             )
 
@@ -3389,7 +3439,7 @@ def plot_cmc_accuracy_phase_average(
     if cfg.include_suptitle:
         fig.suptitle(
             f"{plot_label}\n"
-            f"Average {cfg.modality} ({cfg.modality_file_id}, {cfg.freq_band}) + Accuracy (RMSE)  |  "
+            f"Average {cfg.modality} ({cfg.modality_file_id}, {cfg.freq_band}) + Task Error (RMSE)  |  "
             f"n = {len(valid_subjects)} subjects",
             fontsize=10,
         )
@@ -3407,7 +3457,7 @@ def plot_cmc_accuracy_phase_average(
         vmax=cmc_vmax,
         extent=(phase_grid[0], 360.0, -0.5, len(ch_names) - 0.5),
     )
-    plt.colorbar(im, cax=cax, label="CMC Value")
+    plt.colorbar(im, cax=cax, label=f"{cfg.freq_band.lower()}-band CMC Value")
     if not cfg.show_target_sine:
         ax.set_xlabel("Force Cycle Phase (°)")
     ax.set_ylabel("Channel index")
@@ -3427,8 +3477,8 @@ def plot_cmc_accuracy_phase_average(
     )
     if not cfg.show_target_sine:
         ax2.set_xlabel("Force Cycle Phase (°)")
-    ax2.set_ylabel("Accuracy (RMSE)")
-    ax2.set_title("Phase-normalized average accuracy")
+    ax2.set_ylabel("Task Error (RMSE)")
+    ax2.set_title("Averaged phase-normalized accuracy")
     ax2.legend(fontsize=legend_fontsize)
 
     if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
@@ -3437,12 +3487,14 @@ def plot_cmc_accuracy_phase_average(
         if cfg.include_dynamometer_force:
             # todo: replace with data analysis function
             dyno_force = _load_avg_dynamometer_force_per_phase(
-                valid_subjects, experiment_results_dir, phase_grid, cfg
+                valid_subjects, experiment_results_dir, phase_grid, cfg, use_unscaled_force=use_unscaled_force,
             )
         _plot_target_sine_panel(ax_tgt_left, phase_grid, cfg, x_label="Force Cycle Phase (°)",
-                                show_ylabel=True, dynamometer_force_y=dyno_force)
+                                show_ylabel=True, dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force)
         _plot_target_sine_panel(ax_tgt_right, phase_grid, cfg, x_label="Force Cycle Phase (°)",
-                                show_ylabel=True, dynamometer_force_y=dyno_force)
+                                show_ylabel=True, dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force,
+                                show_legend=False,  # legend only for left plot
+                                )
 
     phase_axes = [ax, ax2]
     if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
@@ -3471,7 +3523,6 @@ def plot_cmc_accuracy_phase_average(
 
 def plot_emg_psd_phase_average_plot(
     cfg: CBPAConfig,
-    exclude_subjects: list[int] | None = None,
     *,
     flexor_file_identifier: str = "emg_1_flexor",
     extensor_file_identifier: str = "emg_2_extensor",
@@ -3487,6 +3538,7 @@ def plot_emg_psd_phase_average_plot(
     channel_label_fontsize: float = 6.0,
     subplot_margins: tuple[float, float, float, float] = (0.06, 0.985, 0.90, 0.10),
     save_dpi: int = 150,
+        use_unscaled_force: bool = True,
 ) -> None:
     """Create a phase-normalized average EMG-PSD plot (left=flexor, right=extensor)."""
     import src.pipeline.cbpa as cbpa
@@ -3503,7 +3555,7 @@ def plot_emg_psd_phase_average_plot(
 
     stats_df = cbpa.load_stats_frame(cfg.data_root)
     subject_ids = sorted(stats_df["Subject ID"].astype(int).unique())
-    exclude = set(exclude_subjects or [])
+    exclude = set(cfg.exclude_subjects or [])
     subject_ids = [sid for sid in subject_ids if sid not in exclude]
 
     def _load_subject_emg_profile(subject_id: int, file_identifier: str) -> np.ndarray | None:
@@ -3522,7 +3574,7 @@ def plot_emg_psd_phase_average_plot(
 
         band_power = cbpa._extract_band_power(local_cfg, spectrogram, freqs, channel_indices=None)
         trial_cond_map = {trial_id: "ALL" for trial_id in trial_spans}
-        # todo: replace with data analysis function
+
         cycles = cbpa._band_power_per_phase(
             cfg=local_cfg,
             band_power=band_power,
@@ -3599,7 +3651,7 @@ def plot_emg_psd_phase_average_plot(
         vmax=emg_vmax,
         extent=(phase_grid[0], 360.0, -0.5, flexor_mean.shape[1] - 0.5),
     )
-    plt.colorbar(im, cax=cax, label="EMG PSD (log10)")
+    plt.colorbar(im, cax=cax, label=f"{cfg.freq_band.lower()}-band EMG PSD (log10)")
 
     if not cfg.show_target_sine:
         ax.set_xlabel("Force Cycle Phase (°)")
@@ -3631,12 +3683,14 @@ def plot_emg_psd_phase_average_plot(
         if cfg.include_dynamometer_force:
             experiment_results_dir = cfg.data_root / "data" / "experiment_results"
             dyno_force = _load_avg_dynamometer_force_per_phase(
-                common_subjects, experiment_results_dir, phase_grid, cfg
+                common_subjects, experiment_results_dir, phase_grid, cfg, use_unscaled_force=use_unscaled_force,
             )
         _plot_target_sine_panel(ax_tgt_left, phase_grid, cfg, x_label="Force Cycle Phase (°)",
-                                show_ylabel=True, dynamometer_force_y=dyno_force)
+                                show_ylabel=True, dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force)
         _plot_target_sine_panel(ax_tgt_right, phase_grid, cfg, x_label="Force Cycle Phase (°)",
-                                show_ylabel=True, dynamometer_force_y=dyno_force)
+                                show_ylabel=True, dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force,
+                                show_legend=False,  # legend only for left plot
+                                )
 
     phase_axes = [ax, ax2]
     if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
@@ -3674,6 +3728,7 @@ def _load_avg_dynamometer_force_per_phase(
     experiment_results_dir: Path,
     phase_grid: np.ndarray,
     cfg: CBPAConfig,
+        use_unscaled_force: bool = True,
 ) -> np.ndarray | None:
     """Load enriched serial frames PER TRIAL and average dynamometer force per phase.
 
@@ -3708,7 +3763,7 @@ def _load_avg_dynamometer_force_per_phase(
     try:
         all_cycles: list[np.ndarray] = []
 
-        for subj_id in subject_ids:
+        for subj_id in tqdm(subject_ids, desc="Load Force Data per Subject"):
             subj_exp_dir = experiment_results_dir / f"subject_{subj_id:02}"
 
             try:
@@ -3723,10 +3778,11 @@ def _load_avg_dynamometer_force_per_phase(
                 # Skip if no enriched serial frame or log available
                 continue
 
-            if "Task-wise Scaled Force" not in serial_frame.columns:
+            force_column = "Unscaled Force [% MVC]" if use_unscaled_force else "Task-wise Scaled Force"
+            if force_column not in serial_frame.columns:
                 continue
 
-            force_series = pd.to_numeric(serial_frame["Task-wise Scaled Force"], errors="coerce")
+            force_series = pd.to_numeric(serial_frame[force_column], errors="coerce")
             if force_series.notna().sum() < 2:
                 continue
 
@@ -3769,6 +3825,14 @@ def _load_avg_dynamometer_force_per_phase(
                     y_rel = trial_force.to_numpy(dtype=float)
                     trial_dur_sec = (t_end - t_start).total_seconds()
 
+                    # Use cfg.force_phase_start_offset_sec when explicitly set;
+                    # otherwise fall back to 1/task_freq, which skips exactly one
+                    # cycle and is always cycle-aligned regardless of frequency.
+                    force_offset = (
+                        float(cfg.force_phase_start_offset_sec)
+                        if cfg.force_phase_start_offset_sec is not None
+                        else float(1.0 / task_freq)
+                    )
                     cycles = data_analysis.phase_normalize_cycles(
                         signal=y_rel,
                         t_rel=t_rel,
@@ -3776,7 +3840,7 @@ def _load_avg_dynamometer_force_per_phase(
                         trial_dur_sec=trial_dur_sec,
                         phase_grid=phase_grid,
                         min_samples_per_cycle=2,
-                        start_offset_sec=float(1.0 / task_freq),  # skip first cycle
+                        start_offset_sec=force_offset,
                     )
                     all_cycles.extend(cycles)
 
@@ -3830,7 +3894,9 @@ def _plot_target_sine_panel(
     cfg: CBPAConfig,
     x_label: str,
     show_ylabel: bool = True,
-    dynamometer_force_y: np.ndarray | None = None,
+        dynamometer_force_y: np.ndarray | None = None,
+        is_unscaled_force: bool = True,
+        show_legend: bool = True,
 ) -> None:
     """Draw one target-sine reference panel under a main plot.
 
@@ -3852,7 +3918,7 @@ def _plot_target_sine_panel(
         length as x. Default is None.
     """
     y = _target_sine_values(x, cfg)
-    ax.plot(x, y, color="dimgray", linewidth=1.2, label="Target sine")
+    ax.plot(x, y, color="dimgray", linewidth=1.2, label="Target" if is_unscaled_force else None)
 
     pad = 0.1 * max(1e-6, cfg.target_sine_max_pct_mvc - cfg.target_sine_min_pct_mvc)
     ax.set_ylim(cfg.target_sine_min_pct_mvc - pad, cfg.target_sine_max_pct_mvc + pad)
@@ -3863,21 +3929,26 @@ def _plot_target_sine_panel(
     
     # Optionally overlay dynamometer force data on a separate right y-axis
     if dynamometer_force_y is not None and cfg.include_dynamometer_force:
-        # Create twin axis for force data
-        ax_force = ax.twinx()
-
-        # Plot native task-wise scaled force on right axis (0..1).
-        ax_force.plot(x, dynamometer_force_y, color="forestgreen", linewidth=1.2, alpha=0.9)
+        ax.plot(x, dynamometer_force_y, color="forestgreen", linewidth=1.2, alpha=0.9, label="Measurement" if is_unscaled_force else None)
 
         # Right axis in native force units.
-        ax_force.set_ylim(0, 1)
-        
-        # Set right y-axis label with green color
-        ax_force.set_ylabel("Dynamometer\nForce [0-1]", color="forestgreen", fontweight="bold")
-        ax_force.tick_params(axis="y", labelcolor="forestgreen")
+        if not is_unscaled_force:
+            # ceate scaled ex if necessary:
+            ax_force = ax.twinx()
+
+            ax_force.plot(x, dynamometer_force_y, color="forestgreen", linewidth=1.2, alpha=0.9)
+            ax_force.set_ylim(0, 1)
+
+            # Set right y-axis label with green color
+            ax_force.set_ylabel("Dynamometer\nForce [0-1]", color="forestgreen", fontweight="bold")
+            ax_force.tick_params(axis="y", labelcolor="forestgreen")
+
+        else:  # legend required
+            if show_legend:
+                ax.legend(loc='center right', bbox_to_anchor=(1.275, 0.5))
 
 
-def plot_cbpa_results(results: dict, cfg: CBPAConfig) -> None:
+def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool = True) -> None:
     """Render heatmap and cluster-summary figures for one CBPA result.
 
     Parameters
@@ -3990,13 +4061,15 @@ def plot_cbpa_results(results: dict, cfg: CBPAConfig) -> None:
             # Get subject IDs from results (assuming they were used in the CBPA run)
             valid_subject_ids = list(range(0, 13))  # Fallback to known subjects
             dyno_force = _load_avg_dynamometer_force_per_phase(
-                valid_subject_ids, data_root, t_ax, cfg
+                valid_subject_ids, data_root, t_ax, cfg, use_unscaled_force=use_unscaled_force,
             )
 
         _plot_target_sine_panel(ax_tgt_left, t_ax, cfg, x_label=x_label, show_ylabel=True,
-                                dynamometer_force_y=dyno_force)
+                                dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force)
         _plot_target_sine_panel(ax_tgt_right, t_ax, cfg, x_label=x_label, show_ylabel=True,
-                                dynamometer_force_y=dyno_force)
+                                dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force,
+                                show_legend=False,  # legend only for left plot
+                                )
 
     if cfg.use_phase_normalization:
         phase_axes = [ax, ax2]
