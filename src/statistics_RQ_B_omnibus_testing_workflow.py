@@ -30,8 +30,6 @@ _PSD_COLS: list[str] = [
 ]
 
 _BASE_COVARIATES: list[str] = [
-    'Median Scaled Force [0-1]',
-    'Median Unscaled Force [% MVC]',
     'Task Frequency',
 ]
 
@@ -62,7 +60,9 @@ def fetch_accuracy_level_definitions(
     """
     # Segment ID added only when trial is split into multiple windows
     temporal_controls = (
-        ['Trial ID', 'Segment ID'] if multi_segments_per_trial else ['Trial ID']
+        (['Trial ID', 'Segment ID'] if multi_segments_per_trial else ['Trial ID']) +
+        (['Median Scaled Force [0-1]', 'Median Unscaled Force [% MVC]',] if multi_segments_per_trial else [
+            'Median Unscaled Force [% MVC]'])
     )
     base = _BASE_COVARIATES + temporal_controls
 
@@ -110,7 +110,7 @@ if __name__ == '__main__':
     filemgmt.assert_dir(STATISTICS_OUTPUT_DATA)
 
     ##### PARAMETERS
-    n_within_trial_segments_list: list[int] = [1, 2, 3, 4, 5, 8, 10, 20]
+    n_within_trial_segments_list: list[int] = [1, 2, 5, 10]
 
     # operate on subset of subjects?
     exclude_subjects: list[int] = []
