@@ -11,7 +11,7 @@ from src.pipeline.data_analysis import make_timezone_aware
 
 # accuracy_sampler starts logging squared error after an initial wait phase.
 # Keep this here as single source of truth for downstream timestamp alignment.
-TRIAL_ACCURACY_START_OFFSET_SEC: float = 5.0
+TRIAL_ACCURACY_START_OFFSET_SEC: float = 5.5  # 5 Seconds + Slight latency
 
 
 def build_accuracy_relative_time_axis(
@@ -24,7 +24,11 @@ def build_accuracy_relative_time_axis(
     """Build relative timestamps for trial accuracy samples.
 
     The returned axis is restricted to the effective accuracy window
-    ``[start_offset_sec, trial_dur_sec]`` relative to trial start.
+    ``[start_offset_sec, trial_dur_sec)`` relative to trial start.
+
+    Uses endpoint=False by default because the accuracy sampler collects
+    n samples spaced by 1/rate (≈ effective_dur/n), so the last sample
+    falls at trial_dur - 1/rate, not at trial_dur.
     """
     if n_samples <= 0:
         return np.array([], dtype=float)
