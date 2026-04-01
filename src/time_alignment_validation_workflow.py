@@ -1157,7 +1157,7 @@ if __name__ == "__main__":
     filemgmt.assert_dir(ALIGNMENT_REPORTS)
 
     # Workflow control
-    subjects_to_check = range(11)
+    subjects_to_check = range(11, 12)
     save_reports = True
 
     # Workflow control flags
