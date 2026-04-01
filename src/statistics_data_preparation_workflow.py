@@ -221,12 +221,14 @@ if __name__ == "__main__":
                                 f"len(cmc_times)={len(cmc_times)} vs n_windows={cmc_spectrograms.shape[0]}"
                             )
 
-                        # Use stored time-centers directly; keep NaT where no task-wise slot was assigned.
-                        cmc_times = np.asarray(cmc_times, dtype=np.float64)
-                        cmc_timestamps = pd.DatetimeIndex([
-                            qtc_start + pd.Timedelta(seconds=float(sec)) if np.isfinite(sec) else pd.NaT
-                            for sec in cmc_times
-                        ])
+                        # Reconstruct CMC timestamps via uniform stretching across the
+                        # measured QTC span (mirrors PSD handling and avoids cumulative
+                        # drift when stored time-centers were generated from nominal fs).
+                        cmc_timestamps = data_analysis.add_time_index(
+                            start_timestamp=qtc_start + pd.Timedelta(seconds=cmc_time_window_size_sec / 2),
+                            end_timestamp=qtc_end - pd.Timedelta(seconds=cmc_time_window_size_sec / 2),
+                            n_timesteps=len(cmc_times)
+                        )
                         cmc_timestamps = data_analysis.make_timezone_aware(cmc_timestamps)
 
                         # PHASE-4 PROBE: disabled (requires CMC recomputation to see fixed deltas)
@@ -383,7 +385,7 @@ if __name__ == "__main__":
                         n_samples=len(accuracy_array),
                         trial_dur_sec=(full_end - full_start).total_seconds(),
                         start_offset_sec=data_integration.TRIAL_ACCURACY_START_OFFSET_SEC,
-                        endpoint=True,
+                        endpoint=False,
                     )
                     if acc_t_rel.size == 0:
                         continue
