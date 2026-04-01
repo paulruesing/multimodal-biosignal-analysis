@@ -3232,8 +3232,374 @@ def _resolve_cluster_mask(cluster, n_times: int, n_ch: int) -> np.ndarray:
 
     return flat_mask.reshape(n_times, n_ch)
 
-
 def plot_cmc_accuracy_phase_average(
+        cfg: CBPAConfig,
+        experiment_results_dir: Path,
+        *,
+        accuracy_sd_factor: float = 0.25,
+        cmc_percentile_limits: tuple[float, float] = (3.0, 97.0),
+        figure_size_with_target: tuple[float, float] = (16, 6),
+        figure_size_without_target: tuple[float, float] = (16, 5),
+        grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
+        grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
+        grid_wspace: float = 0.12,
+        grid_hspace_with_target: float = 0.28,
+        phase_xticks: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0, 360.0),
+        phase_marker_lines: tuple[float, ...] = (90.0, 270.0),
+        channel_label_fontsize: float = 6.0,
+        legend_fontsize: float = 8.0,
+        subplot_margins: tuple[float, float, float, float] = (0.06, 0.985, 0.90, 0.10),
+        save_dpi: int = 150,
+        freq_pooling: Literal["max", "mean"] = "max",
+        channel_pooling: Literal["max", "mean"] = "max",
+        use_unscaled_force: bool = True,
+        accuracy_trial_dur_offset_sec: float = 6.0,
+        accuracy_trial_end_cutoff_sec: float = 2.0,
+        plot_accuracy_per_cycle_id: bool = False,
+        accuracy_cycles_to_plot: int = 4,
+        accuracy_cycle_colors: tuple[str, ...] = ("tab:orange", "tab:red", "purple", "black"),
+        min_accuracy_cycle_count: int = 20,
+) -> None:
+    """Create a CBPA-like plot with mean CMC map and phase-normalized accuracy."""
+    import src.pipeline.cbpa as cbpa
+
+    if cfg.modality != "CMC":
+        raise ValueError("plot_cmc_accuracy_phase_average requires cfg.modality='CMC'.")
+    if not cfg.use_phase_normalization:
+        raise ValueError("plot_cmc_accuracy_phase_average requires phase normalization enabled.")
+    if accuracy_sd_factor < 0:
+        raise ValueError("accuracy_sd_factor must be >= 0.")
+    p_low, p_high = cmc_percentile_limits
+    if not (0.0 <= p_low < p_high <= 100.0):
+        raise ValueError("cmc_percentile_limits must satisfy 0 <= low < high <= 100.")
+    if accuracy_cycles_to_plot <= 0:
+        raise ValueError("accuracy_cycles_to_plot must be > 0.")
+    if min_accuracy_cycle_count < 1:
+        raise ValueError("min_accuracy_cycle_count must be >= 1.")
+    if len(accuracy_cycle_colors) == 0:
+        raise ValueError("accuracy_cycle_colors must contain at least one color.")
+
+    filemgmt.assert_dir(cfg.output_dir)
+    plot_label = _derive_cmc_accuracy_hypothesis_label(cfg)
+
+    stats_df = cbpa.load_stats_frame(cfg.data_root)
+    subject_ids = sorted(stats_df["Subject ID"].astype(int).unique())
+    exclude = set(cfg.exclude_subjects or [])
+    subject_ids = [sid for sid in subject_ids if sid not in exclude]
+
+    phase_grid = np.linspace(0, 360, cfg.n_phase_bins, endpoint=False)
+    ch_names = cfg.channels if cfg.channels is not None else cbpa.CMC_EEG_CHANNEL_SUBSET
+
+    subject_cmc_profiles: list[np.ndarray] = []
+    subject_acc_profiles: list[np.ndarray] = []  # used only for legacy (single-line) behaviour
+    valid_subjects: list[int] = []
+
+    # Option A for cycle-wise view: pooled across all subjects + all trials by cycle index
+    pooled_acc_cycles_by_idx: dict[int, list[np.ndarray]] = {
+        cyc_idx: [] for cyc_idx in range(accuracy_cycles_to_plot)
+    }
+
+    for subj in tqdm(subject_ids, desc="Importing Subject Data"):
+        try:
+            spectrogram, freqs, timestamps, log_df = cbpa._load_subject_data(cfg, subj)
+        except Exception as exc:
+            warnings.warn(f"Subject {subj:02}: failed to load data ({exc}). Skipping.")
+            continue
+
+        trial_spans = {int(k): v for k, v in cbpa._get_trial_spans(log_df).items()}
+        if len(trial_spans) == 0:
+            warnings.warn(f"Subject {subj:02}: no trial spans found. Skipping.")
+            continue
+
+        band_power = cbpa._extract_band_power(
+            cfg,
+            spectrogram,
+            freqs,
+            channel_indices=None,
+            freq_pooling=freq_pooling,
+            channel_pooling=channel_pooling,
+        )
+        trial_cond_map = {trial_id: "ALL" for trial_id in trial_spans}
+        cmc_cycles = cbpa._band_power_per_phase(
+            cfg=cfg,
+            band_power=band_power,
+            timestamps=timestamps,
+            trial_spans=trial_spans,
+            trial_cond_map=trial_cond_map,
+            log_df=log_df,
+        ).get("ALL", [])
+
+        if len(cmc_cycles) == 0:
+            warnings.warn(f"Subject {subj:02}: no valid CMC cycles. Skipping.")
+            continue
+
+        # Accuracy handling
+        accuracy_cycles_subject: list[np.ndarray] = []
+        subj_has_any_accuracy = False
+        subj_exp_dir = experiment_results_dir / f"subject_{subj:02}"
+
+        for trial_id, (t_start, t_end) in trial_spans.items():
+            task_freq = cbpa._get_task_freq_for_trial(log_df, t_start, t_end)
+            if task_freq is None or task_freq <= 0:
+                continue
+
+            accuracy = data_integration.fetch_trial_accuracy(
+                experiment_data_dir=subj_exp_dir,
+                trial_id=int(trial_id),
+                log_df=log_df,
+                error_handling="continue",
+            )
+            if accuracy is None:
+                continue
+
+            trial_dur_sec = (t_end - t_start).total_seconds()
+            trial_cycles = _phase_normalize_accuracy_cycles(
+                accuracy=accuracy,
+                phase_grid=phase_grid,
+                task_freq=float(task_freq),
+                trial_dur_sec=float(trial_dur_sec) + accuracy_trial_dur_offset_sec,
+                min_samples_per_cycle=cfg.min_samples_per_cycle,
+                start_offset_sec=float(data_integration.TRIAL_ACCURACY_START_OFFSET_SEC),
+                end_cutoff_sec=accuracy_trial_end_cutoff_sec,
+            )
+            if len(trial_cycles) == 0:
+                continue
+
+            subj_has_any_accuracy = True
+
+            if plot_accuracy_per_cycle_id:
+                for cyc_idx, cyc in enumerate(trial_cycles):
+                    if cyc_idx >= accuracy_cycles_to_plot:
+                        break
+                    pooled_acc_cycles_by_idx[cyc_idx].append(cyc)
+            else:
+                accuracy_cycles_subject.extend(trial_cycles)
+
+        if not subj_has_any_accuracy:
+            warnings.warn(f"Subject {subj:02}: no valid accuracy cycles. Skipping.")
+            continue
+
+        subject_cmc_profiles.append(np.nanmean(np.stack(cmc_cycles, axis=0), axis=0))
+        if not plot_accuracy_per_cycle_id:
+            subject_acc_profiles.append(np.nanmean(np.stack(accuracy_cycles_subject, axis=0), axis=0))
+        valid_subjects.append(subj)
+
+    # Validate data availability
+    if len(subject_cmc_profiles) == 0:
+        warnings.warn("No valid subjects for CMC+accuracy phase plot. Nothing will be plotted.")
+        return
+
+    if not plot_accuracy_per_cycle_id and len(subject_acc_profiles) == 0:
+        warnings.warn("No valid accuracy profiles for legacy single-line plot. Nothing will be plotted.")
+        return
+
+    if plot_accuracy_per_cycle_id:
+        has_any_cycle = any(
+            len(pooled_acc_cycles_by_idx[idx]) >= min_accuracy_cycle_count
+            for idx in range(accuracy_cycles_to_plot)
+        )
+        if not has_any_cycle:
+            warnings.warn(
+                "No cycle index has enough samples for plotting "
+                f"(min_accuracy_cycle_count={min_accuracy_cycle_count})."
+            )
+            return
+
+    cmc_stack = np.stack(subject_cmc_profiles, axis=0)  # (n_subj, n_phase, n_ch)
+    cmc_mean = np.nanmean(cmc_stack, axis=0)
+
+    # Legacy single-line accuracy aggregates
+    if not plot_accuracy_per_cycle_id:
+        acc_stack = np.stack(subject_acc_profiles, axis=0)  # (n_subj, n_phase)
+        acc_mean = np.nanmean(acc_stack, axis=0)
+        acc_mean_smooth = data_analysis.circular_smooth(acc_mean, kernel_bins=5)
+        acc_std = np.nanstd(acc_stack, axis=0)
+        acc_std_smooth = data_analysis.circular_smooth(acc_std, kernel_bins=5)
+
+    fig, ax, cax, ax2, ax_tgt_left, ax_tgt_right = _create_cbpa_dual_panel_figure(
+        show_target_sine=cfg.show_target_sine,
+        figure_size_with_target=figure_size_with_target,
+        figure_size_without_target=figure_size_without_target,
+        grid_width_ratios=grid_width_ratios,
+        grid_height_ratios_with_target=grid_height_ratios_with_target,
+        grid_wspace=grid_wspace,
+        grid_hspace_with_target=grid_hspace_with_target,
+    )
+
+    if cfg.include_suptitle:
+        mode_txt = "cycle-wise pooled accuracy" if plot_accuracy_per_cycle_id else "mean accuracy"
+        fig.suptitle(
+            f"{plot_label}\n"
+            f"Average {cfg.modality} ({cfg.modality_file_id}, {cfg.freq_band}) + Task Error (RMSE, {mode_txt})  |  "
+            f"n = {len(valid_subjects)} subjects",
+            fontsize=10,
+        )
+
+    cmc_vmin = float(np.nanpercentile(cmc_mean, p_low))
+    cmc_vmax = float(np.nanpercentile(cmc_mean, p_high))
+    if not np.isfinite(cmc_vmin) or not np.isfinite(cmc_vmax) or cmc_vmin == cmc_vmax:
+        cmc_vmin, cmc_vmax = None, None
+
+    im = ax.imshow(
+        cmc_mean.T,
+        aspect="auto",
+        origin="lower",
+        cmap="RdBu_r",
+        vmin=cmc_vmin,
+        vmax=cmc_vmax,
+        extent=(phase_grid[0], 360.0, -0.5, len(ch_names) - 0.5),
+    )
+    plt.colorbar(im, cax=cax, label=f"{cfg.freq_band.lower()}-band CMC Value")
+    if not cfg.show_target_sine:
+        ax.set_xlabel("Force Cycle Phase (°)")
+    ax.set_ylabel("Channel index")
+    ax.set_yticks(range(len(ch_names)))
+    ax.set_yticklabels(ch_names, fontsize=channel_label_fontsize)
+    ax.set_title("Averaged phase-normalized CMC map")
+    ax.set_xlim(0, 360)
+
+    # Accuracy panel
+    if plot_accuracy_per_cycle_id:
+        plotted_cycle_count = 0
+
+        for cyc_idx in range(accuracy_cycles_to_plot):
+            cycle_samples = pooled_acc_cycles_by_idx.get(cyc_idx, [])
+            n_cycles = len(cycle_samples)
+
+            if n_cycles < min_accuracy_cycle_count:
+                continue
+
+            cycle_stack = np.stack(cycle_samples, axis=0)  # (n_cycles, n_phase)
+            cyc_mean = np.nanmean(cycle_stack, axis=0)
+            cyc_std = np.nanstd(cycle_stack, axis=0)
+
+            cyc_mean_smooth = data_analysis.circular_smooth(cyc_mean, kernel_bins=5)
+            cyc_std_smooth = data_analysis.circular_smooth(cyc_std, kernel_bins=5)
+            cyc_band = accuracy_sd_factor * cyc_std_smooth
+
+            # Circular wraparound to close 0°/360° gap
+            phase_grid_wrapped = np.concatenate([phase_grid, [360.0]])
+            cyc_mean_wrapped = np.concatenate([cyc_mean_smooth, [cyc_mean_smooth[0]]])
+            cyc_band_wrapped = np.concatenate([cyc_band, [cyc_band[0]]])
+
+            color = accuracy_cycle_colors[cyc_idx % len(accuracy_cycle_colors)]
+            label_mean = f"Cycle {cyc_idx + 1} mean (n={n_cycles})"
+            label_band = f"Cycle {cyc_idx + 1} ±{accuracy_sd_factor:g}x SD"
+
+            ax2.plot(
+                phase_grid_wrapped,
+                cyc_mean_wrapped,
+                color=color,
+                linewidth=1.8,
+                label=label_mean,
+            )
+            ax2.fill_between(
+                phase_grid_wrapped,
+                cyc_mean_wrapped - cyc_band_wrapped,
+                cyc_mean_wrapped + cyc_band_wrapped,
+                color=color,
+                alpha=0.18,
+                label=label_band,
+            )
+            plotted_cycle_count += 1
+
+        if plotted_cycle_count == 0:
+            ax2.text(
+                0.5,
+                0.5,
+                f"No cycle index passed min count ({min_accuracy_cycle_count}).",
+                transform=ax2.transAxes,
+                ha="center",
+                va="center",
+                fontsize=9,
+                color="grey",
+            )
+        else:
+            ax2.legend(fontsize=legend_fontsize, ncol=accuracy_cycles_to_plot // 2 if plot_accuracy_per_cycle_id else 1)
+
+        ax2.set_title("Averaged phase-normalized accuracy (cycle-wise pooled)")
+    else:
+        # Legacy behaviour: single mean ± SD line over subjects
+        acc_band = accuracy_sd_factor * acc_std_smooth
+
+        phase_grid_wrapped = np.concatenate([phase_grid, [360.0]])
+        acc_mean_wrapped = np.concatenate([acc_mean_smooth, [acc_mean_smooth[0]]])
+        acc_band_wrapped = np.concatenate([acc_band, [acc_band[0]]])
+
+        ax2.plot(phase_grid_wrapped, acc_mean_wrapped, color="tab:blue", linewidth=1.8, label="Mean RMSE")
+        ax2.fill_between(
+            phase_grid_wrapped,
+            acc_mean_wrapped - acc_band_wrapped,
+            acc_mean_wrapped + acc_band_wrapped,
+            color="tab:blue",
+            alpha=0.2,
+            label=f"±{accuracy_sd_factor:g} x SD",
+        )
+        ax2.legend(fontsize=legend_fontsize)
+        ax2.set_title("Averaged phase-normalized accuracy")
+
+    if not cfg.show_target_sine:
+        ax2.set_xlabel("Force Cycle Phase (°)")
+    ax2.set_ylabel("Task Error (RMSE)")
+    ax2.set_xlim(0, 360)
+
+    if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
+        dyno_force = None
+        if cfg.include_dynamometer_force:
+            dyno_force = _load_avg_dynamometer_force_per_phase(
+                valid_subjects,
+                experiment_results_dir,
+                phase_grid,
+                cfg,
+                use_unscaled_force=use_unscaled_force,
+            )
+        _plot_target_sine_panel(
+            ax_tgt_left,
+            phase_grid,
+            cfg,
+            x_label="Force Cycle Phase (°)",
+            show_ylabel=True,
+            dynamometer_force_y=dyno_force,
+            is_unscaled_force=use_unscaled_force,
+        )
+        _plot_target_sine_panel(
+            ax_tgt_right,
+            phase_grid,
+            cfg,
+            x_label="Force Cycle Phase (°)",
+            show_ylabel=True,
+            dynamometer_force_y=dyno_force,
+            is_unscaled_force=use_unscaled_force,
+            show_legend=False,
+        )
+
+    phase_axes = [ax, ax2]
+    if cfg.show_target_sine and ax_tgt_left is not None and ax_tgt_right is not None:
+        phase_axes.extend([ax_tgt_left, ax_tgt_right])
+    _apply_phase_axis_style(
+        phase_axes,
+        phase_xticks=phase_xticks,
+        phase_marker_lines=phase_marker_lines,
+    )
+
+    margin_left, margin_right, margin_top, margin_bottom = subplot_margins
+    fig.subplots_adjust(
+        left=margin_left,
+        right=margin_right,
+        top=margin_top,
+        bottom=margin_bottom,
+    )
+
+    if cfg.save_plots:
+        out = cfg.output_dir / filemgmt.file_title(plot_label + "_cmc_accuracy_phase", ".png")
+        fig.savefig(out, dpi=save_dpi, bbox_inches="tight")
+        print(f"  Plot saved: {out}")
+    if cfg.show_plots:
+        plt.show()
+    plt.close(fig)
+
+
+def OLD_plot_cmc_accuracy_phase_average(
         cfg: CBPAConfig,
         experiment_results_dir: Path,
         *,
