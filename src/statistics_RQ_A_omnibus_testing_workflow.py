@@ -123,8 +123,8 @@ if __name__ == '__main__':
     cmc_plot_colors = ['darkorange', 'red', 'green', 'blue', 'purple']
     cmc_plot_n_segments = 10
     # subject wise line plots:
-    plot_cmc_lineplots_normalised: bool = True
-    plot_cmc_lineplots_per_category: bool = False
+    plot_cmc_lineplots_normalised: bool = False
+    plot_cmc_lineplots_per_category: bool = True
     save_cmc_lineplots: bool = True
     # compound scatters:
     show_cmc_scatterplots: bool = False
@@ -192,7 +192,7 @@ if __name__ == '__main__':
     ]
 
     # LME robustness checks / influence measures:
-    conduct_robustness_checks: bool = True
+    conduct_robustness_checks: bool = False
     dep_var_comp_lvl_n_segments_tuples_to_robustness_check: list[tuple[str, int, int]] = [
         # ── CMC DVs: all have significant effects at primary resolution (1-seg, L1) ──
         ('CMC_Extensor_mean_beta', 1, 1),
@@ -227,7 +227,7 @@ if __name__ == '__main__':
     ('CMC_Flexor_max_gamma', 1, 5),"""
 
     # Statistical Power Analysis:
-    conduct_power_analysis: bool = True
+    conduct_power_analysis: bool = False
     # to be filled in upon new significant parameters are found:
     power_configs: list[statistics.PowerConfig] = [
 
