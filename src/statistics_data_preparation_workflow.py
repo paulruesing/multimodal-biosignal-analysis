@@ -24,6 +24,25 @@ if __name__ == "__main__":
     overwrite: bool = True  # True: ALWAYS compute new frame
     n_within_trial_segments_list: list[int] = [1, 2, 3, 4, 5, 8, 10, 20]  # of ~40sec trials
 
+    # Onset transient exclusion: discard this many seconds from the start of
+    # each trial AFTER the latency correction already applied by
+    # get_all_task_start_ends (assumed_latency_sec=3.25 s).  Affects all
+    # modalities uniformly — PSD/CMC/accuracy/force timestamps stay unchanged;
+    # only the segment boundaries shift forward.  Set to 0.0 for the original
+    # behaviour.  Accuracy's own 5.5 s warm-up offset is independent and
+    # remains in effect regardless of this parameter.
+    n_onset_seconds_to_discard: float = 5.5
+
+    # Print per-trial timing breakdown for every subject
+    verbose_trial_timing: bool = True
+
+    # Keep these explicit to make verbose timing diagnostics transparent.
+    # Values need to match get_task_start_end / get_all_task_start_ends defaults in src/pipeline/data_integration.py
+    task_latency_assumption_sec: float = 3.25
+    # needs to match assumed_latency_sec default
+    task_end_transient_cutoff_sec: float = 2.0
+    # needs to match cut_off_sec_to_prevent_transients default
+
 
 
 
@@ -143,16 +162,80 @@ if __name__ == "__main__":
                 sliced_log_df = log_df[qtc_start:qtc_end]
                 sliced_serial_df = serial_df[qtc_start:qtc_end]
 
+                if verbose_trial_timing:
+                    print(
+                        f"  Timing config | latency={task_latency_assumption_sec:.2f}s, "
+                        f"task_end_cutoff={task_end_transient_cutoff_sec:.2f}s, "
+                        f"extra_onset_discard={n_onset_seconds_to_discard:.2f}s, "
+                        f"accuracy_onset_offset={data_integration.TRIAL_ACCURACY_START_OFFSET_SEC:.2f}s"
+                    )
+                    print(
+                        f"  QTC span      | {qtc_start.strftime('%H:%M:%S.%f')[:12]} -> "
+                        f"{qtc_end.strftime('%H:%M:%S.%f')[:12]} "
+                        f"({(qtc_end - qtc_start).total_seconds():.1f}s)"
+                    )
+
                 ### DERIVE SEGMENT TIMESPANS
                 # trial start end times:
                 # (contains default cut-off seconds to prevent transients!)
-                trial_start_end_dict = data_integration.get_all_task_start_ends(log_df, 'dict')
+                trial_start_end_dict = data_integration.get_all_task_start_ends(
+                    log_df,
+                    'dict',
+                    assumed_latency_sec=task_latency_assumption_sec,
+                    cut_off_sec_to_prevent_transients=task_end_transient_cutoff_sec,
+                )
                 # convert into segment start end times:
-                seg_starts = [];
-                seg_ends = [];
+                seg_starts = []
+                seg_ends = []
                 seg_ids = []
-                for start, end in trial_start_end_dict.values():
-                    seg_starts_range = pd.date_range(start, end, periods=n_within_trial_segments + 1, inclusive='both')
+                onset_delta = pd.Timedelta(seconds=n_onset_seconds_to_discard)
+                for trial_id_key, (start, end) in trial_start_end_dict.items():
+                    effective_start = start + onset_delta
+                    if effective_start >= end:
+                        print(
+                            f"  [WARNING] Trial {trial_id_key}: onset discard "
+                            f"({n_onset_seconds_to_discard:.1f}s) exceeds trial "
+                            f"duration ({(end - start).total_seconds():.1f}s). Skipping."
+                        )
+                        continue
+                    if verbose_trial_timing:
+                        try:
+                            raw_start, raw_end = data_integration.get_task_start_end(
+                                log_df,
+                                trial_id=int(trial_id_key),
+                                assumed_latency_sec=0.0,
+                                cut_off_sec_to_prevent_transients=0.0,
+                            )
+                            raw_dur = (raw_end - raw_start).total_seconds()
+                            corrected_dur = (end - start).total_seconds()
+                            effective_dur = (end - effective_start).total_seconds()
+                            print(
+                                f"  Trial {trial_id_key:>2} raw task span      | "
+                                f"{raw_start.strftime('%H:%M:%S.%f')[:12]} -> "
+                                f"{raw_end.strftime('%H:%M:%S.%f')[:12]} ({raw_dur:.1f}s)"
+                            )
+                            print(
+                                f"             + latency {task_latency_assumption_sec:.2f}s, "
+                                f"- end_cutoff {task_end_transient_cutoff_sec:.2f}s -> "
+                                f"{start.strftime('%H:%M:%S.%f')[:12]} -> "
+                                f"{end.strftime('%H:%M:%S.%f')[:12]} ({corrected_dur:.1f}s)"
+                            )
+                            print(
+                                f"             + onset_discard {n_onset_seconds_to_discard:.2f}s -> "
+                                f"{effective_start.strftime('%H:%M:%S.%f')[:12]} -> "
+                                f"{end.strftime('%H:%M:%S.%f')[:12]} ({effective_dur:.1f}s)"
+                            )
+                        except ValueError:
+                            print(
+                                f"  Trial {trial_id_key:>2}: verbose raw-span reconstruction failed; "
+                                f"using corrected span {start.strftime('%H:%M:%S.%f')[:12]} -> "
+                                f"{end.strftime('%H:%M:%S.%f')[:12]}"
+                            )
+                    # segment boundaries:
+                    seg_starts_range = pd.date_range(
+                        effective_start, end,
+                        periods=n_within_trial_segments + 1, inclusive='both',
+                    )
                     for ind, seg_start in enumerate(seg_starts_range.values[:-1]):
                         seg_ids.append(ind)
                         seg_starts.append(pd.Timestamp(seg_start))
@@ -380,6 +463,20 @@ if __name__ == "__main__":
                     if acc_start >= full_end:
                         continue
 
+                    if verbose_trial_timing:
+                        print(
+                            f"    Accuracy trial {trial_id:>2} base window | "
+                            f"{full_start.strftime('%H:%M:%S.%f')[:12]} -> "
+                            f"{full_end.strftime('%H:%M:%S.%f')[:12]} "
+                            f"({(full_end - full_start).total_seconds():.1f}s)"
+                        )
+                        print(
+                            f"                  + onset_offset {data_integration.TRIAL_ACCURACY_START_OFFSET_SEC:.2f}s -> "
+                            f"{acc_start.strftime('%H:%M:%S.%f')[:12]} -> "
+                            f"{full_end.strftime('%H:%M:%S.%f')[:12]} "
+                            f"({(full_end - acc_start).total_seconds():.1f}s), n_samples={len(accuracy_array)}"
+                        )
+
                     # Assign uniform timestamps over effective accuracy span
                     acc_t_rel = data_integration.build_accuracy_relative_time_axis(
                         n_samples=len(accuracy_array),
@@ -390,6 +487,7 @@ if __name__ == "__main__":
                     if acc_t_rel.size == 0:
                         continue
                     accuracy_timestamps = full_start + pd.to_timedelta(acc_t_rel, unit='s')
+                    acc_max = accuracy_timestamps.max()
 
                     # Aggregate per segment with clipped windows to include partial overlaps.
                     # This avoids dropping early segments and lets np.nanmean handle missing values.
@@ -401,15 +499,21 @@ if __name__ == "__main__":
                         seg_end = seg_ends[row_idx]
 
                         # Skip segments without any overlap with available accuracy timestamps.
-                        if seg_end < acc_start or seg_start > full_end:
+                        if seg_end < acc_start or seg_start > acc_max:
                             continue
 
                         valid_row_indices.append(row_idx)
                         trial_seg_starts.append(max(seg_start, acc_start))
-                        trial_seg_ends.append(min(seg_end, full_end))
+                        trial_seg_ends.append(min(seg_end, acc_max))  # Clip to max accuracy timestamp, not full_end
 
                     if not valid_row_indices:
                         continue  # No overlap with available accuracy data in this trial
+
+                    if verbose_trial_timing:
+                        print(
+                            f"                  overlap with segment windows: "
+                            f"{len(valid_row_indices)}/{len(row_indices)} segments"
+                        )
 
                     accuracy_agg = np.sqrt(  # since logged accuracy is SQUARED error
                         data_analysis.apply_window_operator(
