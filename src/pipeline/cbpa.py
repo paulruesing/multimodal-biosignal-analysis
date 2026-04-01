@@ -162,8 +162,34 @@ class CBPAConfig:
     include_dynamometer_force: bool = True
     """If True, overlay the averaged per-cycle dynamometer force on target sine panels."""
 
+    # Phase normalisation offsets
+    phase_start_offset_sec: float | None = None
+    """Seconds to skip at the start of each trial before counting cycles for
+    CMC / EMG-PSD phase normalisation (``_band_power_per_phase``).
+    ``None`` (default) uses the adaptive ``1 / task_freq`` heuristic, which
+    skips exactly one cycle — cycle 0 is always incomplete because trial
+    boundaries do not coincide with force-sine zero crossings.
+    Set to ``TRIAL_ACCURACY_START_OFFSET_SEC`` (5.5) for CMC-accuracy plots
+    so that CMC and accuracy exclude the same warm-up window.
+    Set to ``0.0`` only when cycle-0 inclusion is intentionally desired."""
+
+    force_phase_start_offset_sec: float | None = None
+    """Seconds to skip at the start of each trial before counting cycles for
+    the dynamometer-force phase normalisation overlay.
+    ``None`` (default) uses the adaptive ``1 / task_freq`` heuristic, which
+    skips exactly one cycle and is cycle-aligned by construction — appropriate
+    for the task-onset force ramp.  Set an explicit float to override."""
+
     # Optional figure suptitle (useful to disable for publication figures)
     include_suptitle: bool = False
+
+    # Time-axis reconstruction mode for stored spectrogram windows.
+    use_stretched_window_timestamps: bool = False
+    """If True, reconstruct absolute window-center timestamps by uniformly
+    stretching ``n_windows`` centers between ``qtc_start + half_window`` and
+    ``qtc_end - half_window``. This avoids cumulative drift when saved
+    time-centers were derived with a slightly mismatched sampling frequency.
+    If False, use stored second offsets directly (``qtc_start + sec``)."""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -277,9 +303,6 @@ def _load_subject_data(
     log_df.index = data_analysis.make_timezone_aware(log_df.index)
 
     qtc_start, qtc_end = data_integration.get_qtc_measurement_start_end(log_df, False)
-
-    tw = cfg.psd_time_window_sec if cfg.modality == "PSD" else cfg.cmc_time_window_sec
-
     spectrogram, times, freqs = fetch_stored_spectrograms(
         subject_feat_dir,
         modality=cfg.modality,
@@ -287,11 +310,23 @@ def _load_subject_data(
     )
     # spectrogram shape: (n_windows, n_freqs, n_channels)
 
-    timestamps = data_analysis.add_time_index(
-        start_timestamp=qtc_start + pd.Timedelta(seconds=tw / 2),
-        end_timestamp=qtc_end - pd.Timedelta(seconds=tw / 2),
-        n_timesteps=len(times),
-    )
+    times_arr = np.asarray(times, dtype=np.float64)
+    if cfg.use_stretched_window_timestamps:
+        half_window = 0.5 * (
+            cfg.cmc_time_window_sec if cfg.modality == "CMC" else cfg.psd_time_window_sec
+        )
+        timestamps = data_analysis.add_time_index(
+            start_timestamp=qtc_start + pd.Timedelta(seconds=half_window),
+            end_timestamp=qtc_end - pd.Timedelta(seconds=half_window),
+            n_timesteps=len(times_arr),
+        )
+    else:
+        # Direct reconstruction from stored per-window second offsets.
+        # Non-finite centres (outside-task slots) become NaT and are filtered downstream.
+        timestamps = pd.DatetimeIndex([
+            qtc_start + pd.Timedelta(seconds=float(sec)) if np.isfinite(sec) else pd.NaT
+            for sec in times_arr
+        ])
     timestamps = data_analysis.make_timezone_aware(timestamps)
 
     return spectrogram, freqs, timestamps, log_df
@@ -595,55 +630,22 @@ def _extract_band_power(
     # band_power: (n_windows, n_channels)
     return band_power
 
-
 def _band_power_per_phase(
     cfg: CBPAConfig,
-    band_power: np.ndarray,          # (n_windows, n_channels)
+    band_power: np.ndarray,
     timestamps: pd.DatetimeIndex,
-    trial_spans: dict[int, tuple],   # {trial_id: (start, end)}
-    trial_cond_map: dict[int, str],  # {trial_id: condition_label}
+    trial_spans: dict[int, tuple],
+    trial_cond_map: dict[int, str],
     log_df: pd.DataFrame,
 ) -> dict[str, list[np.ndarray]]:
-    """
-    Convert band_power time series into phase-resolved profiles per condition.
-
-    For each trial:
-      1. Retrieve task frequency from log_df.
-      2. Skip trial if samples-per-cycle < cfg.min_samples_per_cycle.
-      3. For each complete force cycle, map CMC windows to phase (0–360°)
-         and interpolate onto cfg.n_phase_bins.
-      4. Accumulate cycles by condition label.
-
-    Returns
-    -------
-    cycles_by_condition : dict mapping condition_label →
-                          list of (n_phase_bins, n_channels) arrays,
-                          one entry per valid cycle across all trials.
-
-    Parameters
-    ----------
-    cfg : CBPAConfig
-        Configuration with phase-normalization parameters.
-    band_power : np.ndarray
-        Array of shape ``(n_windows, n_channels)``.
-    timestamps : pd.DatetimeIndex
-        Absolute timestamps aligned with ``band_power`` windows.
-    trial_spans : dict[int, tuple]
-        Trial start/end timestamps per trial ID.
-    trial_cond_map : dict[int, str]
-        Mapping from trial ID to condition label.
-    log_df : pd.DataFrame
-        Enriched log frame used to recover per-trial task frequency.
-    """
     phase_grid = np.linspace(0, 360, cfg.n_phase_bins, endpoint=False)
     cycles_by_condition: dict[str, list[np.ndarray]] = {}
 
     for trial_id, (t_start, t_end) in trial_spans.items():
         condition = trial_cond_map.get(int(trial_id))
         if condition is None:
-            continue  # trial not assigned to any condition
+            continue
 
-        # Retrieve task frequency for this trial
         task_freq = _get_task_freq_for_trial(log_df, t_start, t_end)
         if task_freq is None or task_freq <= 0:
             warnings.warn(
@@ -652,8 +654,6 @@ def _band_power_per_phase(
             continue
 
         cycle_dur_sec = 1.0 / task_freq
-
-        # Check temporal resolution: samples per cycle
         tw_step = (cfg.cmc_time_window_sec if cfg.modality == "CMC"
                    else cfg.psd_time_window_sec) * (1.0 - cfg.overlap_ratio)
         samples_per_cycle = cycle_dur_sec / tw_step
@@ -665,23 +665,29 @@ def _band_power_per_phase(
             )
             continue
 
-        # Slice spectrogram windows belonging to this trial
-        mask = (timestamps >= t_start) & (timestamps < t_end)
-        trial_bp = band_power[mask]          # (n_windows_in_trial, n_channels)
+        mask     = (timestamps >= t_start) & (timestamps < t_end)
+        trial_bp = band_power[mask]
         trial_ts = timestamps[mask]
-
 
         if len(trial_ts) == 0:
             continue
 
-        # Convert absolute timestamps to seconds relative to trial start
         t_rel = np.array(
             [(ts - t_start).total_seconds() for ts in trial_ts],
             dtype=float,
         )
-
-        # replace the entire "for cycle_idx in range(...)" block with:
         trial_dur_sec = (t_end - t_start).total_seconds()
+
+        # Use cfg.phase_start_offset_sec when explicitly set;
+        # otherwise fall back to 1/task_freq, which skips exactly one
+        # cycle and is always cycle-aligned regardless of frequency.
+        phase_offset = (
+            float(cfg.phase_start_offset_sec)
+            if cfg.phase_start_offset_sec is not None
+            else float(1.0 / task_freq)
+        )
+
+        # print(f"Phase normalising: {cfg.freq_band} band of {cfg.modality} for {cfg.modality_file_id}")
         cycles = data_analysis.phase_normalize_cycles(
             signal=trial_bp,
             t_rel=t_rel,
@@ -689,203 +695,14 @@ def _band_power_per_phase(
             trial_dur_sec=trial_dur_sec,
             phase_grid=phase_grid,
             min_samples_per_cycle=cfg.min_samples_per_cycle,
-            start_offset_sec=0.0,  # no offset for CMC/EMG
+            start_offset_sec=phase_offset,
             show_debug_cycle_wise_plots=False,
             show_debug_trial_wise_plots=False,
         )
         for cycle_profile in cycles:
             cycles_by_condition.setdefault(condition, []).append(cycle_profile)
-def _extract_band_power(
-    cfg: CBPAConfig,
-    spectrogram: np.ndarray,
-    freqs: np.ndarray,
-    channel_indices: list[int] | None,
-    freq_pooling: Literal["max", "mean"] = "max",
-    channel_pooling: Literal["max", "mean"] = "max",
-) -> np.ndarray:
-    """
-    Reduce spectrogram to band-wise time x channel data.
 
-    For CMC, this enforces the intended order:
-      1) max/mean over EMG channels (if present as 4th axis),
-      2) max/mean over frequencies within cfg.freq_band.
-
-    For PSD, this computes the mean within cfg.freq_band.
-
-    Output shape is always (n_windows, n_channels_selected).
-
-    We call aggregate_psd_spectrogram with a single op on axis=1 (freq) so
-    that time and channel axes are untouched.
-
-    Pooling rule:
-      - PSD: mean within frequency band
-      - CMC: max/mean within frequency band (after optional EMG max/mean)
-
-    Parameters
-    ----------
-    cfg : CBPAConfig
-        Active run configuration that defines modality and frequency band.
-    spectrogram : np.ndarray
-        Input spectrogram. Expected shapes:
-        - PSD: ``(n_windows, n_freqs, n_channels)``
-        - CMC: ``(n_windows, n_freqs, n_eeg)`` or
-          ``(n_windows, n_freqs, n_eeg, n_emg)``.
-    freqs : np.ndarray
-        Frequency vector matching the spectrogram frequency axis.
-    channel_indices : list[int] | None
-        Optional channel subset indices (used for PSD path).
-    freq_pooling : {'max', 'mean'}, default 'max'
-        Pooling operation for frequency dimension (default 'max' for CMC behavior).
-    channel_pooling : {'max', 'mean'}, default 'max'
-        Pooling operation for EMG channels (default 'max' for CMC behavior).
-
-    Returns
-    -------
-    np.ndarray
-        Band-reduced array of shape ``(n_windows, n_channels_selected)``.
-
-    Raises
-    ------
-    ValueError
-        If the spectrogram dimensionality does not match modality expectations.
-    """
-    spec = spectrogram
-
-    if cfg.modality == "CMC":
-        if spec.ndim == 4:
-            # Expected raw CMC layout: (time, freq, eeg, emg)
-            if channel_pooling == "mean":
-                spec = np.nanmean(spec, axis=3)
-            else:  # "max"
-                spec = np.nanmax(spec, axis=3)
-        elif spec.ndim != 3:
-            raise ValueError(
-                f"Unexpected CMC spectrogram shape {spec.shape}. "
-                "Expected 3D (time,freq,eeg) or 4D (time,freq,eeg,emg)."
-            )
-    elif spec.ndim != 3:
-        raise ValueError(
-            f"Unexpected PSD spectrogram shape {spec.shape}. Expected 3D (time,freq,channel)."
-        )
-
-    band_op = freq_pooling if cfg.modality == "CMC" else "mean"
-
-    band_power = aggregate_psd_spectrogram(
-        spec,
-        freqs,
-        normalize_mvc=False,
-        channel_indices=channel_indices,
-        is_log_scaled=cfg.psd_is_log_scaled if cfg.modality == "PSD" else False,
-        freq_slice=cfg.freq_band,
-        aggregation_ops=[(band_op, 1)],  # reduce freq band only → (n_windows, n_channels)
-    )
-    # band_power: (n_windows, n_channels)
-    return band_power
-
-
-def _band_power_per_phase(
-    cfg: CBPAConfig,
-    band_power: np.ndarray,          # (n_windows, n_channels)
-    timestamps: pd.DatetimeIndex,
-    trial_spans: dict[int, tuple],   # {trial_id: (start, end)}
-    trial_cond_map: dict[int, str],  # {trial_id: condition_label}
-    log_df: pd.DataFrame,
-) -> dict[str, list[np.ndarray]]:
-    """
-    Convert band_power time series into phase-resolved profiles per condition.
-
-    For each trial:
-      1. Retrieve task frequency from log_df.
-      2. Skip trial if samples-per-cycle < cfg.min_samples_per_cycle.
-      3. For each complete force cycle, map CMC windows to phase (0–360°)
-         and interpolate onto cfg.n_phase_bins.
-      4. Accumulate cycles by condition label.
-
-    Returns
-    -------
-    cycles_by_condition : dict mapping condition_label →
-                          list of (n_phase_bins, n_channels) arrays,
-                          one entry per valid cycle across all trials.
-
-    Parameters
-    ----------
-    cfg : CBPAConfig
-        Configuration with phase-normalization parameters.
-    band_power : np.ndarray
-        Array of shape ``(n_windows, n_channels)``.
-    timestamps : pd.DatetimeIndex
-        Absolute timestamps aligned with ``band_power`` windows.
-    trial_spans : dict[int, tuple]
-        Trial start/end timestamps per trial ID.
-    trial_cond_map : dict[int, str]
-        Mapping from trial ID to condition label.
-    log_df : pd.DataFrame
-        Enriched log frame used to recover per-trial task frequency.
-    """
-    phase_grid = np.linspace(0, 360, cfg.n_phase_bins, endpoint=False)
-    cycles_by_condition: dict[str, list[np.ndarray]] = {}
-
-    for trial_id, (t_start, t_end) in trial_spans.items():
-        condition = trial_cond_map.get(int(trial_id))
-        if condition is None:
-            continue  # trial not assigned to any condition
-
-        # Retrieve task frequency for this trial
-        task_freq = _get_task_freq_for_trial(log_df, t_start, t_end)
-        if task_freq is None or task_freq <= 0:
-            warnings.warn(
-                f"  [phase] Trial {trial_id}: Task Frequency missing or zero. Skipping."
-            )
-            continue
-
-        cycle_dur_sec = 1.0 / task_freq
-
-        # Check temporal resolution: samples per cycle
-        tw_step = (cfg.cmc_time_window_sec if cfg.modality == "CMC"
-                   else cfg.psd_time_window_sec) * (1.0 - cfg.overlap_ratio)
-        samples_per_cycle = cycle_dur_sec / tw_step
-        if samples_per_cycle < cfg.min_samples_per_cycle:
-            warnings.warn(
-                f"  [phase] Trial {trial_id}: only {samples_per_cycle:.1f} "
-                f"CMC samples/cycle at {task_freq} Hz — skipping "
-                f"(min={cfg.min_samples_per_cycle})."
-            )
-            continue
-
-        # Slice spectrogram windows belonging to this trial
-        mask = (timestamps >= t_start) & (timestamps < t_end)
-        trial_bp = band_power[mask]          # (n_windows_in_trial, n_channels)
-        trial_ts = timestamps[mask]
-
-
-        if len(trial_ts) == 0:
-            continue
-
-        # Convert absolute timestamps to seconds relative to trial start
-        t_rel = np.array(
-            [(ts - t_start).total_seconds() for ts in trial_ts],
-            dtype=float,
-        )
-
-        # replace the entire "for cycle_idx in range(...)" block with:
-        trial_dur_sec = (t_end - t_start).total_seconds()
-        cycles = data_analysis.phase_normalize_cycles(
-            signal=trial_bp,
-            t_rel=t_rel,
-            task_freq=task_freq,
-            trial_dur_sec=trial_dur_sec,
-            phase_grid=phase_grid,
-            min_samples_per_cycle=cfg.min_samples_per_cycle,
-            start_offset_sec=float(1.0 / task_freq),  # skip first cycle
-        )
-        for cycle_profile in cycles:
-            cycles_by_condition.setdefault(condition, []).append(cycle_profile)
-
-    return cycles_by_condition
-
-
-
-    return cycles_by_condition
+    return cycles_by_condition  # ← was missing in version 1
 
 
 
