@@ -70,7 +70,7 @@ if __name__ == "__main__":
         output_dir           = RQ_A_REPORT_DIR,
         file_identifier_suffix='RQ_A',
 
-        primary_n_segments   = 1,
+        primary_n_segments   = 5,
         resolution_segments  = [1, 5, 10],
 
         alpha_adjusted       = 0.05,
