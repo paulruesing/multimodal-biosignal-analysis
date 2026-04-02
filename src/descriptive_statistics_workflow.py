@@ -1,10 +1,12 @@
 from collections import defaultdict
+from datetime import date, datetime
 from pathlib import Path
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy import stats as scipy_stats
 
 import src.pipeline.data_integration as data_integration
 import src.utils.file_management as filemgmt
@@ -31,6 +33,160 @@ _TRIAL_COLORS  = {"Music": _COLOR_SUBJECT, "Silence": _SALMON}
 
 # ── Global font scaling ───────────────────────────────────────────────────────
 plt.rcParams.update({"font.size": 11})
+
+
+def _compute_age_years(birthdate_value: object, reference_date: date) -> float:
+    """Compute integer age in years from a birthdate string; returns NaN on parse failure."""
+    if pd.Series([birthdate_value]).isna().iloc[0]:
+        return np.nan
+
+    birthdate_text = str(birthdate_value).strip()
+    if not birthdate_text:
+        return np.nan
+
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            born = datetime.strptime(birthdate_text, fmt).date()
+            break
+        except ValueError:
+            born = None
+    if born is None:
+        parsed = pd.to_datetime(birthdate_text, dayfirst=True, errors="coerce")
+        if pd.isna(parsed):
+            return np.nan
+        born = parsed.date()
+
+    age_years = (
+        reference_date.year
+        - born.year
+        - ((reference_date.month, reference_date.day) < (born.month, born.day))
+    )
+    return float(age_years)
+
+
+def _summarize_numeric_series(series: pd.Series) -> dict[str, float]:
+    """Return n/range/mean/median/std summary for a numeric series (NaN-safe)."""
+    numeric_series = pd.Series(pd.to_numeric(pd.Series(series), errors="coerce"))
+    values = numeric_series.dropna()
+    if values.empty:
+        return {
+            "n": 0.0,
+            "min": np.nan,
+            "max": np.nan,
+            "mean": np.nan,
+            "median": np.nan,
+            "std": np.nan,
+        }
+
+    return {
+        "n": float(len(values)),
+        "min": float(values.min()),
+        "max": float(values.max()),
+        "mean": float(values.mean()),
+        "median": float(values.median()),
+        "std": float(values.std()),
+    }
+
+
+def _print_numeric_summary_line(metric_name: str, series: pd.Series, decimals: int = 3) -> None:
+    """Print one formatted summary line for a metric."""
+    stats = _summarize_numeric_series(series)
+    n = int(stats["n"])
+    if n == 0:
+        print(f"  {metric_name:<28} n=0   range=[nan, nan]   mean=nan   median=nan   sd=nan")
+        return
+
+    fmt = f"{{:.{decimals}f}}"
+    print(
+        f"  {metric_name:<28} n={n:<3} "
+        f"range=[{fmt.format(stats['min'])}, {fmt.format(stats['max'])}]   "
+        f"mean={fmt.format(stats['mean'])}   "
+        f"median={fmt.format(stats['median'])}   "
+        f"sd={fmt.format(stats['std'])}"
+    )
+
+
+def _print_grouped_metric_summary(
+    df: pd.DataFrame,
+    group_col: str,
+    metric_col: str,
+    title: str,
+    decimals: int = 3,
+) -> None:
+    """Print per-category summary stats for one metric column."""
+    if group_col not in df.columns:
+        print(f"\n── {title} ─────────────────────────────────────")
+        print(f"  skipped: missing column '{group_col}'")
+        return
+    if metric_col not in df.columns:
+        print(f"\n── {title} ─────────────────────────────────────")
+        print(f"  skipped: missing column '{metric_col}'")
+        return
+
+    grouped = df[[group_col, metric_col]].copy()
+    grouped[metric_col] = pd.to_numeric(grouped[metric_col], errors="coerce")
+    grouped = grouped.dropna(subset=[group_col, metric_col])
+
+    print(f"\n── {title} ─────────────────────────────────────")
+    if grouped.empty:
+        print("  no valid data")
+        return
+
+    for category in sorted(grouped[group_col].astype(str).unique()):
+        category_values = pd.Series(
+            grouped.loc[grouped[group_col].astype(str) == category, metric_col]
+        )
+        _print_numeric_summary_line(f"{category}", category_values, decimals=decimals)
+
+
+def _resolve_existing_column(
+    df: pd.DataFrame,
+    candidates: list[str],
+    context_name: str,
+) -> str:
+    """Return the first existing column from candidates, else raise a clear error."""
+    for column_name in candidates:
+        if column_name in df.columns:
+            return column_name
+    raise KeyError(
+        f"Missing column for {context_name}. Tried: {', '.join(candidates)}"
+    )
+
+
+def _print_pearson_correlation(
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    title: str,
+    decimals: int = 3,
+) -> None:
+    """Print Pearson correlation test for two numeric columns with robust guardrails."""
+    print(f"\n── {title} ─────────────────────────────────────────")
+
+    if x_col not in df.columns or y_col not in df.columns:
+        print(f"  skipped: missing column(s) '{x_col}' / '{y_col}'")
+        return
+
+    pair_df = df[[x_col, y_col]].copy()
+    pair_df[x_col] = pd.to_numeric(pair_df[x_col], errors="coerce")
+    pair_df[y_col] = pd.to_numeric(pair_df[y_col], errors="coerce")
+    pair_df = pair_df.dropna(subset=[x_col, y_col])
+
+    n = len(pair_df)
+    if n < 3:
+        print(f"  skipped: insufficient valid pairs (n={n}, need >= 3)")
+        return
+
+    if pair_df[x_col].nunique() <= 1 or pair_df[y_col].nunique() <= 1:
+        print("  skipped: Pearson undefined (at least one variable is constant)")
+        return
+
+    r_val, p_val = scipy_stats.pearsonr(pair_df[x_col], pair_df[y_col])
+    fmt = f"{{:.{decimals}f}}"
+    print(
+        f"  {x_col} vs {y_col}: "
+        f"r={fmt.format(r_val)}, p={fmt.format(p_val)}, n={n}"
+    )
 
 # ════════════════════════════════════════════════════════════════════════════
 # PRIVATE HELPERS
@@ -218,7 +374,9 @@ def _draw_multi_boxplot(
     ax.tick_params(axis="y", labelsize=8)
     ax.tick_params(axis="x", length=0)
     ax.spines[["top", "right"]].set_visible(False)
-    ax.spines[["left", "bottom"]].set_color("#AAAAAA")
+    ax.spines[["left", "bottom"]].set_color("black")
+    ax.tick_params(axis="both", colors="black")
+    ax.yaxis.label.set_color("black")
 
     if legend_handles:
         ax.legend(
@@ -365,16 +523,16 @@ def plot_combined_descriptive_mosaic(
 
     _draw_multi_boxplot(ax_acc, [
         ("Accuracy", accuracy_series),
-    ], color=_COLOR_ACCURACY, ylabel="RMS Error", subject_metadata=subject_metadata,
+    ], color=_COLOR_ACCURACY, ylabel="Task Error (RMSE)", subject_metadata=subject_metadata,
                         jitter=.1,
                         # same jitter argumentation here
                         )
 
     # ── SECTION LABELS ───────────────────────────────────────────────────────
     for y_fig, label in [(0.955, "Participant Characteristics"),
-                         (0.495, "Study Structure & Results")]:
-        fig.text(0.05, y_fig, label, fontsize=10, color="#888888",
-                 va="bottom", style="italic")
+                         (0.495, "Study Results")]:
+        fig.text(0.05, y_fig, label, fontsize=10, color="black",
+                 va="bottom", style="normal")
 
     if suptitle is not None:
         fig.suptitle(suptitle, fontsize=13, y=0.99)
@@ -406,11 +564,15 @@ if __name__ == "__main__":
     personal_records: list[dict] = []
     for subject_ind in range(N_SUBJECTS):
         subject_dir   = EXPERIMENT_DATA / f"subject_{subject_ind:02}"
-        personal_data = data_integration.fetch_personal_data(subject_dir)
+        personal_data = data_integration.fetch_personal_data(
+            subject_dir, include_name_and_birthdate=True,
+        )
         personal_records.append({
             "Subject ID":    subject_ind,
+            "Birthdate":     personal_data.get("Birthdate"),
             "Gender":        personal_data["Gender"],
             "Dominant hand": personal_data["Dominant hand"],
+            "Listening habit [0-3]": personal_data["Listening habit [0-3]"],
             "Musical skill": personal_data["Musical skill"],
             "Athleticism":   personal_data["Athleticism"],
             "Dancing habit": personal_data["Dancing habit"],
@@ -424,10 +586,14 @@ if __name__ == "__main__":
 
     # Subject-level series — index them by Subject ID
     musical_skill_series = personal_df.set_index("Subject ID")["Musical skill"]
+    listening_habit_series = personal_df.set_index("Subject ID")["Listening habit [0-3]"]
     athleticism_series = personal_df.set_index("Subject ID")["Athleticism"]
     dancing_habit_series = personal_df.set_index("Subject ID")["Dancing habit"]
     fatigue_series = personal_df.set_index("Subject ID")["Total fatigue"]
     pleasure_series = personal_df.set_index("Subject ID")["Total pleasure"]
+    age_series = personal_df["Birthdate"].apply(
+        lambda value: _compute_age_years(value, reference_date=date.today())
+    )
 
     print("\n── Personal data ───────────────────────────────────────────")
     print(personal_df.to_string(index=False))
@@ -444,8 +610,24 @@ if __name__ == "__main__":
     cmc_extensor_gamma_series = stats_df.set_index("Subject ID")["CMC_Extensor_mean_gamma"].dropna()
 
     music_df = stats_df.loc[stats_df["Music Listening"].astype(bool)]
-    liking_series = music_df.set_index("Subject ID")["Liking [0-7]"].dropna()
-    familiarity_series = music_df.set_index("Subject ID")["Familiarity [0-7]"].dropna()
+    liking_col = _resolve_existing_column(
+        music_df,
+        candidates=["Liking [0-7]", "Liking"],
+        context_name="liking",
+    )
+    familiarity_col = _resolve_existing_column(
+        music_df,
+        candidates=["Familiarity [0-7]", "Familiarity"],
+        context_name="familiarity",
+    )
+    perceived_category_col = _resolve_existing_column(
+        music_df,
+        candidates=["Perceived Category", "Category or Silence"],
+        context_name="perceived category",
+    )
+
+    liking_series = music_df.set_index("Subject ID")[liking_col].dropna()
+    familiarity_series = music_df.set_index("Subject ID")[familiarity_col].dropna()
     accuracy_series = stats_df.set_index("Subject ID")["RMS_Accuracy"].dropna()
 
     """musical_skill_series = personal_df["Musical skill"]
@@ -471,6 +653,49 @@ if __name__ == "__main__":
     cmc_extensor_beta_series  = stats_df["CMC_Extensor_mean_beta"].dropna()
     cmc_extensor_gamma_series = stats_df["CMC_Extensor_mean_gamma"].dropna()
     accuracy_series           = stats_df["RMS_Accuracy"].dropna()"""
+
+    # ── Final numeric summary output (all boxplot metrics + requested extras) ──
+    print("\n── Final metric summary (Range / Mean / Median / SD) ────────")
+    boxplot_metrics: dict[str, pd.Series] = {
+        "Musical Skill": musical_skill_series,
+        "Listening habit [0-3]": listening_habit_series,
+        "Athleticism": athleticism_series,
+        "Dancing Habit": dancing_habit_series,
+        "Total Fatigue": fatigue_series,
+        "Total Pleasure": pleasure_series,
+        "Liking [0-7]": liking_series,
+        "Familiarity [0-7]": familiarity_series,
+        "CMC Flexor beta": cmc_flexor_beta_series,
+        "CMC Flexor gamma": cmc_flexor_gamma_series,
+        "CMC Extensor beta": cmc_extensor_beta_series,
+        "CMC Extensor gamma": cmc_extensor_gamma_series,
+        "RMS Accuracy": accuracy_series,
+    }
+    for metric_name, metric_series in boxplot_metrics.items():
+        _print_numeric_summary_line(metric_name, metric_series)
+
+    print("\n── Participant age (years; based on Birthdate) ───────────────")
+    _print_numeric_summary_line("Age", age_series, decimals=2)
+
+    music_perceived_df = stats_df.loc[stats_df["Music Listening"].astype(bool)].copy()
+    _print_grouped_metric_summary(
+        music_perceived_df,
+        group_col=perceived_category_col,
+        metric_col=liking_col,
+        title="Music liking by perceived category",
+    )
+    _print_grouped_metric_summary(
+        music_perceived_df,
+        group_col=perceived_category_col,
+        metric_col=familiarity_col,
+        title="Music familiarity by perceived category",
+    )
+    _print_pearson_correlation(
+        stats_df,
+        x_col=liking_col,
+        y_col=familiarity_col,
+        title="Liking - Familiarity Pearson correlation (all subjects/trials)",
+    )
 
     # ── Render ───────────────────────────────────────────────────────────────
     plot_combined_descriptive_mosaic(
