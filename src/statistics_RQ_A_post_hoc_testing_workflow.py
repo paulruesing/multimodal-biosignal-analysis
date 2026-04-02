@@ -46,11 +46,11 @@ if __name__ == "__main__":
     exclude_subjects: list[int] = []
 
     # workflow control:
-    analyse_cbp: bool = False
+    analyse_cbp: bool = True
     analyse_cmc_accuracy_phase_plot: bool = False
     analyse_emg_psd_phase_plot: bool = False
 
-    analyse_subject_heterogeneity: bool = True
+    analyse_subject_heterogeneity: bool = False
     dep_vars_to_analyse: list[str] = [
         "CMC_Flexor_mean_beta", "CMC_Extensor_mean_beta",
         "CMC_Flexor_mean_gamma", "CMC_Extensor_mean_gamma",
@@ -77,7 +77,7 @@ if __name__ == "__main__":
 
     cmc_accuracy_plot_cfg = CBPAConfig(
         modality="CMC",
-        modality_file_id="Flexor",
+        modality_file_id="Extensor",
         freq_band="beta",
         channels=None,
         use_phase_normalization=True,
