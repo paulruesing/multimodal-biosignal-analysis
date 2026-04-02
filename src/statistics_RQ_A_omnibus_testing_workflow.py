@@ -162,7 +162,7 @@ if __name__ == '__main__':
         # ('MEDIATION: Emotional Modulation', 'Emotional_State'),
 
     ]
-    levels_for_fdr_correction: list[int] = [2, 3]
+    levels_for_fdr_correction: list[int] = [2, 3]  # exploratory changes, better don't change this
     save_single_time_res_summaries: bool = False
 
     # plotting:
@@ -171,14 +171,14 @@ if __name__ == '__main__':
     show_effect_plots: bool = True  # if False, either of the above will be hidden
     param_rename_dict: dict[str, str] = {
         # ── Category or Silence — main effects ───────────────────────────────────
-        "Category or Silence[T.Classic]": "Classic vs. Silence",
+        "Category or Silence[T.Classic]": "Classical vs. Silence",
         "Category or Silence[T.Groovy]": "Groovy vs. Silence",
         "Category or Silence[T.Happy]": "Happy vs. Silence",
         "Category or Silence[T.Sad]": "Sad vs. Silence",
 
         # ── Category or Silence — interactions ───────────────────────────────────
-        "Category or Silence[T.Classic]:Dancing habit [0-7]_centered": "Classic vs. Silence x Dancing habit",
-        "Category or Silence[T.Classic]:Musical skill [0-7]_centered": "Classic vs. Silence x Musical skill",
+        "Category or Silence[T.Classic]:Dancing habit [0-7]_centered": "Classical vs. Silence x Dancing habit",
+        "Category or Silence[T.Classic]:Musical skill [0-7]_centered": "Classical vs. Silence x Musical skill",
         "Category or Silence[T.Groovy]:Dancing habit [0-7]_centered": "Groovy vs. Silence x Dancing habit",
         "Category or Silence[T.Groovy]:Musical skill [0-7]_centered": "Groovy vs. Silence x Musical skill",
         "Category or Silence[T.Happy]:Dancing habit [0-7]_centered": "Happy vs. Silence x Dancing habit",
@@ -187,9 +187,9 @@ if __name__ == '__main__':
         "Category or Silence[T.Sad]:Musical skill [0-7]_centered": "Sad vs. Silence x Musical skill",
 
         # ── Music Listening — [T.True] dropped (boolean flag) ────────────────────
-        "Music Listening[T.True]": "Music Listening",
-        "Music Listening[T.True]:Dancing habit [0-7]_centered": "Music Listening x Dancing habit",
-        "Music Listening[T.True]:Musical skill [0-7]_centered": "Music Listening x Musical skill",
+        "Music Listening[T.True]": "Music listening",
+        "Music Listening[T.True]:Dancing habit [0-7]_centered": "Music listening x Dancing habit",
+        "Music Listening[T.True]:Musical skill [0-7]_centered": "Music listening x Musical skill",
 
         # ── Covariates ────────────────────────────────────────────────────────────
         "Dancing habit [0-7]_centered": "Dancing habit",
@@ -197,9 +197,9 @@ if __name__ == '__main__':
 
         # ── Units ─────────────────────────────────────────────────────────────
         "Median Unscaled Force [% MVC]": "Force",
-        "Median Scaled Force [0-1]": "Task-wise Scaled Force [0-1]",
-        "Trial ID": "Trial Number",
-        "Segment ID": "Intra-trial Time",
+        "Median Scaled Force [0-1]": "Task-wise scaled force [0-1]",
+        "Trial ID": "Trial number",
+        "Segment ID": "Intra-trial time",
     }
 
     # comparison levels:
@@ -207,7 +207,7 @@ if __name__ == '__main__':
     lvls_to_include: list[str] = [f"lvl_{lvl_ind}" for lvl_ind in lvl_inds_to_include]
 
     # across time resolution comparison:
-    plot_time_resolution_comparisons: bool = False
+    plot_time_resolution_comparisons: bool = True
     parameter_comp_lvl_tuples_to_plot_across_time: list[tuple[str, int]] = [
         ('Category or Silence[T.Happy]', 1),  # sig across all CMC DVs + EEG PSD
         ('Category or Silence[T.Groovy]', 1),  # sig: Flexor mean/max beta, Flexor mean gamma
@@ -248,541 +248,102 @@ if __name__ == '__main__':
     ]
 
     # Statistical Power Analysis:
-    conduct_power_analysis: bool = True
+    conduct_power_analysis: bool = False  # todo: change, is very run-time extensive
+    #### POWER CONFIG DEFINITION ###
+    # ── Shared parameter sets ──────────────────────────────────────────────────
+    _LVL0_PARAMS = [
+        "C(Q('Music Listening'))[T.True]",
+        "C(Q('Music Listening'))[T.True]:Q('Dancing habit [0-7]_centered')",
+        "Q('Dancing habit [0-7]_centered')",
+        "Q('Musical skill [0-7]_centered')",
+    ]
+    _LVL1_PARAMS = [
+        "C(Q('Category or Silence'))[T.Happy]",
+        "C(Q('Category or Silence'))[T.Groovy]",
+        "C(Q('Category or Silence'))[T.Classic]",
+        "C(Q('Category or Silence'))[T.Sad]",
+        "C(Q('Category or Silence'))[T.Groovy]:Q('Dancing habit [0-7]_centered')",
+        "C(Q('Category or Silence'))[T.Happy]:Q('Dancing habit [0-7]_centered')",
+        "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
+        "C(Q('Category or Silence'))[T.Classic]:Q('Musical skill [0-7]_centered')",
+        "Q('Median Unscaled Force [% MVC]')",
+        "Q('Trial ID')",
+    ]
+    _LVL1_5SEG_PARAMS = _LVL1_PARAMS + [
+        "Q('Segment ID')",
+        "Q('Median Scaled Force [0-1]')",
+    ]
+    _LVL2_PARAMS = [
+        "C(Q('Perceived Category'))[T.Happy]",
+        "C(Q('Perceived Category'))[T.Groovy]",
+        "C(Q('Perceived Category'))[T.Sad]",
+        "Liking_centered_squared",
+        "Q('Familiarity [0-7]')",
+    ]
+    _STANDARD_DVS = [
+        "CMC_Extensor_mean_beta",
+        "CMC_Extensor_max_beta",
+        "CMC_Extensor_mean_gamma",
+        "CMC_Extensor_max_gamma",
+        "CMC_Flexor_mean_beta",
+        "CMC_Flexor_max_beta",
+        "CMC_Flexor_mean_gamma",
+        "CMC_Flexor_max_gamma",
+        "PSD_eeg_FC_CP_T_theta",
+        "PSD_eeg_F_C_beta",
+        "PSD_eeg_Global_gamma",
+        "PSD_eeg_P_PO_alpha",
+    ]
     power_configs: list[statistics.PowerConfig] = [
 
-        ######### n_segments = 1: all effects tracked at 1-seg resolution #########
+        # ═══════════════════════════════════════════════════════════════════════
+        #  Standardised entries — all 12 DVs, identical structure per level
+        # ═══════════════════════════════════════════════════════════════════════
 
-        # ── CMC_Flexor_mean_beta ── Level 1 + 2: near-sig Happy (d=0.73 / 0.71) ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_mean_beta",
-            comp_lvl=1,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # near-sig, d=0.73
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_mean_beta",
-            comp_lvl=2,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",  # near-sig, d=0.71
-            ],
-        ),
-
-        # ── CMC_Extensor_max_beta ── Level 2 + 3: Perceived Category = Happy ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_max_beta",
-            comp_lvl=2,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",  # near-sig 1-seg, sig 5/10-seg, d=0.59, power=0.958
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_max_beta",
-            comp_lvl=3,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",  # power=0.940
-            ],
-        ),
-
-        # ── CMC_Extensor_max_gamma ── Level 1: Category or Silence Happy + Force ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_max_gamma",
-            comp_lvl=1,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.67, power=0.920
-                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.18, power=0.614 (under-powered)
-            ],
-        ),
-        # ── CMC_Extensor_max_gamma ── Level 2 + 3: Perceived Category = Happy ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_max_gamma",
-            comp_lvl=2,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",  # sig, d=0.64, power=0.918
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_max_gamma",
-            comp_lvl=3,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",  # sig, d=0.64, power=0.896
-            ],
-        ),
-
-        # ── CMC_Extensor_mean_beta ── Level 1: Category + interactions + Force ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_mean_beta",
-            comp_lvl=1,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Classic]:Q('Dancing habit [0-7]_centered')",
-                # sig, d=-0.23, under-powered
-                "C(Q('Category or Silence'))[T.Classic]:Q('Musical skill [0-7]_centered')",
-                # sig, d=0.12, under-powered
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.35, power=0.816
-                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.15, power=0.862
-            ],
-        ),
-        # ── CMC_Extensor_mean_beta ── Level 2: Perceived Category + interactions + covariates ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_mean_beta",
-            comp_lvl=2,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",  # sig, d=0.40, power=0.950
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.17, under-powered
-                "C(Q('Perceived Category'))[T.Sad]:Q('Dancing habit [0-7]_centered')",  # sig, d=0.21, under-powered
-                "Q('Dancing habit [0-7]_centered')",  # sig, d=-0.51, under-powered
-                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.15, power=0.512 (under-powered)
-            ],
-        ),
-        # ── CMC_Extensor_mean_beta ── Level 3 ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_mean_beta",
-            comp_lvl=3,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",  # sig, d=0.40, power=0.920
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.17, under-powered
-            ],
-        ),
-
-        # ── CMC_Extensor_mean_gamma ── Level 1: Category + Force ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_mean_gamma",
-            comp_lvl=1,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.49, power=0.922
-                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.20, power=0.912
-            ],
-        ),
-        # ── CMC_Extensor_mean_gamma ── Level 2: Perceived Category + interactions + covariates ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_mean_gamma",
-            comp_lvl=2,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",  # sig, d=0.44, power=0.902
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.18, under-powered
-                "Q('Dancing habit [0-7]_centered')",  # sig, under-powered
-                "Q('Median Unscaled Force [% MVC]')",  # sig, power=0.654 (under-powered)
-            ],
-        ),
-
-        # ── CMC_Flexor_max_beta ── Level 1: Category + interactions + covariates ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_max_beta",
-            comp_lvl=1,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Classic]:Q('Dancing habit [0-7]_centered')",
-                # sig, d=-0.30, under-powered
-                "C(Q('Category or Silence'))[T.Groovy]",  # sig, d=0.49, power=0.780 (under-powered)
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.72, power=0.918
-                "C(Q('Category or Silence'))[T.Happy]:Q('Dancing habit [0-7]_centered')",  # sig, d=-0.33, under-powered
-                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.21
-                "Q('Musical skill [0-7]_centered')",  # sig
-            ],
-        ),
-        # ── CMC_Flexor_max_beta ── Level 2: Perceived Category (Happy + Groovy) + interactions ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_max_beta",
-            comp_lvl=2,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Groovy]",  # sig, power=0.906
-                "C(Q('Perceived Category'))[T.Groovy]:Q('Musical skill [0-7]_centered')",  # sig, under-powered
-                "C(Q('Perceived Category'))[T.Happy]",  # sig
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, under-powered
-            ],
-        ),
-        # ── CMC_Flexor_max_beta ── Level 3 ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_max_beta",
-            comp_lvl=3,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Groovy]",
-                "C(Q('Perceived Category'))[T.Groovy]:Q('Musical skill [0-7]_centered')",
-                "C(Q('Perceived Category'))[T.Happy]",
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
-            ],
-        ),
-
-        # ── CMC_Flexor_max_gamma ── Level 1: Category or Silence = Happy ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_max_gamma",
-            comp_lvl=1,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.79, power=0.966
-            ],
-        ),
-
-        # ── CMC_Flexor_mean_gamma ── Level 1: Category + Groovy + interactions + Force ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_mean_gamma",
-            comp_lvl=1,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Classic]:Q('Dancing habit [0-7]_centered')",
-                # sig, d=-0.30, under-powered
-                "C(Q('Category or Silence'))[T.Groovy]",  # sig, d=0.49, power=0.780 (under-powered)
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.71, power=0.956
-                "C(Q('Category or Silence'))[T.Happy]:Q('Dancing habit [0-7]_centered')",  # sig, d=-0.33, under-powered
-                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.21, power=0.810
-            ],
-        ),
-        # ── CMC_Flexor_mean_gamma ── Level 2: Perceived Category + interactions ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_mean_gamma",
-            comp_lvl=2,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Groovy]:Q('Dancing habit [0-7]_centered')",  # sig, under-powered
-                "C(Q('Perceived Category'))[T.Happy]",  # sig, power=0.740 (under-powered)
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, under-powered
-            ],
-        ),
-
-        # ── PSD_emg_1_flexor_Global_all ── Level 2 + 3 ──
-        statistics.PowerConfig(
-            dependent_var="PSD_emg_1_flexor_Global_all",
-            comp_lvl=2,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Groovy]:Q('Musical skill [0-7]_centered')",
-                "C(Q('Perceived Category'))[T.Happy]",
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
-                "Q('Median Unscaled Force [% MVC]')",
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="PSD_emg_1_flexor_Global_all",
-            comp_lvl=3,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Groovy]:Q('Musical skill [0-7]_centered')",
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
-                "Q('Median Unscaled Force [% MVC]')",
-            ],
-        ),
-
-        # ── PSD_emg_2_extensor_Global_all ── Level 0 + 1: Force only ──
-        statistics.PowerConfig(
-            dependent_var="PSD_emg_2_extensor_Global_all",
-            comp_lvl=0,
-            n_segments=1,
-            target_parameters=[
-                "Q('Median Unscaled Force [% MVC]')",  # sig, d=-0.17, power=0.764 (under-powered)
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="PSD_emg_2_extensor_Global_all",
-            comp_lvl=1,
-            n_segments=1,
-            target_parameters=[
-                "Q('Median Unscaled Force [% MVC]')",  # sig, d=-0.13, power=0.516 (under-powered)
-            ],
-        ),
-        # ── PSD_emg_2_extensor_Global_all ── Level 2 + 3 ──
-        statistics.PowerConfig(
-            dependent_var="PSD_emg_2_extensor_Global_all",
-            comp_lvl=2,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Happy]",
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
-                "Q('Median Unscaled Force [% MVC]')",
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="PSD_emg_2_extensor_Global_all",
-            comp_lvl=3,
-            n_segments=1,
-            target_parameters=[
-                "C(Q('Perceived Category'))[T.Groovy]:Q('Musical skill [0-7]_centered')",
-                "C(Q('Perceived Category'))[T.Happy]",
-                "C(Q('Perceived Category'))[T.Happy]:Q('Musical skill [0-7]_centered')",
-                "C(Q('Perceived Category'))[T.Sad]:Q('Musical skill [0-7]_centered')",
-                "Q('Median Unscaled Force [% MVC]')",
-            ],
-        ),
-
-        ######### n_segments = 5: significant effects at 5-seg (secondary resolution) #########
-
-        # ── CMC_Extensor_mean_beta ── Level 1: newly sig at 5-seg ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_mean_beta",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.23, power=0.738 (under-powered)
-            ],
-        ),
-
-        # ── CMC_Extensor_max_beta ── Level 1: 5 sig effects at 5-seg ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_max_beta",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "Q('Dancing habit [0-7]_centered')",  # sig, d=-0.29
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.24
-                "C(Q('Category or Silence'))[T.Classic]:Q('Dancing habit [0-7]_centered')",  # sig, d=-0.22
-                "C(Q('Category or Silence'))[T.Classic]",  # sig, d=-0.21
-                "C(Q('Category or Silence'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.11
-            ],
-        ),
-
-        # ── CMC_Extensor_mean_gamma ── Level 1: 7 sig effects at 5-seg ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_mean_gamma",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",  # sig, d=-0.86 LARGE
-                "Q('Dancing habit [0-7]_centered')",  # sig, d=-0.38
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.28, power=0.890
-                "C(Q('Category or Silence'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.08
-                "C(Q('Category or Silence'))[T.Classic]:Q('Musical skill [0-7]_centered')",  # sig, d=0.08
-                "Q('Segment ID')",  # sig, d=0.04
-                "Q('Trial ID')",  # sig, d=-0.01
-            ],
-        ),
-
-        # ── CMC_Extensor_max_gamma ── Level 1: 2 sig effects at 5-seg (was 0 at 1-seg) ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_max_gamma",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.26, power=0.886
-                "Q('Segment ID')",  # sig, d=0.05
-            ],
-        ),
-
-        # ── CMC_Flexor_mean_beta ── Level 1: 4 sig effects at 5-seg (was 0 at 1-seg) ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_mean_beta",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.55 MEDIUM, power=0.894
-                "C(Q('Category or Silence'))[T.Happy]:Q('Dancing habit [0-7]_centered')",  # sig, d=-0.33, under-powered
-                "C(Q('Category or Silence'))[T.Groovy]",  # sig, d=0.32
-                "Q('Segment ID')",  # sig, d=-0.07
-            ],
-        ),
-
-        # ── CMC_Flexor_max_beta ── Level 0: Music×DancHab, newly sig at 5-seg ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_max_beta",
-            comp_lvl=0,
-            n_segments=5,
-            target_parameters=[
-                "C(Q('Music Listening'))[T.True]:Q('Dancing habit [0-7]_centered')",  # sig, d=-0.13
-            ],
-        ),
-        # ── CMC_Flexor_max_beta ── Level 1: 5 sig effects at 5-seg (Happy×MusSkill added vs 1-seg) ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_max_beta",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.41, power=0.890
-                "C(Q('Category or Silence'))[T.Happy]:Q('Dancing habit [0-7]_centered')",  # sig, d=-0.33
-                "C(Q('Category or Silence'))[T.Classic]:Q('Dancing habit [0-7]_centered')",  # sig, d=-0.25
-                "C(Q('Category or Silence'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.13
-            ],
-        ),
-
-        # ── CMC_Flexor_mean_gamma ── Level 1: 3 sig effects at 5-seg (was 0 at 1-seg) ──
-        # NOTE: exact 5-seg parameters to verify from report; candidates based on structure:
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_mean_gamma",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.71, power=0.956
-                "C(Q('Category or Silence'))[T.Happy]:Q('Dancing habit [0-7]_centered')",  # sig, d=-0.33
-                "C(Q('Category or Silence'))[T.Groovy]",  # sig, d=0.49
-                "C(Q('Category or Silence'))[T.Classic]:Q('Dancing habit [0-7]_centered')",  # sig, d=-0.30
-                "Q('Median Unscaled Force [% MVC]')",  # sig, d=0.21
-            ],
-        ),
-
-        # ── CMC_Flexor_max_gamma ── Level 1: 1 sig effect at 5-seg (was 0 at 1-seg) ──
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_max_gamma",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.79, power=0.966
-            ],
-        ),
-
-        # ── EEG PSD H2 (theta) ── Level 1: Happy — newly sig at 5-seg ──
-        statistics.PowerConfig(
-            dependent_var="PSD_eeg_FC_CP_T_theta",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.44 (1 effect)
-            ],
-        ),
-
-        # ── EEG PSD H3 (beta) ── Level 1: Happy — newly sig at 5-seg ──
-        statistics.PowerConfig(
-            dependent_var="PSD_eeg_F_C_beta",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.40
-            ],
-        ),
-
-        # ── EEG PSD H5 (gamma) ── Level 1: Happy — newly sig at 5-seg ──
-        statistics.PowerConfig(
-            dependent_var="PSD_eeg_Global_gamma",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.39
-            ],
-        ),
-
-        # ── PSD_emg_2_extensor_Global_all ── Level 0 + 1 at 5-seg: Scaled Force dominant ──
-        statistics.PowerConfig(
-            dependent_var="PSD_emg_2_extensor_Global_all",
-            comp_lvl=0,
-            n_segments=5,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",  # sig, d=1.47 LARGE
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="PSD_emg_2_extensor_Global_all",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",  # sig, d=1.48 LARGE
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.19
-                "C(Q('Category or Silence'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.11
-                "C(Q('Category or Silence'))[T.Classic]:Q('Musical skill [0-7]_centered')",  # sig, d=0.09
-                "C(Q('Category or Silence'))[T.Groovy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.07
-            ],
-        ),
-
-        # ── PSD_emg_1_flexor_Global_all ── Level 0 + 1 at 5-seg: Scaled Force + music effects ──
-        statistics.PowerConfig(
-            dependent_var="PSD_emg_1_flexor_Global_all",
-            comp_lvl=0,
-            n_segments=5,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",  # sig, d=1.93 LARGE
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="PSD_emg_1_flexor_Global_all",
-            comp_lvl=1,
-            n_segments=5,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",  # sig, d=1.96 LARGE
-                "C(Q('Category or Silence'))[T.Happy]",  # sig, d=0.27
-                "C(Q('Category or Silence'))[T.Happy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.14
-                "C(Q('Category or Silence'))[T.Happy]:Q('Dancing habit [0-7]_centered')",  # sig, d=-0.14
-                "C(Q('Category or Silence'))[T.Groovy]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.12
-                "C(Q('Category or Silence'))[T.Sad]:Q('Musical skill [0-7]_centered')",  # sig, d=-0.08
-                "C(Q('Category or Silence'))[T.Classic]:Q('Musical skill [0-7]_centered')",  # sig, d=0.08
-                "Q('Trial ID')",  # sig, d=0.01
-            ],
-        ),
-
-        ######### N_segments = 2: Segment ID and Scaled Force interactions #########
-        # NOTE: unchanged — tests 2-segment-specific granularity
-
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_mean_gamma",
-            comp_lvl=1,
-            n_segments=2,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",
-                "Q('Segment ID')"
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_max_gamma",
-            comp_lvl=1,
-            n_segments=2,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",
-                "Q('Segment ID')"
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_mean_beta",
-            comp_lvl=1,
-            n_segments=2,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",
-                "Q('Segment ID')"
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="CMC_Flexor_max_beta",
-            comp_lvl=1,
-            n_segments=2,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",
-                "Q('Segment ID')"
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_mean_gamma",
-            comp_lvl=1,
-            n_segments=2,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",
-                "Q('Segment ID')"
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_max_gamma",
-            comp_lvl=1,
-            n_segments=2,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",
-                "Q('Segment ID')"
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_mean_beta",
-            comp_lvl=1,
-            n_segments=2,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",
-                "Q('Segment ID')"
-            ],
-        ),
-        statistics.PowerConfig(
-            dependent_var="CMC_Extensor_max_beta",
-            comp_lvl=1,
-            n_segments=2,
-            target_parameters=[
-                "Q('Median Scaled Force [0-1]')",
-                "Q('Segment ID')"
-            ],
-        ),
+        *[
+            cfg
+            for dv in _STANDARD_DVS
+            for cfg in [
+                # ── n_segments = 1 ──────────────────────────────────────────
+                statistics.PowerConfig(
+                    dependent_var=dv,
+                    comp_lvl=0,
+                    n_segments=1,
+                    target_parameters=_LVL0_PARAMS,
+                ),
+                statistics.PowerConfig(
+                    dependent_var=dv,
+                    comp_lvl=1,
+                    n_segments=1,
+                    target_parameters=_LVL1_PARAMS,
+                ),
+                statistics.PowerConfig(
+                    dependent_var=dv,
+                    comp_lvl=2,
+                    n_segments=1,
+                    target_parameters=_LVL2_PARAMS,
+                ),
+                # ── n_segments = 5 ──────────────────────────────────────────
+                statistics.PowerConfig(
+                    dependent_var=dv,
+                    comp_lvl=0,
+                    n_segments=5,
+                    target_parameters=_LVL0_PARAMS,
+                ),
+                statistics.PowerConfig(
+                    dependent_var=dv,
+                    comp_lvl=1,
+                    n_segments=5,
+                    target_parameters=_LVL1_5SEG_PARAMS,  # +SegID, +ScaledForce
+                ),
+                statistics.PowerConfig(
+                    dependent_var=dv,
+                    comp_lvl=2,
+                    n_segments=5,
+                    target_parameters=_LVL2_PARAMS,
+                ),
+            ]
+        ],
     ]
 
     #######################################################
@@ -1118,9 +679,10 @@ if __name__ == '__main__':
         cmc_flexor_hypotheses = [h for h in available_hypotheses if 'CMC' in h and 'Flexor' in h and 'VALIDATION: ' not in h]
         cmc_extensor_hypotheses = [h for h in available_hypotheses if 'CMC' in h and 'Extensor' in h and 'VALIDATION: ' not in h]
         psd_hypotheses = [h for h in available_hypotheses if 'PSD' in h and 'VALIDATION: ' not in h]
+        validation_hypotheses = [h for h in available_hypotheses if 'VALIDATION: ' in h]
 
         for parameter, comparison_level in parameter_comp_lvl_tuples_to_plot_across_time:
-            for hypotheses in [cmc_flexor_hypotheses, cmc_extensor_hypotheses, psd_hypotheses]:
+            for hypotheses in [cmc_flexor_hypotheses, cmc_extensor_hypotheses, psd_hypotheses, validation_hypotheses]:
                 if len(hypotheses) == 0:
                     continue
                 visualizations.plot_time_resolution_forest_mosaic(
