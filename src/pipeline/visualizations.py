@@ -2890,7 +2890,7 @@ def plot_cmc_lineplot_normalised(
                 include_std_dev=False,
                 std_dev_factor=0.0,
                 x_ticks=x_ticks,
-                y_label_override=f'{muscle} {freq_band.capitalize()} Normalized CMC [%]',
+                y_label_override=f'{muscle} {freq_band.capitalize()} CMC [Norm. %]',
                 y_label_all_columns=False,
                 show_grid=show_grid,
                 grid_color='lightgrey',
@@ -3011,13 +3011,14 @@ def _format_cmc_subplot(
     # Y-axis formatting
     if col_ind == 0 or y_label_all_columns:
         if y_label_override is not None:
-            ax.set_ylabel(y_label_override)
+            y_label = y_label_override
+
         else:
             ylabel = f"{muscle} {freq_band.capitalize()} CMC (Mean"
             if include_std_dev and extended_y_label:
                 ylabel += f" ± {std_dev_factor:.1f}x Std.Dev."
             ylabel += ")"
-            ax.set_ylabel(ylabel)
+        ax.set_ylabel(y_label_override, fontsize=10)
     else:
         ax.set_ylabel('')
 
@@ -3455,7 +3456,7 @@ def plot_cmc_accuracy_phase_average(
     ax.set_ylabel("Channel index")
     ax.set_yticks(range(len(ch_names)))
     ax.set_yticklabels(ch_names, fontsize=channel_label_fontsize)
-    ax.set_title("Averaged phase-normalized CMC map")
+    ax.set_title(f"Averaged phase-normalized {cfg.modality_file_id.lower()} CMC")
     ax.set_xlim(0, 360)
 
     # Accuracy panel
@@ -4404,3 +4405,4 @@ def old_plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bo
     if cfg.show_plots:
         plt.show()
     plt.close(fig)
+
