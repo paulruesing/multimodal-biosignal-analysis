@@ -148,26 +148,47 @@ def smart_save_fig(dir: str | Path,
 def plot_category_reassignment_sankey(category_reassignment_frame: pd.DataFrame,
                                       song_colors: dict[str, str],
                                       preferred_order: list[str] | None = None,
+                                      rename_dict: dict[str, str] | None = None,
                                       show_title: bool = False,
                                       output_dir: str | Path | None = None,
                                       width: int = 700,
                                       height: int = 400):
-    """Plot category reassignments as a two-column Sankey (original -> perceived)."""
+    """Plot category reassignments as a two-column Sankey (original -> perceived).
+
+    ``rename_dict`` can be used to relabel music categories for display. The mapping is
+    applied before ordering and grouping, so multiple original categories may collapse
+    into the same displayed label.
+    """
     import plotly.graph_objects as go
 
     if preferred_order is None:
         preferred_order = ['Happy', 'Groovy', 'Sad', 'Classic']
+
+    rename_dict = rename_dict or {}
+    preferred_order = [rename_dict.get(cat, cat) for cat in preferred_order]
 
     sankey_source = category_reassignment_frame[['from', 'to']].dropna()
     if len(sankey_source) == 0:
         print("No category reassignments available for Sankey plot.")
         return None
 
+    sankey_source = sankey_source.copy()
+    sankey_source['from_display'] = sankey_source['from'].map(lambda cat: rename_dict.get(cat, cat))
+    sankey_source['to_display'] = sankey_source['to'].map(lambda cat: rename_dict.get(cat, cat))
+
+    def representative_raw_category(raw_values: pd.Series) -> str:
+        for raw_category in raw_values:
+            if raw_category in song_colors:
+                return raw_category
+        return raw_values.iloc[0]
+
     transition_counts = (
         sankey_source
-        .groupby(['from', 'to'], as_index=False)
-        .size()
-        .rename(columns={'size': 'value'})
+        .groupby(['from_display', 'to_display'], as_index=False)
+        .agg(
+            value=('from_display', 'size'),
+            from_raw=('from', representative_raw_category),
+        )
     )
 
     def ordered_categories(values: list[str]) -> list[str]:
@@ -180,13 +201,26 @@ def plot_category_reassignment_sankey(category_reassignment_frame: pd.DataFrame,
             return [0.50]
         return np.linspace(top, bottom, n).tolist()
 
-    def color_with_alpha(category: str, alpha: float) -> str:
-        base_color = song_colors.get(category, 'gray')
+    def color_with_alpha(category: str, alpha: float, raw_category: str | None = None) -> str:
+        base_color = song_colors.get(category, song_colors.get(raw_category, 'gray'))
         r, g, b, _ = mcolors.to_rgba(base_color)
         return f"rgba({int(r * 255)}, {int(g * 255)}, {int(b * 255)}, {alpha:.2f})"
 
-    left_categories = ordered_categories(transition_counts['from'].unique().tolist())
-    right_categories = ordered_categories(transition_counts['to'].unique().tolist())
+    left_categories = ordered_categories(transition_counts['from_display'].unique().tolist())
+    right_categories = ordered_categories(transition_counts['to_display'].unique().tolist())
+
+    left_raw_by_display = (
+        sankey_source
+        .groupby('from_display')['from']
+        .agg(representative_raw_category)
+        .to_dict()
+    )
+    right_raw_by_display = (
+        sankey_source
+        .groupby('to_display')['to']
+        .agg(representative_raw_category)
+        .to_dict()
+    )
 
     left_ids = [f"L::{cat}" for cat in left_categories]
     right_ids = [f"R::{cat}" for cat in right_categories]
@@ -197,12 +231,21 @@ def plot_category_reassignment_sankey(category_reassignment_frame: pd.DataFrame,
     right_y = spaced_positions(len(right_categories))
     node_x = [0.13] * len(left_categories) + [0.87] * len(right_categories)
     node_y = left_y + right_y
-    node_color = [color_with_alpha(cat, 0.85) for cat in (left_categories + right_categories)]
+    node_color = [
+        color_with_alpha(cat, 0.85, left_raw_by_display.get(cat))
+        for cat in left_categories
+    ] + [
+        color_with_alpha(cat, 0.85, right_raw_by_display.get(cat))
+        for cat in right_categories
+    ]
 
-    link_source = [node_id_to_index[f"L::{cat}"] for cat in transition_counts['from']]
-    link_target = [node_id_to_index[f"R::{cat}"] for cat in transition_counts['to']]
+    link_source = [node_id_to_index[f"L::{cat}"] for cat in transition_counts['from_display']]
+    link_target = [node_id_to_index[f"R::{cat}"] for cat in transition_counts['to_display']]
     link_value = transition_counts['value'].to_list()
-    link_color = [color_with_alpha(cat, 0.55) for cat in transition_counts['from']]
+    link_color = [
+        color_with_alpha(display_cat, 0.55, raw_category)
+        for display_cat, raw_category in zip(transition_counts['from_display'], transition_counts['from_raw'])
+    ]
 
     fig = go.Figure(data=[go.Sankey(
         arrangement='fixed',
@@ -2122,7 +2165,7 @@ def draw_time_resolution_forest_plot(
         effects_frame: pd.DataFrame,
         parameter: str,
         comparison_level: str | int,
-        time_resolution_column: str,
+        n_segments_column: str,
         hypothesis: str | None = None,
         hypothesis_column: str = 'Hypothesis',
         param_column: str = 'Parameter',
@@ -2144,7 +2187,7 @@ def draw_time_resolution_forest_plot(
     Forest plot comparing one parameter at one comparison level across time resolutions.
 
     The parameter name is shown as the plot title. The y-axis holds time resolution
-    labels (from `time_resolution_column`), one row per model type per resolution.
+    labels (from `n_segments_column`), one row per model type per resolution.
 
     Parameters
     ----------
@@ -2156,7 +2199,7 @@ def draw_time_resolution_forest_plot(
         Exact value to match in `param_column`.
     comparison_level : str
         Exact value to match in `comparison_lvl_column`.
-    time_resolution_column : str
+    n_segments_column : str
         Column whose values label the y-axis rows (e.g. 'n_segments', 'Time Resolution').
     y_axis_label : str
         Y-axis label. Defaults to 'Model Time Resolution'.
@@ -2190,13 +2233,13 @@ def draw_time_resolution_forest_plot(
     df = df.reset_index(drop=True)
 
     # --- sort by time resolution, then model type ---
-    df = df.sort_values(by=[time_resolution_column, model_type_column], ascending=False).reset_index(drop=True)
+    df = df.sort_values(by=[n_segments_column, model_type_column], ascending=True).reset_index(drop=True)
 
     # --- y-axis labels: resolution | model_type ---
     if is_multiple_model_types:
-        df['y_label'] = (df[time_resolution_column].round(2).astype(str) + ' | ' +
+        df['y_label'] = (df[n_segments_column].round(2).astype(str) + ' | ' +
                          df[model_type_column].astype(str))
-    else: df['y_label'] = df[time_resolution_column].round(2).astype(str)
+    else: df['y_label'] = df[n_segments_column].round(2).astype(str)
 
     # --- confidence intervals ---
     df['ci_lower'] = df[coeff_column] - CI_z_score * df[se_column]
@@ -2226,11 +2269,11 @@ def draw_time_resolution_forest_plot(
 
     df['y_pos'] = 0.0  # initialise before loop assignment to set dtype
     for idx, row in df.iterrows():
-        if current_resolution is not None and row[time_resolution_column] != current_resolution:
+        if current_resolution is not None and row[n_segments_column] != current_resolution:
             separator_positions.append(y_position)
             y_position += 1
         df.at[idx, 'y_pos'] = y_position
-        current_resolution = row[time_resolution_column]
+        current_resolution = row[n_segments_column]
         y_position += 1
 
     # flip so first row is at top
@@ -2293,6 +2336,8 @@ def draw_time_resolution_forest_plot(
     ax.set_ylim(-0.5, max_y + 0.5)
 
     # --- x-axis ---
+    from matplotlib.ticker import MaxNLocator
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
     ax.set_xlabel(f'{display_parameter} β', fontsize=max(min(250/len(display_parameter), 11), 6), fontweight='bold')
     ax.tick_params(axis='x', labelsize=10)
 
@@ -2329,10 +2374,10 @@ def plot_time_resolution_forest_mosaic(
         hypotheses: list[str],
         parameter: str,
         comparison_level: str | int,
-        time_resolution_column: str = 'Time Resolution',
+        n_segments_column: str = 'N. Segments',
         exclude_intercepts: bool = True,
         model_type: str | None = None,
-        y_axis_label: str = 'Time Res. [sec]',
+        y_axis_label: str = 'Intra-Trial Segments',
         output_dir: Path = None,
         file_identifier_suffix: str | None = None,
         hidden: bool = False,
@@ -2388,7 +2433,7 @@ def plot_time_resolution_forest_mosaic(
 
     # --- auto plot size: height driven by number of time-resolution rows ---
     if plot_size == 'auto':
-        n_rows = df[time_resolution_column].nunique() * (1 if model_type else 2)
+        n_rows = df[n_segments_column].nunique() * (1 if model_type else 2)
         plot_size = (3 * len(hypotheses), max(2, n_rows * 0.6))
 
     fig, axs = plt.subplots(1, len(hypotheses), figsize=plot_size, constrained_layout=True)
@@ -2409,7 +2454,7 @@ def plot_time_resolution_forest_mosaic(
             effects_frame=df,
             parameter=parameter,
             comparison_level=comparison_level,
-            time_resolution_column=time_resolution_column,
+            n_segments_column=n_segments_column,
             hypothesis=hypothesis,
             p_column=p_col,
             y_axis_label=y_axis_label if col_ind == 0 else '',
