@@ -51,7 +51,7 @@ if __name__ == '__main__':
     analyse_category_fit: bool = True  # plot, how many participants RE-assigned categories
     cluster_results: bool = False
     compute_mutual_information: bool = False  # analyse relation music features -> genres / categories
-    plot_scatters: bool = True  # plot feature distribution across categories
+    plot_scatters: bool = False  # plot feature distribution across categories
 
     # plot parameters:
     song_colors = {'Classic': 'orange', 'Groovy': 'red',
@@ -292,7 +292,7 @@ if __name__ == '__main__':
             song_artists = []
             subject_task_start_ends = get_all_task_start_ends(subject_log_frame, 'list')
             for start, _ in subject_task_start_ends:
-                subset = subject_log_frame.loc[start, :]
+                subset = subject_log_frame.loc[start:].iloc[0]
                 if np.isnan(subset['Song ID']): continue   # skip silence trials
                 original_categories.append(subset['Music Category'])
                 perceived_categories.append(subset['Perceived Category'])
@@ -324,6 +324,7 @@ if __name__ == '__main__':
             song_colors=song_colors,
             show_title=False,
             output_dir=PLOT_DIR,
+            rename_dict={'Classic':'Classical'},  # needs to be changed for visualizations
         )
 
 
