@@ -233,39 +233,63 @@ def fit_linear_regression_model(
 
 
     ### Design Effect-based SE-Inflation
-    # Compute rho and cluster size at the trial level — not the row level.
-    # When n_within_trial_segments > 1, len(df) / n_subjects counts segment-rows,
-    # making n_trials_per_subject far too large and the design effect enormous.
-    # Instead we:
-    #   (a) aggregate residuals to their trial mean (one value per trial),
-    #   (b) compute lag-1 autocorrelation on those trial-level residuals,
-    #   (c) use the mean number of trials per subject as the cluster size.
-    # This ensures the design effect only captures between-trial dependence,
-    # which is what the Kish formula requires.
+    # Two-level Kish design effect (Kish 1965):
+    #   deff_between: between-trial temporal dependence (trial-level lag-1 ρ)
+    #   deff_within:  within-trial segment dependence (segment-level lag-1 ρ,
+    #                 only when multiple intra-trial segments are present)
+    #
+    # Combined: deff = deff_between × deff_within
+    #
+    # When n_within_trial_segments == 1, deff_within = 1.0 (no within-trial
+    # structure exists), and the formula reduces to the original single-level
+    # between-trial design effect.
+    resid_series = pd.Series(residuals, index=df.index)
+
+    # --- Between-trial design effect ---
     if "Trial ID" in df.columns:
-        trial_resid = (
-            pd.Series(residuals, index=df.index)
-            .groupby(df["Trial ID"])
-            .mean()
-        )
+        trial_resid = resid_series.groupby(df["Trial ID"]).mean()
         rho_raw = np.corrcoef(trial_resid.values[:-1], trial_resid.values[1:])[0, 1]
-        rho_for_deff = 0.0 if np.isnan(rho_raw) else rho_raw
+        rho_between = 0.0 if np.isnan(rho_raw) else rho_raw
         n_trials_per_subject = df.groupby("Subject ID")["Trial ID"].nunique().mean()
     else:
-        # Fallback when Trial ID is absent: use row-level autocorrelation.
-        # This may overestimate the design effect at high segment counts.
-        rho_for_deff = lag1_autocorr
+        rho_between = lag1_autocorr
         n_trials_per_subject = len(df) / df["Subject ID"].nunique()
 
-    # Apply SE inflation only when between-trial autocorrelation exceeds threshold.
-    # design_effect = 1 + (n - 1) * rho  (Kish 1965)
-    # Inflation is capped at positive rho to prevent SE deflation.
-    if abs(rho_for_deff) < autocorr_threshold:
-        design_effect, se_inflation, inflation_applied = 1.0, 1.0, False
+    if abs(rho_between) < autocorr_threshold:
+        deff_between = 1.0
     else:
-        design_effect = 1 + (n_trials_per_subject - 1) * max(0, rho_for_deff)
-        se_inflation = np.sqrt(design_effect)
-        inflation_applied = True
+        deff_between = 1 + (n_trials_per_subject - 1) * max(0, rho_between)
+
+    # --- Within-trial design effect (multi-segment only) ---
+    has_segments = "Segment ID" in df.columns and "Trial ID" in df.columns
+    n_segments_per_trial = df["Segment ID"].nunique() if has_segments else 1
+
+    if has_segments and n_segments_per_trial > 1:
+        # Compute lag-1 autocorrelation of residuals within each trial,
+        # then average across trials for a pooled within-trial ρ.
+        within_rhos = []
+        for _, trial_group in resid_series.groupby(df["Trial ID"]):
+            vals = trial_group.sort_index().values
+            if len(vals) > 1:
+                rho_t = np.corrcoef(vals[:-1], vals[1:])[0, 1]
+                if not np.isnan(rho_t):
+                    within_rhos.append(rho_t)
+        rho_within = float(np.mean(within_rhos)) if within_rhos else 0.0
+
+        if abs(rho_within) < autocorr_threshold:
+            deff_within = 1.0
+        else:
+            deff_within = 1 + (n_segments_per_trial - 1) * max(0, rho_within)
+    else:
+        rho_within = 0.0
+        deff_within = 1.0
+
+    # --- Combined design effect ---
+    design_effect = deff_between * deff_within
+    se_inflation = np.sqrt(design_effect)
+    inflation_applied = design_effect > 1.0
+    # Keep rho_for_deff for diagnostics (between-trial component, backward-compatible)
+    rho_for_deff = rho_between
 
 
     adjusted_se = model.bse * se_inflation
@@ -328,17 +352,17 @@ def fit_linear_regression_model(
         "shapiro_p": shapiro_p,
         "lag1_autocorr": lag1_autocorr,
         "rho_for_deff": rho_for_deff,
+        "rho_within_trial": rho_within,
+        "deff_between": deff_between,
+        "deff_within": deff_within,
+        "n_segments_per_trial": n_segments_per_trial,
         "design_effect": design_effect,
         "se_inflation": se_inflation,
         "autocorr_threshold": autocorr_threshold,
         "inflation_applied": inflation_applied,
         "r_squared": model.rsquared,
         "r_squared_adj": model.rsquared_adj,
-        # residual_std mirrors LME semantics: pure within-subject error SD.
-        # Used for power simulation via __residual_std__ sentinel.
         "residual_std": residual_std_within,
-        # total_residual_std = sqrt(MSE_resid): used for Cohen's d denominator.
-        # In LME this would be sqrt(scale + var_random); in OLS it is sqrt(MSE_resid).
         "total_residual_std": residual_std_total,
         "icc": None,  # undefined for OLS
     }
@@ -550,51 +574,70 @@ def fit_mixed_effects_model(
         print("Warning: Autocorrelation is NaN (constant residuals?)")
         lag1_autocorr = 0.0
 
-    # Compute rho and cluster size at the trial level — not the row level.
-    # When n_within_trial_segments > 1, len(df) / n_subjects counts segment-rows,
-    # making n_trials_per_subject far too large and the design effect enormous.
-    # Instead we:
-    #   (a) aggregate residuals to their trial mean (one value per trial),
-    #   (b) compute lag-1 autocorrelation on those trial-level residuals,
-    #   (c) use the mean number of trials per subject as the cluster size.
-    # This ensures the design effect only captures between-trial dependence
-    # (temporal correlation across trials, NOT within-trial segments), which is
-    # what the Kish formula is designed for. Within-trial structure is already
-    # partially accounted for by the Segment ID covariate in the fixed effects.
+    # Two-level Kish design effect (Kish 1965):
+    #   deff_between: between-trial temporal dependence (trial-level lag-1 ρ)
+    #   deff_within:  within-trial segment dependence (segment-level lag-1 ρ,
+    #                 only when multiple intra-trial segments are present)
+    #
+    # Combined: deff = deff_between × deff_within
+    #
+    # When n_within_trial_segments == 1, deff_within = 1.0 (no within-trial
+    # structure exists), and the formula reduces to the original single-level
+    # between-trial design effect.
+    resid_series = pd.Series(residuals, index=df.index)
+
+    # --- Between-trial design effect ---
     if "Trial ID" in df.columns:
-        trial_resid = (
-            pd.Series(residuals, index=df.index)
-            .groupby(df["Trial ID"])
-            .mean()
-        )
+        trial_resid = resid_series.groupby(df["Trial ID"]).mean()
         rho_raw = np.corrcoef(trial_resid.values[:-1], trial_resid.values[1:])[0, 1]
-        rho_for_deff = 0.0 if np.isnan(rho_raw) else rho_raw
+        rho_between = 0.0 if np.isnan(rho_raw) else rho_raw
         n_trials_per_subject = df.groupby(grouping_var)["Trial ID"].nunique().mean()
     else:
-        # Fallback when Trial ID is absent: use row-level autocorrelation.
-        # This may overestimate the design effect at high segment counts.
-        rho_for_deff = lag1_autocorr
+        rho_between = lag1_autocorr
         n_trials_per_subject = len(df) / df[grouping_var].nunique()
 
-    # Apply SE inflation only when between-trial autocorrelation exceeds threshold.
-    # design_effect = 1 + (n - 1) * rho  (Kish 1965)
-    # Inflation is capped at positive rho only (prevents SE deflation for
-    # negative autocorrelation, which is conservative but safe at n=11).
-    if abs(rho_for_deff) < autocorr_threshold:
-        design_effect = 1.0
-        se_inflation = 1.0
-        inflation_applied = False
+    if abs(rho_between) < autocorr_threshold:
+        deff_between = 1.0
     else:
-        design_effect = 1 + (n_trials_per_subject - 1) * max(0, rho_for_deff)
-        se_inflation = np.sqrt(design_effect)
-        inflation_applied = True
+        deff_between = 1 + (n_trials_per_subject - 1) * max(0, rho_between)
 
-    print(f"Lag-1 autocorrelation (ρ): {lag1_autocorr:.3f}")
+    # --- Within-trial design effect (multi-segment only) ---
+    has_segments = "Segment ID" in df.columns and "Trial ID" in df.columns
+    n_segments_per_trial = df["Segment ID"].nunique() if has_segments else 1
+
+    if has_segments and n_segments_per_trial > 1:
+        within_rhos = []
+        for _, trial_group in resid_series.groupby(df["Trial ID"]):
+            vals = trial_group.sort_index().values
+            if len(vals) > 1:
+                rho_t = np.corrcoef(vals[:-1], vals[1:])[0, 1]
+                if not np.isnan(rho_t):
+                    within_rhos.append(rho_t)
+        rho_within = float(np.mean(within_rhos)) if within_rhos else 0.0
+
+        if abs(rho_within) < autocorr_threshold:
+            deff_within = 1.0
+        else:
+            deff_within = 1 + (n_segments_per_trial - 1) * max(0, rho_within)
+    else:
+        rho_within = 0.0
+        deff_within = 1.0
+
+    # --- Combined design effect ---
+    design_effect = deff_between * deff_within
+    se_inflation = np.sqrt(design_effect)
+    inflation_applied = design_effect > 1.0
+    rho_for_deff = rho_between
+
+    print(f"Lag-1 autocorrelation (row-level ρ): {lag1_autocorr:.3f}")
     print(f"Average trials per subject: {n_trials_per_subject:.1f}")
     print(
         f"SE inflation threshold: |ρ| > {autocorr_threshold:.2f} (balancing power with n={df[grouping_var].nunique()} subjects)")
-    print(f"Design effect: {design_effect:.2f}")
-    print(f"SE inflation factor: {se_inflation:.2f}×")
+    print(f"  Between-trial: ρ={rho_between:.3f}, deff={deff_between:.2f}")
+    if has_segments and n_segments_per_trial > 1:
+        print(f"  Within-trial:  ρ={rho_within:.3f}, deff={deff_within:.2f} ({n_segments_per_trial} segments/trial)")
+    print(f"  Combined design effect: {design_effect:.2f}")
+    print(f"  SE inflation factor: {se_inflation:.2f}×")
 
     if not inflation_applied:
         if abs(lag1_autocorr) < autocorr_threshold:
@@ -769,6 +812,10 @@ def fit_mixed_effects_model(
         "shapiro_p": shapiro_p,
         "lag1_autocorr": lag1_autocorr,
         "rho_for_deff": rho_for_deff,
+        "rho_within_trial": rho_within,
+        "deff_between": deff_between,
+        "deff_within": deff_within,
+        "n_segments_per_trial": n_segments_per_trial,
         "n_trials_per_subj": n_trials_per_subject,
         "design_effect": design_effect,
         "se_inflation": se_inflation,
