@@ -1173,11 +1173,14 @@ def _section_trust(
         lines.append("> ⚠️  Power analysis frame is empty — not yet run for this pipeline.\n")
     else:
         pwr_sub = power[
-            power["Dependent_Variable"] == dv
+            (power["Dependent_Variable"] == dv)
+            & (power["N_Segments"] == cfg.primary_n_segments)
             ].copy()
 
         if pwr_sub.empty:
-            lines.append("> ⚠️  No power analysis available for this DV.\n")
+            lines.append(
+                f"> ⚠️  No power analysis available for this DV at {cfg.primary_n_segments}-seg.\n"
+            )
         else:
             # Sort by level index then parameter for readability
             pwr_sub["_lvl"] = pwr_sub["Comparison_Level"].apply(_level_int)
