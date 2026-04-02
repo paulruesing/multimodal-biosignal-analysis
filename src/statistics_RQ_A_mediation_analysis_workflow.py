@@ -130,6 +130,10 @@ def fit_mediation_model(
 
     level_a, level_b = x_contrast
     df = data.loc[data[x_var].isin([level_a, level_b]), [x_var, m_var, y_var, group_var]].copy()
+
+    # Convert to numeric before dropping NaN so coercion-induced NaNs are caught in a single pass
+    df[m_var] = pd.to_numeric(df[m_var], errors="coerce")
+    df[y_var] = pd.to_numeric(df[y_var], errors="coerce")
     df = df.dropna()
 
     if df.empty:
@@ -160,11 +164,11 @@ def fit_mediation_model(
     model_df = pd.DataFrame(
         {
             "x": (df[x_var] == level_a).astype(int),
-            "m": pd.to_numeric(df[m_var], errors="coerce"),
-            "y": pd.to_numeric(df[y_var], errors="coerce"),
+            "m": df[m_var],
+            "y": df[y_var],
             "group": df[group_var],
         }
-    ).dropna()
+    )
 
     n_obs = int(len(model_df))
     n_subjects = int(model_df["group"].nunique())
