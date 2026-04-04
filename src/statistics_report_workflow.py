@@ -70,11 +70,11 @@ if __name__ == "__main__":
         output_dir           = RQ_A_REPORT_DIR,
         file_identifier_suffix='RQ_A',
 
-        primary_n_segments   = 5,
+        primary_n_segments   = 1,
         resolution_segments  = [1, 5, 10],
 
         alpha_adjusted       = 0.05,
-        include_ols          = False,
+        include_ols          = True,
         target_power=0.80,
 
         # FDR Correction for multiple comparisons:
@@ -82,6 +82,8 @@ if __name__ == "__main__":
         fdr_group_by_dv=True,
 
         level_definitions=fetch_level_definitions(multi_segments_per_trial=True),
+
+        n_subjects=12,
 
         hypothesis_groups=[
             {
