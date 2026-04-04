@@ -59,7 +59,7 @@ def _fit_mixedlm_with_diagnostics(formula: str, data: pd.DataFrame, group_col: s
     """Fit one MixedLM and capture convergence/warning diagnostics."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        result = mixedlm(formula, data, groups=data[group_col]).fit(reml=False, disp=0)
+        result = mixedlm(formula, data, groups=data[group_col]).fit(reml=True, disp=0)
 
     warning_messages = [str(w.message) for w in caught]
     has_singular = any("Random effects covariance is singular" in msg for msg in warning_messages)
@@ -103,6 +103,40 @@ def fetch_mediation_hypotheses() -> list[dict]:
         }
         for mediator in MEDIATOR_CANDIDATES
     ]
+def _classify_mediation_type(
+    p_c: float,
+    p_cprime: float,
+    coef_c: float,
+    coef_cprime: float,
+    indirect_significant: bool,
+    alpha: float = 0.05,
+) -> str:
+    """
+    Classify mediation type using Baron & Kenny + modern criteria.
+
+    Returns one of:
+        'full'          — c sig, c' non-sig, indirect sig
+        'partial'       — c sig, c' sig, indirect sig
+        'indirect_only' — c non-sig, c' non-sig, indirect sig (inconsistent mediation possible)
+        'competitive'   — indirect sig but c and c' have opposite signs
+        'no_mediation'  — indirect non-sig
+        'unclassifiable'— missing data
+    """
+    if any(v is None or np.isnan(v) for v in [p_c, p_cprime, coef_c, coef_cprime]):
+        return "unclassifiable"
+    if not indirect_significant:
+        return "no_mediation"
+    # Competitive/inconsistent mediation: sign flip between total and direct
+    if np.sign(coef_c) != np.sign(coef_cprime) and abs(coef_c) > 1e-10:
+        return "competitive"
+    c_sig      = p_c      < alpha
+    cprime_sig = p_cprime < alpha
+    if c_sig and not cprime_sig:
+        return "full"
+    if c_sig and cprime_sig:
+        return "partial"
+    # Indirect significant but total effect isn't — suppression or small total n
+    return "indirect_only"
 
 
 def fit_mediation_model(
@@ -226,6 +260,10 @@ def fit_mediation_model(
             if (not any_non_converged and not any_singular)
             else ("relaxed_ok" if not any_non_converged else "not_fittable")
         )
+        p_a = float(res_a.pvalues["x"])
+        p_b = float(res_cprime.pvalues["m"])
+        se_cprime = float(res_cprime.bse["x"])
+        p_cprime = float(res_cprime.pvalues["x"])
 
         return {
             "status": "fitted" if fit_quality != "not_fittable" else "non_converged",
@@ -255,8 +293,12 @@ def fit_mediation_model(
             "p_c": p_c,
             "coef_cprime": coef_cprime,
             "indirect_effect": indirect_effect,
-            "mediation_prop": indirect_effect / coef_c if coef_c != 0 else np.nan,
             "model_df": model_df,
+            "p_a": p_a,
+            "p_b": p_b,
+            "se_cprime": se_cprime,
+            "p_cprime": p_cprime,
+            "mediation_prop": indirect_effect / coef_c if coef_c != 0 else np.nan,
         }
     except Exception as exc:
         return {
@@ -269,6 +311,127 @@ def fit_mediation_model(
             "n_subjects": n_subjects,
             "error": str(exc),
         }
+
+def apply_fdr_and_enrich(
+    results_frame: pd.DataFrame,
+    alpha: float = 0.05,
+) -> pd.DataFrame:
+    """
+    BH-FDR is applied within each outcome (DV) block separately.
+        Family size = n_mediators × n_contrasts (e.g., 4 × 4 = 16).
+        This mirrors the omnibus testing family structure.
+
+    Adds columns:
+        p_indirect_fdr  — BH-corrected p per DV family
+        significant_fdr — bool, p_indirect_fdr < alpha
+    """
+    from statsmodels.stats.multitest import multipletests
+
+    df = results_frame.copy()
+
+    # ── CI width ──────────────────────────────────────────────────────────────
+    df["ci_width"] = pd.to_numeric(df["ci_upper"], errors="coerce") - \
+                     pd.to_numeric(df["ci_lower"], errors="coerce")
+
+    # ── Mediation type ────────────────────────────────────────────────────────
+    def _classify_row(r):
+        try:
+            return _classify_mediation_type(
+                p_c=r.get("p_c"), p_cprime=r.get("p_cprime"),
+                coef_c=r.get("coef_c"), coef_cprime=r.get("coef_cprime"),
+                indirect_significant=bool(r.get("significant", False)),
+                alpha=alpha,
+            )
+        except Exception:
+            return "unclassifiable"
+
+    df["mediation_type"] = df.apply(_classify_row, axis=1)
+
+    # ── FDR on indirect effects — per-DV families (n_mediators × n_contrasts) ──
+    df["p_indirect_fdr"] = np.nan
+    df["significant_fdr"] = False
+
+    computed_mask = df["bootstrap_status"] == "computed"
+
+    for outcome_dv, grp_idx in df[computed_mask].groupby("outcome").groups.items():
+        pvals = pd.to_numeric(df.loc[grp_idx, "bootstrap_p"], errors="coerce")
+        valid_mask = pvals.notna()
+        if valid_mask.sum() < 2:
+            continue
+        _, p_fdr, _, _ = multipletests(pvals[valid_mask], method="fdr_bh", alpha=alpha)
+        target_idx = pvals.index[valid_mask.values]
+        df.loc[target_idx, "p_indirect_fdr"] = p_fdr
+        df.loc[target_idx, "significant_fdr"] = p_fdr < alpha
+
+    return df
+
+
+def join_omnibus_direct_effects(
+    results_frame: pd.DataFrame,
+    omnibus_frame: pd.DataFrame,
+    n_segments: int = 1,
+    alpha: float = 0.05,
+) -> pd.DataFrame:
+    """
+    Cross-reference each mediation row with the omnibus LME direct effect
+    for the same (contrast, outcome) pair.
+
+    Adds columns:
+        omnibus_coef_c  — LME β for X→Y in the omnibus model
+        omnibus_p_c     — adjusted p-value from omnibus
+        omnibus_cohen_d — Cohen's d from omnibus
+        omnibus_sig     — bool: omnibus X→Y significant at alpha
+    """
+    omni = omnibus_frame.copy()
+    omni = omni[
+        (omni["Model_Type"] == "LME")
+        & (omni["N. Segments"] == n_segments)
+    ].copy()
+
+    # Normalise parameter name to contrast label, e.g.:
+    # "C(Q('Category or Silence'))[T.Classic]" → "Classic vs Silence"
+    def _param_to_contrast(param: str) -> str | None:
+        m = re.search(r"\[T\.(.+?)\]", param)
+        if m:
+            return f"{m.group(1)} vs Silence"
+        return None
+
+    omni["_contrast"] = omni["Parameter"].apply(_param_to_contrast)
+    omni = omni.dropna(subset=["_contrast"])
+
+    lookup = omni.set_index(["Dependent_Variable", "_contrast"])[[
+        "Coefficient", "p_value_adjusted", "Cohen_d"
+    ]].rename(columns={
+        "Coefficient":      "omnibus_coef_c",
+        "p_value_adjusted": "omnibus_p_c",
+        "Cohen_d":          "omnibus_cohen_d",
+    })
+
+    df = results_frame.copy()
+    lookup_reset = (
+        omni.set_index(["Dependent_Variable", "_contrast"])[[
+            "Coefficient", "p_value_adjusted", "Cohen_d"
+        ]]
+        .rename(columns={
+            "Coefficient": "omnibus_coef_c",
+            "p_value_adjusted": "omnibus_p_c",
+            "Cohen_d": "omnibus_cohen_d",
+        })
+        .reset_index()
+        .rename(columns={
+            "Dependent_Variable": "outcome",
+            "_contrast": "x_contrast",
+        })
+    )
+    lookup_reset = lookup_reset.drop_duplicates(subset=["outcome", "x_contrast"], keep="first")
+
+    df = results_frame.copy().merge(
+        lookup_reset,
+        on=["outcome", "x_contrast"],
+        how="left",
+    )
+    df["omnibus_sig"] = pd.to_numeric(df["omnibus_p_c"], errors="coerce") < alpha
+    return df
 
 
 def _cluster_bootstrap_sample(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
@@ -351,6 +514,15 @@ def bootstrap_indirect_effect(
     ci_lower = float(np.percentile(indirect_effects, (alpha / 2) * 100))
     ci_upper = float(np.percentile(indirect_effects, (1 - alpha / 2) * 100))
 
+    # After computing ci_lower, ci_upper:
+    n_total = len(indirect_effects)
+    n_below_0 = sum(ie < 0 for ie in indirect_effects)
+    n_above_0 = sum(ie > 0 for ie in indirect_effects)
+
+    # One-sided p-value: proportion of bootstrap samples that cross zero
+    p_bootstrap = 2 * min(n_below_0, n_above_0) / n_total
+    p_bootstrap = max(p_bootstrap, 1 / n_total)  # floor at 1/n
+
     return {
         "bootstrap_status": "computed",
         "ci_lower": ci_lower,
@@ -362,6 +534,9 @@ def bootstrap_indirect_effect(
         "bootstrap_non_converged": bootstrap_non_converged,
         "bootstrap_exceptions": bootstrap_exceptions,
         "bootstrap_success_rate": bootstrap_success / n_bootstrap,
+        "bootstrap_median_indirect": float(np.median(indirect_effects)),
+        "bootstrap_p": float(p_bootstrap),  # ← enables FDR correction
+        "ci_width": float(ci_upper - ci_lower),
     }
 
 
@@ -422,6 +597,10 @@ def extract_report_ready_mediation_table(
             "ci_lower", "ci_upper", "CI_Contains_Zero", "significant", "Sign",
             "fit_quality", "fit_warning_count",
             "bootstrap_success", "bootstrap_attempted", "bootstrap_success_rate",
+            "se_a", "p_a", "se_b", "p_b", "se_cprime", "p_cprime",
+            "mediation_prop", "mediation_type",
+            "p_indirect_fdr", "significant_fdr", "bootstrap_p", "bootstrap_median_indirect", "ci_width",
+            "omnibus_coef_c", "omnibus_p_c", "omnibus_cohen_d", "omnibus_sig",
         ]
     ].rename(
         columns={
@@ -443,6 +622,23 @@ def extract_report_ready_mediation_table(
             "bootstrap_success": "Bootstrap_Success",
             "bootstrap_attempted": "Bootstrap_Attempted",
             "bootstrap_success_rate": "Bootstrap_Success_Rate",
+            "se_a": "Path_a_SE",
+            "p_a": "Path_a_p",
+            "se_b": "Path_b_SE",
+            "p_b": "Path_b_p",
+            "se_cprime": "Path_cprime_SE",
+            "p_cprime": "Path_cprime_p",
+            "mediation_prop": "Proportion_Mediated",
+            "mediation_type": "Mediation_Type",
+            "p_indirect_fdr": "p_Indirect_FDR",
+            "bootstrap_p": "p_Bootstrap",
+            "bootstrap_median_indirect": "Bootstrap_Median_Indirect",
+            "ci_width": "CI95_Width",
+            "omnibus_coef_c": "Omnibus_Beta_X_to_Y",
+            "omnibus_p_c": "Omnibus_p_X_to_Y",
+            "omnibus_cohen_d": "Omnibus_Cohen_d",
+            "omnibus_sig": "Omnibus_Significant",
+            "significant_fdr": "Significant_FDR"
         }
     )
 
@@ -535,6 +731,37 @@ if __name__ == "__main__":
     if "model_df" in results_frame.columns:
         del results_frame["model_df"]
 
+    # apply FDR and merge with direct effects:
+    RQ_A_OMNIBUS_RESULTS = ROOT / "output" / "statistics_RQ_A" / "omnibus_testing"
+    def _load_csv(directory: Path, suffixes: list[str]) -> pd.DataFrame:
+        """
+        Attempt to load the most recent CSV matching suffixes from directory.
+
+        Returns an empty DataFrame and prints a warning if no matching file
+        is found or the read fails, so the report can still be generated with
+        validate_frames() emitting the appropriate warnings.
+
+        Parameters
+        ----------
+        directory : Path
+            Directory passed to filemgmt.most_recent_file.
+        suffixes : list[str]
+            Filename keyword filters passed to filemgmt.most_recent_file.
+        """
+        try:
+            path = filemgmt.most_recent_file(directory, ".csv", suffixes)
+            return pd.read_csv(path)
+        except (ValueError, FileNotFoundError, Exception) as e:
+            print(f"  ⚠️  Could not load {suffixes} from {directory}: {type(e).__name__}: {e}")
+            return pd.DataFrame()
+
+    results_frame = apply_fdr_and_enrich(results_frame)
+    results_frame = join_omnibus_direct_effects(
+        results_frame,
+        omnibus_frame=_load_csv(RQ_A_OMNIBUS_RESULTS,  ["All Time Resolutions Results"]),
+        n_segments=n_within_trial_segments,
+    )
+
     # Main export: all attempted tests with full diagnostics/status columns.
     out_path = MEDIATION_OUTPUT / filemgmt.file_title("Mediation Analysis Results", ".csv")
     results_frame.to_csv(out_path, index=False)
@@ -549,6 +776,9 @@ if __name__ == "__main__":
         "bootstrap_attempted", "bootstrap_success", "bootstrap_non_converged",
         "bootstrap_exceptions", "bootstrap_success_rate",
         "reason", "missing_columns", "error",
+        "mediation_type", "p_indirect_fdr", "significant_fdr", "mediation_prop",
+        "omnibus_coef_c", "omnibus_p_c", "omnibus_sig",
+        "p_a", "p_b", "p_cprime",
     ]
     summary_columns = [col for col in summary_columns if col in results_frame.columns]
     summary_frame = results_frame[summary_columns].copy()
