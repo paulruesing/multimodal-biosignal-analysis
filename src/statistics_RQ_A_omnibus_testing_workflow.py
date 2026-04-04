@@ -1,3 +1,4 @@
+from itertools import product
 from pathlib import Path
 import pandas as pd
 
@@ -207,7 +208,7 @@ if __name__ == '__main__':
     lvls_to_include: list[str] = [f"lvl_{lvl_ind}" for lvl_ind in lvl_inds_to_include]
 
     # across time resolution comparison:
-    plot_time_resolution_comparisons: bool = True
+    plot_time_resolution_comparisons: bool = False
     parameter_comp_lvl_tuples_to_plot_across_time: list[tuple[str, int]] = [
         ('Category or Silence[T.Happy]', 1),  # sig across all CMC DVs + EEG PSD
         ('Category or Silence[T.Groovy]', 1),  # sig: Flexor mean/max beta, Flexor mean gamma
@@ -225,26 +226,28 @@ if __name__ == '__main__':
 
 
     # LME robustness checks / influence measures:
-    conduct_robustness_checks: bool = False
-    dep_var_comp_lvl_n_segments_tuples_to_robustness_check: list[tuple[str, int, int]] = [
+    conduct_robustness_checks: bool = True
+    robustness_dep_vars: list[str] = [
         # CMC DVs: all 8 have significant effects at primary resolution
-        ('CMC_Extensor_mean_beta', 1, 1),
-        ('CMC_Extensor_max_beta', 1, 1),
-        ('CMC_Extensor_mean_gamma', 1, 1),
-        ('CMC_Extensor_max_gamma', 1, 1),
-        ('CMC_Flexor_mean_beta', 1, 1),
-        ('CMC_Flexor_max_beta', 1, 1),
-        ('CMC_Flexor_mean_gamma', 1, 1),
-        ('CMC_Flexor_max_gamma', 1, 1),
-
-        # EEG PSD: H2, H3, H5 now have 1 significant effect each at 5-seg
-        # todo: ponder, whether u should add the capability for multi-time-resolutions in this list, since the below
-        #   are not significant for seg = 1
-        ('PSD_eeg_FC_CP_T_theta', 1, 1),  # H2: Happy L1
-        ('PSD_eeg_F_C_beta', 1, 1),  # H3: Happy L1, d=0.40
-        ('PSD_eeg_Global_gamma', 1, 1),  # H5: Happy L1, d=0.39
-        # NOTE: H4 (PSD_eeg_P_PO_alpha) still 0 significant effects at 5-seg
-
+        'CMC_Extensor_mean_beta',
+        'CMC_Extensor_max_beta',
+        'CMC_Extensor_mean_gamma',
+        'CMC_Extensor_max_gamma',
+        'CMC_Flexor_mean_beta',
+        'CMC_Flexor_max_beta',
+        'CMC_Flexor_mean_gamma',
+        'CMC_Flexor_max_gamma',
+        # EEG PSD: H2, H3, H5 have significant effects at 5-seg resolution;
+        # H4 (alpha) included as a key frequency for attention
+        'PSD_eeg_FC_CP_T_theta',   # H2
+        'PSD_eeg_F_C_beta',        # H3, d=0.40
+        'PSD_eeg_P_PO_alpha',      # H4
+        'PSD_eeg_Global_gamma',     # H5, d=0.39
+    ]
+    robustness_comp_lvls: list[int] = [1, 2]  # this two are the most expressive
+    robustness_n_segments: list[int] = [1, 5]  # primary and secondary
+    dep_var_comp_lvl_n_segments_tuples_to_robustness_check: list[tuple[str, int, int]] = [
+        (dv, lvl, seg) for dv, lvl, seg in product(robustness_dep_vars, robustness_comp_lvls, robustness_n_segments)
     ]
 
     # Statistical Power Analysis:
