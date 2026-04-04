@@ -986,11 +986,10 @@ def apply_fdr_correction(
     df["p_value_fdr"] = np.nan
     df["significant_fdr"] = False
 
-    # Rows eligible for correction: real parameters only, LME only
+    # Rows eligible for correction: real parameters, all model types, specified levels
     _SENTINEL = {"__residual_std__", "__re_std__"}
     eligible_mask = (
-        (df["Model_Type"] == "LME")
-        & df["Parameter"].apply(lambda p: p not in _SENTINEL and not p.startswith("Intercept"))
+        df["Parameter"].apply(lambda p: p not in _SENTINEL and not p.startswith("Intercept"))
         & df["Comparison_Level"].apply(
             lambda lvl: any(lvl.startswith(f"Level {i} ") for i in levels_to_correct)
         )
@@ -1004,10 +1003,11 @@ def apply_fdr_correction(
 
     # Define grouping keys
     # -> important line: By defining the subset for each FDR correction we define the conservativeness.
-    #                    group_by_dv False: subsets = Comp_Lvl x N_Segments
+    #                    group_by_dv False: subsets = Comp_Lvl x N_Segments x Model_Type
     #                    group_by_dv True: ... x DV (more subsets)
     #                    -> the SMALLER the family, the more LIBERAL the test.
-    group_cols = ["Comparison_Level", "N. Segments"]
+    # Model_Type is always included so LME and OLS are corrected within separate families.
+    group_cols = ["Comparison_Level", "N. Segments", "Model_Type"]
     if group_by_dv:
         group_cols.append("Dependent_Variable")
 
@@ -2120,24 +2120,18 @@ def run_influence_analysis(
     unique_n_segments = {n for _, _, n in configs}
     unique_comp_lvls = {lvl for _, lvl, _ in configs}
 
-    # Hard assertion: mixing segment counts produces a CSV that the report
-    # only partially uses — the caller should restrict to primary_n_segments.
     if len(unique_n_segments) > 1:
-        raise ValueError(
-            f"run_influence_analysis received configs with multiple N_Segments values: "
-            f"{sorted(unique_n_segments)}. "
-            f"Restrict all configs to a single segment count (your primary resolution) "
-            f"so the combined influence CSV is unambiguous."
+        print(
+            f"  ℹ️  run_influence_analysis: configs span {len(unique_n_segments)} N_Segments "
+            f"values ({sorted(unique_n_segments)}). The combined CSV will contain rows for "
+            f"each resolution — downstream consumers must filter by N_Segments as needed."
         )
 
-    # Warning: multiple comparison levels are valid per-model but are currently
-    # merged without a Level column in _section_trust — review report output carefully.
     if len(unique_comp_lvls) > 1:
         print(
-            f"  ⚠️  run_influence_analysis: configs span {len(unique_comp_lvls)} comparison "
-            f"levels ({sorted(unique_comp_lvls)}). Results will be merged into one CSV. "
-            f"Ensure _section_trust in the report distinguishes levels, or restrict to "
-            f"one level per call."
+            f"  ℹ️  run_influence_analysis: configs span {len(unique_comp_lvls)} comparison "
+            f"levels ({sorted(unique_comp_lvls)}). The combined CSV tags each row with "
+            f"Comparison_Level — downstream consumers filter as needed."
         )
 
     all_rows: list[dict] = []
