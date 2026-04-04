@@ -1,12 +1,14 @@
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from pathlib import Path
 from statsmodels.stats.multitest import multipletests
 import numpy as np
 import pandas as pd
+from scipy import stats as scipy_stats
 from typing import Literal
 
 import src.utils.file_management as filemgmt
@@ -30,7 +32,7 @@ class _ReportConfig:
         Family-wise significance threshold applied to p_value_adjusted.
     include_ols : bool
         Whether OLS rows appear alongside LME in Sections I, I.b, V.
-    cfg.target_power : float
+    target_power : float
         Minimum Power_at_Observed_Effect to label an effect "well-powered".
     """
     primary_n_segments:  int        = 1
@@ -55,11 +57,19 @@ def _tl(rating: str) -> str:
 
 
 
+def _level_filter(df: pd.DataFrame, level_idx: int | None, col: str = "Comparison_Level") -> pd.DataFrame:
+    """Return *df* filtered to a single comparison level, or unfiltered if *level_idx* is None."""
+    if level_idx is None or col not in df.columns:
+        return df
+    return df[df[col].apply(_level_int) == level_idx]
+
+
 def _rate_power(
     raw_params: set[str],
     dvs: set[str],
     power: pd.DataFrame,
     cfg: _ReportConfig,
+    comparison_level: int | None = None,
 ) -> str:
     """
     Rate power for a canonical predictor across a set of DVs.
@@ -73,6 +83,8 @@ def _rate_power(
     power : pd.DataFrame
         Full power analysis frame.
     cfg : _ReportConfig
+    comparison_level : int or None
+        If set, restrict to this comparison level index.
 
     Returns
     -------
@@ -81,8 +93,9 @@ def _rate_power(
     """
     if power.empty:
         return "red"
-    rows = power[
-        power["Parameter"].isin(raw_params) & power["Dependent_Variable"].isin(dvs)
+    rows = _level_filter(power, comparison_level)
+    rows = rows[
+        rows["Parameter"].isin(raw_params) & rows["Dependent_Variable"].isin(dvs)
     ]
     if rows.empty:
         return "red"
@@ -100,6 +113,7 @@ def _rate_relevance(
     dvs: set[str],
     res: pd.DataFrame,
     cfg: _ReportConfig,
+    comparison_level: int | None = None,
 ) -> str:
     """
     Rate relevance as max |Cohen's d| across significant primary-resolution rows.
@@ -109,12 +123,13 @@ def _rate_relevance(
     str
         'green' (≥ 0.5) | 'yellow' (≥ 0.2) | 'red' (< 0.2 or no sig. row)
     """
-    rows = res[
-        (res["N. Segments"] == cfg.primary_n_segments)
-        & (res["Model_Type"] == "LME")
-        & (res["p_value_adjusted"] < cfg.alpha_adjusted)
-        & res["Parameter"].isin(raw_params)
-        & res["Dependent_Variable"].isin(dvs)
+    rows = _level_filter(res, comparison_level)
+    rows = rows[
+        (rows["N. Segments"] == cfg.primary_n_segments)
+        & (rows["Model_Type"] == "LME")
+        & (rows["p_value_adjusted"] < cfg.alpha_adjusted)
+        & rows["Parameter"].isin(raw_params)
+        & rows["Dependent_Variable"].isin(dvs)
     ]
     if rows.empty:
         return "red"
@@ -131,28 +146,44 @@ def _rate_generalization(
     dvs: set[str],
     influence: pd.DataFrame,
     cfg: _ReportConfig,
+    comparison_level: int | None = None,
 ) -> str:
     """
-    Rate generalization: driven by single subjects?
+    Rate generalization using DFBETA only (parameter-specific influence).
+
+    Cook's D is intentionally excluded here — it measures model-wide subject
+    influence and has no parameter dimension, making it unsuitable for a
+    per-predictor rating.  Cook's D is still reported in Section II
+    (``_section_trust``) for per-subject diagnostics.
+
+    Fixed fraction thresholds on the proportion of DFBETA-flagged cells:
+
+        🟢  flagged fraction ≤ 2.5 %
+        🟡  flagged fraction ≤ 10 %
+        🔴  flagged fraction > 10 %
+        —   no influence data available
 
     Returns 'green' | 'yellow' | 'red' | 'na'.
-    'na' is returned when no influence data is available at the primary
-    resolution, so the caller can render '—' rather than a traffic light.
     """
     if influence.empty:
         return "na"
-    rows = influence[
-        (influence["N_Segments"] == cfg.primary_n_segments)
-        & influence["Parameter"].isin(raw_params)
-        & influence["Dependent_Variable"].isin(dvs)
+    rows = _level_filter(influence, comparison_level)
+    rows = rows[
+        (rows["N_Segments"] == cfg.primary_n_segments)
+        & rows["Parameter"].isin(raw_params)
+        & rows["Dependent_Variable"].isin(dvs)
     ]
     if rows.empty:
-        return "na"   # ← was "yellow"
-    if rows["DFBETA_Flagged"].any():
-        return "red"
-    if rows["CooksD_Flagged"].any():
+        return "na"
+    n_flagged = int(rows["DFBETA_Flagged"].sum())
+    if n_flagged == 0:
+        return "green"
+    flagged_fraction = n_flagged / len(rows)
+    if flagged_fraction <= 0.025:
+        return "green"
+    if flagged_fraction <= 0.10:
         return "yellow"
-    return "green"
+    return "red"
 
 
 
@@ -161,15 +192,17 @@ def _rate_time_consistency(
     dvs: set[str],
     res: pd.DataFrame,
     cfg: _ReportConfig,
+    comparison_level: int | None = None,
 ) -> str:
     """
     Rate time consistency: significant at primary resolution → how stable
     across all resolution_segments?
 
-    For each (param, level, dv) triple that is significant at primary_n_segments,
-    count how many cfg.resolution_segments also show significance.
+    For each (param, dv) pair that is significant at primary_n_segments
+    (within the given comparison level), count how many
+    cfg.resolution_segments also show significance.
 
-    🟢 all triples robust across all resolutions
+    🟢 all pairs robust across all resolutions
     🟡 mixed (some robust, some partial or resolution-specific)
     🔴 all resolution-specific (only at primary)
 
@@ -178,12 +211,13 @@ def _rate_time_consistency(
     str
         'green' | 'yellow' | 'red'
     """
-    primary_sig = res[
-        (res["N. Segments"] == cfg.primary_n_segments)
-        & (res["Model_Type"] == "LME")
-        & (res[cfg.p_col] < cfg.alpha_adjusted)
-        & res["Parameter"].isin(raw_params)
-        & res["Dependent_Variable"].isin(dvs)
+    filtered = _level_filter(res, comparison_level)
+    primary_sig = filtered[
+        (filtered["N. Segments"] == cfg.primary_n_segments)
+        & (filtered["Model_Type"] == "LME")
+        & (filtered[cfg.p_col] < cfg.alpha_adjusted)
+        & filtered["Parameter"].isin(raw_params)
+        & filtered["Dependent_Variable"].isin(dvs)
     ][["Parameter", "Comparison_Level", "Dependent_Variable"]].drop_duplicates()
 
     if primary_sig.empty:
@@ -302,12 +336,21 @@ def _section_predictor_quality(
             .to_dict()
         )
 
-        # Best Cohen's d per canonical predictor (for sorting)
-        best_d = (
-            sig_primary.groupby("_canonical")["Cohen_d"]
-            .apply(lambda s: s.abs().max())
-            .to_dict()
-        )
+        # Per canonical predictor: find the comparison level with the highest
+        # significant |Cohen's d| — all four ratings are then evaluated at that
+        # level so the traffic-light row is internally coherent.
+        best_d: dict[str, float] = {}
+        best_level: dict[str, int | None] = {}
+        for canonical, raw_params in canonical_groups.items():
+            cand = sig_primary[sig_primary["_canonical"] == canonical]
+            if cand.empty:
+                best_d[canonical] = float("nan")
+                best_level[canonical] = None
+                continue
+            best_row_idx = cand["Cohen_d"].abs().idxmax()
+            best_row = cand.loc[best_row_idx]
+            best_d[canonical] = abs(best_row["Cohen_d"])
+            best_level[canonical] = _level_int(best_row["Comparison_Level"])
 
         sorted_predictors = sorted(
             canonical_groups.keys(),
@@ -316,22 +359,25 @@ def _section_predictor_quality(
         )
 
         lines.append(
-            "| Predictor | Best \\|d\\| | Power | Relevance | "
+            "| Predictor | Level | Best \\|d\\| | Power | Relevance | "
             "Generalization | Time Consistency |"
         )
-        lines.append("|---|---|---|---|---|---|")
+        lines.append("|---|---|---|---|---|---|---|")
 
         for canonical in sorted_predictors:
             raw_params = canonical_groups[canonical]
             d_val      = best_d.get(canonical, float("nan"))
+            lvl_idx    = best_level.get(canonical)
 
-            pwr  = _tl(_rate_power(raw_params, dvs, power, cfg))
-            rel  = _tl(_rate_relevance(raw_params, dvs, group_res, cfg))
-            gen  = _tl(_rate_generalization(raw_params, dvs, influence, cfg))
-            tc   = _tl(_rate_time_consistency(raw_params, dvs, group_res, cfg))
+            pwr  = _tl(_rate_power(raw_params, dvs, power, cfg, comparison_level=lvl_idx))
+            rel  = _tl(_rate_relevance(raw_params, dvs, group_res, cfg, comparison_level=lvl_idx))
+            gen  = _tl(_rate_generalization(raw_params, dvs, influence, cfg, comparison_level=lvl_idx))
+            tc   = _tl(_rate_time_consistency(raw_params, dvs, group_res, cfg, comparison_level=lvl_idx))
 
+            lvl_label = f"L{lvl_idx}" if lvl_idx is not None else "—"
             lines.append(
                 f"| {canonical} "
+                f"| {lvl_label} "
                 f"| {_fmt_float(d_val, 3)} "
                 f"| {pwr} | {rel} | {gen} | {tc} |"
             )
@@ -340,6 +386,272 @@ def _section_predictor_quality(
 
     return "\n".join(lines)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION VI-b — SAMPLE SIZE ESTIMATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _required_n_subjects(
+    d: float,
+    icc: float,
+    k: float,
+    alpha: float = 0.05,
+    target_power: float = 0.80,
+) -> int | None:
+    """Minimum number of **subjects** for a within-subject LME fixed-effect test.
+
+    The LME tests a fixed-effect coefficient β against zero using repeated
+    measures from *k* observations per subject.  This is analogous to a
+    **one-sample** t-test on subject-level effects, not a two-sample test.
+
+    Noncentrality parameter:
+        design_effect = 1 + (k − 1) · ICC
+        n_eff = n_subjects · k / design_effect
+        λ = d · √n_eff
+
+    Solves for the smallest integer *n_subjects* where power ≥ *target_power*
+    using the noncentral t-distribution with df ≈ n_subjects − 1.
+
+    Returns None if any input is invalid (d ≈ 0, ICC or k missing).
+    """
+    if d is None or not np.isfinite(d) or abs(d) < 1e-8:
+        return None
+    if icc is None or not np.isfinite(icc):
+        return None
+    if k is None or k < 1:
+        return None
+
+    d = abs(d)
+    design_effect = 1.0 + (k - 1.0) * icc
+    z_alpha = scipy_stats.norm.ppf(1.0 - alpha / 2.0)
+    z_beta = scipy_stats.norm.ppf(target_power)
+
+    # Analytical starting estimate (one-sample z-approximation)
+    n_eff_needed = ((z_alpha + z_beta) / d) ** 2
+    n_start = max(2, int(math.ceil(n_eff_needed * design_effect / k)))
+
+    # Refine with exact noncentral t-distribution
+    for n in range(max(2, n_start - 3), n_start + 200):
+        n_eff = n * k / design_effect
+        df = max(1, n - 1)  # within-subject: df ≈ n_subjects − 1
+        ncp = d * math.sqrt(n_eff)
+        crit = scipy_stats.t.ppf(1.0 - alpha / 2.0, df)
+        power = 1.0 - scipy_stats.nct.cdf(crit, df, ncp) + scipy_stats.nct.cdf(-crit, df, ncp)
+        if power >= target_power:
+            return n
+    return n_start + 200  # conservative fallback
+
+
+def _section_sample_size_estimation(
+    hypothesis_groups: list[dict],
+    res: pd.DataFrame,
+    power: pd.DataFrame,
+    diagnostics: pd.DataFrame,
+    cfg: _ReportConfig,
+    n_subjects: int,
+    predictors_to_evaluate: list[str] | None = None,
+) -> str:
+    """Section VI-b — Required sample size for underpowered predictors.
+
+    For each predictor in *predictors_to_evaluate* that is **not** well-powered,
+    computes the minimum number of subjects required to achieve *cfg.target_power*
+    using the observed Cohen's d and ICC from the corresponding model.
+
+    Parameters
+    ----------
+    n_subjects : int
+        Current number of subjects in the study.  Used together with
+        ``N_Observations`` from the diagnostics frame to derive
+        *k* (observations per subject per model).
+    predictors_to_evaluate : list[str] or None
+        Canonical (cleaned) predictor names to include.  When None, uses a
+        default set covering Category contrasts, Familiarity, Liking, and Force.
+    """
+    if predictors_to_evaluate is None:
+        predictors_to_evaluate = [
+            "Category or Silence = Sad",
+            "Category or Silence = Classic",
+            "Category or Silence = Happy",
+            "Category or Silence = Groovy",
+            "Familiarity [0-7]",
+            "Liking_centered_squared",
+            "Median Unscaled Force [% MVC]",
+            "Median Scaled Force [0-1]",
+        ]
+
+    lines = [
+        "## Sample Size Estimation\n",
+        "> Minimum subjects (n) required to achieve "
+        f"{cfg.target_power:.0%} power at the observed effect size, "
+        f"corrected for repeated-measures design effect via ICC (current n={n_subjects}).  \n"
+        "> ✅ = already well-powered · blank = insufficient data for estimation.\n",
+    ]
+
+    for group in hypothesis_groups:
+        label = group.get("label", "Unnamed Group")
+        hyp_filter = group.get("hypotheses", [])
+        lines.append(f"### {label}\n")
+
+        group_res = res[res["Hypothesis"].isin(hyp_filter)]
+        dvs = sorted(group_res["Dependent_Variable"].unique())
+
+        if group_res.empty or not dvs:
+            lines.append("> No results for this group.\n")
+            continue
+
+        lines.append(f"| Predictor | {' | '.join(dvs)} |")
+        lines.append(f"|---{'|---' * len(dvs)}|")
+
+        for pred_canonical in predictors_to_evaluate:
+            cells: list[str] = []
+
+            for dv in dvs:
+                info = _estimate_n_for_cell(
+                    pred_canonical=pred_canonical,
+                    dv=dv,
+                    group_res=group_res,
+                    power=power,
+                    diagnostics=diagnostics,
+                    cfg=cfg,
+                    n_subjects=n_subjects,
+                )
+                if info["status"] == "well_powered":
+                    cells.append("✅")
+                elif info["status"] == "estimated":
+                    parts = [f"**n={info['n_req']}**"]
+                    parts.append(f"d={info['d']:.2f}")
+                    parts.append(f"ICC={info['icc']:.2f}")
+                    cells.append(" ".join(parts))
+                else:
+                    cells.append("")
+
+            lines.append(f"| {pred_canonical} | {' | '.join(cells)} |")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _estimate_n_for_cell(
+    pred_canonical: str,
+    dv: str,
+    group_res: pd.DataFrame,
+    power: pd.DataFrame,
+    diagnostics: pd.DataFrame,
+    cfg: _ReportConfig,
+    n_subjects: int,
+) -> dict:
+    """Compute the required-n for one (predictor, DV) pair.
+
+    Returns a dict with keys:
+        status : 'well_powered' | 'estimated' | 'missing'
+        n_req  : int or None
+        d      : float or None   (|Cohen's d| used)
+        icc    : float or None
+    """
+    empty = {"status": "missing", "n_req": None, "d": None, "icc": None}
+
+    # Find rows matching this canonical name at primary resolution
+    cand = group_res[
+        (group_res["N. Segments"] == cfg.primary_n_segments)
+        & (group_res["Model_Type"] == "LME")
+        & (group_res["Dependent_Variable"] == dv)
+        & (group_res["Parameter"].apply(_clean_param) == pred_canonical)
+    ]
+    if cand.empty:
+        return empty
+
+    # Pick the level with highest |d|
+    best_idx = cand["Cohen_d"].abs().idxmax()
+    best_row = cand.loc[best_idx]
+    cohen_d = best_row.get("Cohen_d")
+    raw_param = best_row["Parameter"]
+    comp_level = best_row["Comparison_Level"]
+    lvl_idx = _level_int(comp_level)
+
+    # Check if already well-powered
+    if not power.empty:
+        pwr_match = power[
+            (power["Dependent_Variable"] == dv)
+            & (power["Parameter"] == raw_param)
+            & (power["N_Segments"] == cfg.primary_n_segments)
+        ]
+        if lvl_idx is not None:
+            pwr_match = _level_filter(pwr_match, lvl_idx)
+        if not pwr_match.empty:
+            obs_power = pwr_match.iloc[0].get("Power_at_Observed_Effect")
+            if pd.notna(obs_power) and obs_power >= cfg.target_power:
+                return {"status": "well_powered", "n_req": None, "d": None, "icc": None}
+
+    if cohen_d is None or not np.isfinite(cohen_d):
+        return empty
+
+    # Look up ICC from diagnostics
+    icc = _lookup_icc(diagnostics, dv, lvl_idx, cfg)
+    if icc is None:
+        return empty
+
+    # Derive k = observations per subject
+    k = _lookup_k(diagnostics, dv, lvl_idx, cfg, n_subjects)
+    if k is None:
+        return empty
+
+    n_req = _required_n_subjects(
+        d=cohen_d, icc=icc, k=k,
+        alpha=cfg.alpha_adjusted, target_power=cfg.target_power,
+    )
+    if n_req is None:
+        return empty
+    return {"status": "estimated", "n_req": n_req, "d": abs(cohen_d), "icc": icc}
+
+
+def _lookup_icc(
+    diagnostics: pd.DataFrame,
+    dv: str,
+    lvl_idx: int | None,
+    cfg: _ReportConfig,
+) -> float | None:
+    """Retrieve ICC for the LME model matching (dv, level, primary_n_segments)."""
+    if diagnostics.empty:
+        return None
+    diag_match = diagnostics[
+        (diagnostics["Dependent_Variable"] == dv)
+        & (diagnostics["Model_Type"] == "LME")
+    ]
+    if "N. Segments" in diagnostics.columns:
+        diag_match = diag_match[diag_match["N. Segments"] == cfg.primary_n_segments]
+    if lvl_idx is not None:
+        diag_match = _level_filter(diag_match, lvl_idx)
+    if diag_match.empty:
+        return None
+    icc_val = diag_match.iloc[0].get("ICC")
+    return float(icc_val) if pd.notna(icc_val) else None
+
+
+def _lookup_k(
+    diagnostics: pd.DataFrame,
+    dv: str,
+    lvl_idx: int | None,
+    cfg: _ReportConfig,
+    n_subjects: int,
+) -> float | None:
+    """Derive k (observations per subject) from N_Observations / n_subjects."""
+    if diagnostics.empty or n_subjects < 1:
+        return None
+    diag_match = diagnostics[
+        (diagnostics["Dependent_Variable"] == dv)
+        & (diagnostics["Model_Type"] == "LME")
+    ]
+    if "N. Segments" in diagnostics.columns:
+        diag_match = diag_match[diag_match["N. Segments"] == cfg.primary_n_segments]
+    if lvl_idx is not None:
+        diag_match = _level_filter(diag_match, lvl_idx)
+    if diag_match.empty:
+        return None
+    n_obs = diag_match.iloc[0].get("N_Observations")
+    if not pd.notna(n_obs) or n_obs < 1:
+        return None
+    return float(n_obs) / n_subjects
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -518,14 +830,13 @@ def _apply_fdr_to_results(
     df["p_value_fdr"] = np.nan
 
     eligible_mask = (
-        (df["Model_Type"] == "LME")
-        & df["Parameter"].apply(lambda p: p not in _SENTINEL and not p.startswith("Intercept"))
+        df["Parameter"].apply(lambda p: p not in _SENTINEL and not p.startswith("Intercept"))
         & df["Comparison_Level"].apply(
             lambda lvl: any(lvl.startswith(f"Level {i} ") for i in levels_to_correct)
         )
     )
 
-    group_cols = ["Comparison_Level", "N. Segments"]
+    group_cols = ["Comparison_Level", "N. Segments", "Model_Type"]
     if group_by_dv:
         group_cols.append("Dependent_Variable")
 
@@ -827,7 +1138,7 @@ def _section_overview_table(
         # Power frame may be empty if the pipeline has not been run yet
         if power.empty:
             lines.append(
-                f"| {hyp} | `{dv}` | **{n_sig}** | — | — | — {n_sig} |"
+                f"| {hyp} | `{dv}` | **{n_sig}** | — | — | {n_sig} |"
             )
             continue
 
@@ -838,7 +1149,8 @@ def _section_overview_table(
         for _, sr in sig_rows.iterrows():
             pwr_match = power[
                 (power["Dependent_Variable"] == dv)
-                & (power["Parameter"] == sr["Parameter"])
+                & (power["Parameter"] == sr["Parameter"]) &
+                (power["N_Segments"] == cfg.primary_n_segments)
             ]
             if pwr_match.empty:
                 n_no_data += 1
@@ -919,7 +1231,7 @@ def _section_findings(
                 "| Parameter | Level | Model | β | SE (adj) | p (autocorr) | p (FDR) | Cohen's d | Magnitude |"
             )
             lines.append("|---|---|---|---|---|---|---|---|---|")
-            for _, r in sig.iterrows():
+            for _, r in near.iterrows():
                 d = r.get("Cohen_d")
                 mag = _cohens_d_label(d) if pd.notna(d) else "—"
                 p_fdr_str = _fmt_p(r["p_value_fdr"]) if "p_value_fdr" in r.index and pd.notna(r["p_value_fdr"]) else "—"
@@ -1019,7 +1331,7 @@ def _section_cross_resolution(
     primary_sig = res[
         (res["N. Segments"] == cfg.primary_n_segments)
         & (res["Model_Type"] == "LME")
-        & (res['p_value_adjusted'] < alpha)
+        & (res[cfg.p_col] < alpha)
         & res["Parameter"].apply(_is_real_param)
     ][["Parameter", "Comparison_Level"]].drop_duplicates().values.tolist()
 
@@ -1469,7 +1781,7 @@ def _section_heterogeneity(
         lines.append("> ⚠️  Subject heterogeneity frame is empty — not applicable for this pipeline.\n")
         return "\n".join(lines)
 
-    sub = subj[subj["Comparison_Level"] == "lvl_1"].copy()
+    sub = _level_filter(subj, 1)
     if sub.empty:
         sub = subj.copy()
 
@@ -1822,6 +2134,8 @@ def generate_statistical_report(
         file_identifier_suffix: str | None = None,
         fdr_levels_to_correct: list[int] | None = None,
         fdr_group_by_dv: bool = True,
+        n_subjects: int | None = None,
+        sample_size_predictors: list[str] | None = None,
 ) -> Path:
     """
     Generate a Markdown report from the six statistical output frames.
@@ -1859,20 +2173,36 @@ def generate_statistical_report(
         Path to the saved report file.
     """
     # ── Apply FDR correction if requested ────────────────────────────────────
+    # Double-adjustment is impossible because _apply_fdr_to_results always
+    # reads from p_value_adjusted (the pre-FDR column) and only writes to
+    # p_value_fdr / p_value_for_plot.  We reapply when:
+    #   (a) p_value_fdr is absent (old CSV without FDR), or
+    #   (b) eligible rows have NaN in p_value_fdr (e.g. OLS was skipped by
+    #       an earlier LME-only correction).
     if fdr_levels_to_correct:
-        if "p_value_for_plot" in omnibus_results_frame.columns:
-            # FDR already applied during omnibus workflow — use saved columns directly
-            print("  [Report FDR] Using pre-computed p_value_fdr from results frame.")
-            p_col = "p_value_for_plot"
-        else:
-            # Fallback: apply now (e.g. when loading an older CSV without FDR columns)
+        needs_correction = "p_value_fdr" not in omnibus_results_frame.columns
+        if not needs_correction:
+            _SENTINEL = {"__residual_std__", "__re_std__"}
+            eligible = omnibus_results_frame[
+                omnibus_results_frame["Parameter"].apply(
+                    lambda p: p not in _SENTINEL and not p.startswith("Intercept")
+                )
+                & omnibus_results_frame["Comparison_Level"].apply(
+                    lambda lvl: any(lvl.startswith(f"Level {i} ") for i in fdr_levels_to_correct)
+                )
+            ]
+            needs_correction = eligible["p_value_fdr"].isna().any()
+
+        if needs_correction:
             omnibus_results_frame = _apply_fdr_to_results(
                 omnibus_results_frame,
                 levels_to_correct=fdr_levels_to_correct,
                 alpha=alpha_adjusted,
                 group_by_dv=fdr_group_by_dv,
             )
-            p_col = "p_value_for_plot"
+        else:
+            print("  [Report FDR] Pre-computed p_value_fdr is complete — reusing.")
+        p_col = "p_value_for_plot"
     else:
         p_col = "p_value_adjusted"
 
@@ -1948,6 +2278,19 @@ def generate_statistical_report(
                 cfg=cfg,
             )
         )
+
+        if n_subjects is not None:
+            lines.append(
+                _section_sample_size_estimation(
+                    hypothesis_groups=hypothesis_groups,
+                    res=omnibus_results_frame,
+                    power=power_analysis_results_frame,
+                    diagnostics=omnibus_diagnostics_frame,
+                    cfg=cfg,
+                    n_subjects=n_subjects,
+                    predictors_to_evaluate=sample_size_predictors,
+                )
+            )
 
     # ── Subject clustering + MI moderator summary ─────────────────────────────
     if subject_clusters_frame is not None and not subject_clusters_frame.empty:
