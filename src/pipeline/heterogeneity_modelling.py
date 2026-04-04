@@ -144,9 +144,25 @@ def compute_mi_results(
     output_dir: Path | None = None,
     subj_col: str = "Subject_ID",
     dep_var_col: str = "Dependent_Variable",
+    primary_n_segments: int | None = None,
 ) -> pd.DataFrame:
-    """Run MI analysis across all DVs, levels, and conditions. Returns raw MI frame."""
+    """Run MI analysis across all DVs, levels, and conditions. Returns raw MI frame.
+
+    Parameters
+    ----------
+    primary_n_segments : int or None
+        If provided and the influence frame contains an ``N_Segments`` column,
+        only rows matching this resolution are used. When *None* (legacy default),
+        the influence frame is used as-is.
+    """
     all_rows: list[dict] = []
+
+    # Filter influence data to the requested resolution when the CSV spans
+    # multiple n_segments values.
+    if primary_n_segments is not None and "N_Segments" in influence_frame.columns:
+        influence_frame = influence_frame.loc[
+            influence_frame["N_Segments"] == primary_n_segments
+        ].copy()
 
     for dep_var in dep_vars:
         print(f"\n{'=' * 72}\n  MI Analysis │ {dep_var}\n{'=' * 72}")
@@ -641,9 +657,10 @@ def run_heterogeneity_modelling(
     experiment_results_dir: Path,
     analyse_mi_for_dfbetas: bool = True,
     alpha_omnibus: float = 0.05,
+    primary_n_segments: int | None = None,
     subj_col: str = "Subject_ID",
     dep_var_col: str = "Dependent_Variable",
-exclude_subjects: list[int] = [],
+    exclude_subjects: list[int] = [],
 ) -> None:
     """Run the full subject-heterogeneity modelling pipeline end-to-end.
 
@@ -787,6 +804,7 @@ exclude_subjects: list[int] = [],
         attr_cols, conditions_to_evaluate, plot_mi_categories,
         alpha_omnibus=alpha_omnibus, analyse_dfbetas=analyse_mi_for_dfbetas,
         output_dir=output_dir, subj_col=subj_col, dep_var_col=dep_var_col,
+        primary_n_segments=primary_n_segments,
     )
     mi_df.to_csv(output_dir / filemgmt.file_title("Heterogeneity MI Results Raw", ".csv"), index=False)
     print(f"\n✓ Raw MI results saved  ({len(mi_df)} rows)")
