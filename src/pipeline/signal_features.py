@@ -1287,387 +1287,6 @@ def compute_task_wise_aggregated_cmc(
     return values, time_centers, freqs
 
 
-def OLD_compute_task_wise_aggregated_cmc(eeg_array: np.ndarray, emg_array: np.ndarray,
-                                     sampling_freq: int,
-                                     muscle_group: str,
-                                     log_frame: pd.DataFrame | None = None,  # if provided -> task-wise computation
-                                     eeg_channel_subset: list[str] | None = None,
-                                     window_size_sec: float = 2.0,
-                                     window_overlap_ratio: float = .5,
-                                     enforce_independence_threshold: bool = False,
-                                     independence_threshold_alpha: float = .2,
-                                     use_jackknife: bool = True,
-                                     jackknife_alpha: float = .05,
-                                     save_dir: str | Path | None = None,
-                                     pre_trial_computation_buffer_sec: float = 3.0,
-                                     post_trial_computation_buffer_sec: float = 3.0,
-                                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Compute channel-aggregated corticomuscular coherence (CMC) between EEG and EMG signals.
-
-    Calculates multitaper magnitude-squared coherence between EEG and EMG recordings,
-    with optional task-wise segmentation. The function aggregates CMC across EMG channels
-    by selecting maximum coherence values and optionally applies jackknife-based confidence
-    intervals and significance thresholding.
-
-    Parameters
-    ----------
-    eeg_array : np.ndarray
-        EEG data array with shape (n_samples, n_eeg_channels).
-    emg_array : np.ndarray
-        EMG data array with shape (n_samples, n_emg_channels). Must have the same
-        number of samples as eeg_array.
-    sampling_freq : int
-        Sampling frequency of the signals in Hz.
-    muscle_group : str
-        Name of the muscle group being analyzed. Used for labeling saved outputs.
-    log_frame : pd.DataFrame or None, default None
-        DataFrame containing task timing information. If provided, CMC is computed
-        separately for each task/trial. If None, CMC is computed over the entire
-        recording.
-    eeg_channel_subset : list of str or None, default None
-        List of EEG channel names to include in the analysis. If provided, only
-        these channels are used. Channel names must exist in EEG_CHANNEL_IND_DICT.
-        If None, all channels are used.
-    window_size_sec : float, default 2.0
-        Length of analysis windows in seconds.
-    window_overlap_ratio : float, default 0.5
-        Overlap between consecutive windows as a fraction (0.0 to 1.0).
-    enforce_independence_threshold : bool, default False
-        If True, coherence values below the significance threshold are set to zero.
-    independence_threshold_alpha : float, default 0.2
-        Significance level for independence testing when enforce_independence_threshold
-        is True.
-    use_jackknife : bool, default True
-        If True, computes jackknife-based confidence intervals for coherence estimates.
-    jackknife_alpha : float, default 0.05
-        Significance level for jackknife confidence intervals when use_jackknife is True.
-    save_dir : str, Path, or None, default None
-        Directory path for saving output spectrograms. If None, outputs are not saved.
-
-    Returns
-    -------
-    tuple of np.ndarray
-        If use_jackknife is True:
-            output_values : np.ndarray
-                CMC values with shape (n_windows, n_freqs, n_eeg_channels).
-            output_values_lower : np.ndarray
-                Lower confidence interval bounds with same shape as output_values.
-            output_values_upper : np.ndarray
-                Upper confidence interval bounds with same shape as output_values.
-            output_time_centers : np.ndarray
-                Time centers of analysis windows with shape (n_windows,).
-            freqs : np.ndarray
-                Frequency bins with shape (n_freqs,).
-
-        If use_jackknife is False:
-            output_values : np.ndarray
-                CMC values with shape (n_windows, n_freqs, n_eeg_channels).
-            output_time_centers : np.ndarray
-                Time centers of analysis windows with shape (n_windows,).
-            freqs : np.ndarray
-                Frequency bins with shape (n_freqs,).
-
-    Raises
-    ------
-    ValueError
-        If eeg_array and emg_array have different numbers of samples.
-    KeyError
-        If eeg_channel_subset contains channel names not found in EEG_CHANNEL_IND_DICT.
-
-    Notes
-    -----
-    - When log_frame is provided, the function segments the data by tasks and computes
-      CMC separately for each task period, then concatenates results.
-    - The function uses multitaper spectral estimation for robust coherence computation.
-    - Aggregation over EMG channels is performed by selecting the maximum coherence
-      value across channels at each time-frequency point.
-    - If enforce_independence_threshold is True, only statistically significant
-      coherence values are retained (others are set to zero).
-
-    See Also
-    --------
-    features.multitaper_magnitude_squared_coherence : Underlying coherence computation.
-    features.max_cmc_spectrograms_over_channels : Channel aggregation function.
-    """
-    # eeg channel subset indices for slicing:
-    if eeg_channel_subset is not None:
-        if len(eeg_channel_subset) > 0:
-            # prepare channel inds:
-            eeg_channel_subset_inds = [EEG_CHANNEL_IND_DICT[ch] for ch in eeg_channel_subset]
-            print(
-                f"Reducing EEG channels for CMC computation to {len(eeg_channel_subset)} channels: {eeg_channel_subset}\n")
-
-            # slice EEG array by channel subset:
-            eeg_array = eeg_array[:, eeg_channel_subset_inds]
-
-    # derive samples:
-    n_samples_eeg, n_eeg_channels = eeg_array.shape
-    n_samples_emg, n_emg_channels = emg_array.shape
-    if n_samples_eeg != n_samples_emg:
-        raise ValueError(
-            f"EEG and EMG must have same number of samples. "
-            f"Got EEG: {n_samples_eeg}, EMG: {n_samples_emg}"
-        )
-    n_samples = n_samples_eeg
-
-    # derive window parameters:
-    window_samples = int(window_size_sec * sampling_freq)
-    hop_samples = int(window_samples * (1 - window_overlap_ratio))
-    if hop_samples <= 0:
-        raise ValueError("window_overlap_ratio too high: hop_samples becomes <= 0")
-    n_windows = (n_samples - window_samples) // hop_samples + 1
-
-    if log_frame is not None:
-
-        # derive frequencies:
-        freqs = np.fft.rfftfreq(window_samples, d=1 / sampling_freq)
-        n_freqs = len(freqs)
-
-        # pre-allocate other arrays:
-        output_values = np.zeros((n_windows, n_freqs, n_eeg_channels), dtype=np.float32)
-        output_time_centers = np.full(n_windows, np.nan, dtype=np.float64)
-        if use_jackknife:
-            output_values_lower = np.zeros((n_windows, n_freqs, n_eeg_channels), dtype=np.float32)
-            output_values_upper = np.zeros((n_windows, n_freqs, n_eeg_channels), dtype=np.float32)
-
-        task_specs, measurement_start, time_indexed_eeg_df, time_indexed_emg_df, window_size_sec_ret, hop_sec_ret = _prepare_taskwise_cmc_context(
-            log_frame=log_frame,
-            n_windows=n_windows,
-            window_size_sec=window_size_sec,
-            window_overlap_ratio=window_overlap_ratio,
-            sampling_freq=sampling_freq,
-            pre_trial_computation_buffer_sec=pre_trial_computation_buffer_sec,
-            post_trial_computation_buffer_sec=post_trial_computation_buffer_sec,
-            eeg_array=eeg_array,
-            emg_array=emg_array,
-        )
-        iterator = tqdm(task_specs, desc="Computing Trial-wise CMC", total=len(task_specs))
-
-    else:  # no task-wise processing intended
-        iterator = [(None, None, 0, n_windows - 1)]
-
-
-
-    ##### LOOP START #####
-    # loop over all tasks (if log_frame provided) or do single iteration (if not):
-    for start_timestamp, end_timestamp, start_window_idx, end_window_idx in iterator:
-        # prepare eeg and emg array:
-        if start_timestamp is None or end_timestamp is None:  # don't slice arrays:
-            subset_eeg = eeg_array
-            subset_emg = emg_array
-        else:  # slice arrays and reconvert to numpy
-            # Right-exclusive slicing: [start, end) 
-            eeg_mask = (time_indexed_eeg_df.index >= start_timestamp) & (time_indexed_eeg_df.index < end_timestamp)
-            emg_mask = (time_indexed_emg_df.index >= start_timestamp) & (time_indexed_emg_df.index < end_timestamp)
-            subset_eeg = time_indexed_eeg_df.loc[eeg_mask, :].to_numpy()
-            subset_emg = time_indexed_emg_df.loc[emg_mask, :].to_numpy()
-
-
-        ### COMPUTATION START
-        # Non-aggregated computation:
-        output_dict = multitaper_magnitude_squared_coherence(
-            subset_eeg, subset_emg, sampling_freq=sampling_freq,
-            verbose=log_frame is None,  # verbose if not per task
-            window_length_sec=window_size_sec, overlap_frac=window_overlap_ratio,
-            significance_level=independence_threshold_alpha,
-            use_jackknife=use_jackknife, jackknife_alpha=jackknife_alpha,
-        )
-        # output_dict has keys:
-        #       always:                             coherence_raw, time_centers, freqs, metadata
-        #       + if use_jacknife:                  coherence_ci_lower, coherence_ci_upper
-        #       + if apply_independence_threshold:  coherence_significant,
-        time_centers, freqs = output_dict['time_centers'], output_dict['freqs']
-
-        # mask by significance: (if enforce_independence_threshold)
-        values = np.where(output_dict['coherence_significant'], output_dict['coherence_raw'],
-                                     0.0) if enforce_independence_threshold else output_dict['coherence_raw']
-
-        # assert that CI wraps mean:
-        if use_jackknife:
-            assert np.all(output_dict['coherence_raw'] >= output_dict['coherence_ci_lower'])
-            assert np.all(output_dict['coherence_raw'] <= output_dict['coherence_ci_upper'])
-
-        if use_jackknife:
-            values, values_lower, values_upper = max_cmc_spectrograms_over_channels(
-                values, output_dict['coherence_ci_lower'], output_dict['coherence_ci_upper'], 3,
-                verbose=log_frame is None,
-            )
-        else: values = max_cmc_spectrograms_over_channels(values, channel_ax=3, verbose=log_frame is None,)
-        ### COMPUTATION END
-
-
-        ### Assign values to respective window slice
-        if log_frame is not None:  # task-wise processing
-            _assign_taskwise_cmc_outputs(
-                output_values=output_values,
-                output_time_centers=output_time_centers,
-                start_window_idx=start_window_idx,
-                end_window_idx=end_window_idx,
-                values=values,
-                time_centers=time_centers,
-                slice_offset_sec=(start_timestamp - measurement_start).total_seconds(),
-                output_values_lower=output_values_lower if use_jackknife else None,
-                output_values_upper=output_values_upper if use_jackknife else None,
-                values_lower=values_lower if use_jackknife else None,
-                values_upper=values_upper if use_jackknife else None,
-            )
-
-        else:  # total processing
-            output_values = values
-            output_time_centers = time_centers
-            if use_jackknife:
-                output_values_lower = values_lower
-                output_values_upper = values_upper
-    ##### LOOP END #####
-
-    # save:
-    if save_dir is not None:
-        channel_suffix = f"Channels_{'_'.join(eeg_channel_subset)}" if eeg_channel_subset else "All_Channels"
-        save_spectrograms(output_values, output_time_centers, freqs,
-                                   save_dir=save_dir, modality=f"{muscle_group.capitalize()} CMC{' Trial-wise' if log_frame is not None else ''}",
-                                   identifier_suffix=channel_suffix
-                                   )
-
-    # return
-    if use_jackknife: return output_values, output_values_lower, output_values_upper, output_time_centers, freqs
-    else: return output_values, output_time_centers, freqs
-
-def OLD_prepare_taskwise_cmc_context(
-        log_frame: pd.DataFrame,
-        n_windows: int,
-        window_size_sec: float,
-        pre_trial_computation_buffer_sec: float,
-        post_trial_computation_buffer_sec: float,
-        eeg_array: np.ndarray,
-        emg_array: np.ndarray,
-        window_overlap_ratio: float | None = None,
-        sampling_freq: int | None = None,
-        hop_sec: float | None = None,
-) -> tuple[list[tuple[pd.Timestamp, pd.Timestamp, int, int]], pd.Timestamp, pd.DataFrame, pd.DataFrame]:
-    """Build task-wise slice specs and time-indexed signal DataFrames."""
-    trial_start_ends = data_integration.get_all_task_start_ends(log_frame, output_type='list')
-    measurement_start, measurement_end = data_integration.get_qtc_measurement_start_end(log_frame)
-
-    # derive hop in seconds either directly or from overlap settings
-    if hop_sec is None:
-        if sampling_freq is None or window_overlap_ratio is None:
-            raise ValueError(
-                "Either hop_sec or both sampling_freq and window_overlap_ratio must be provided."
-            )
-        window_samples = int(window_size_sec * sampling_freq)
-        hop_samples = int(window_samples * (1 - window_overlap_ratio))
-        if hop_samples <= 0:
-            raise ValueError("window_overlap_ratio too high: hop_samples becomes <= 0")
-        hop_sec = hop_samples / sampling_freq
-
-    first_center = data_analysis.make_timezone_aware(
-        pd.Timestamp(measurement_start + pd.Timedelta(seconds=window_size_sec / 2))
-    )
-    window_centers = pd.DatetimeIndex([
-        first_center + pd.Timedelta(seconds=hop_sec * i) for i in range(n_windows)
-    ])
-    window_indices = pd.Series(np.arange(0, n_windows), index=window_centers)
-
-    if pre_trial_computation_buffer_sec > 0:
-        print(f"Starting pre-trial CMC computation {pre_trial_computation_buffer_sec} seconds before trial start to prevent data loss.")
-    if post_trial_computation_buffer_sec > 0:
-        print(f"Ending post-trial CMC computation {post_trial_computation_buffer_sec} seconds after trial end to prevent data loss.")
-
-    # build time-indexed DataFrames for downstream slicing in compute_task_wise_aggregated_cmc
-    time_indexed_eeg_df = data_analysis.add_time_index(
-        start_timestamp=measurement_start,
-        end_timestamp=measurement_end,
-        target_array=pd.DataFrame(eeg_array),
-    )
-    time_indexed_eeg_df.index = data_analysis.make_timezone_aware(time_indexed_eeg_df.index)
-
-    time_indexed_emg_df = data_analysis.add_time_index(
-        start_timestamp=measurement_start,
-        end_timestamp=measurement_end,
-        target_array=pd.DataFrame(emg_array),
-    )
-    time_indexed_emg_df.index = data_analysis.make_timezone_aware(time_indexed_emg_df.index)
-
-    task_specs: list[tuple[pd.Timestamp, pd.Timestamp, int, int]] = []
-    half_window = pd.Timedelta(seconds=window_size_sec / 2)
-    measurement_start_aware = data_analysis.make_timezone_aware(pd.Timestamp(measurement_start))
-
-    for start, end in trial_start_ends:
-        adj_start = start - pd.Timedelta(seconds=pre_trial_computation_buffer_sec)
-        adj_end   = end   + pd.Timedelta(seconds=post_trial_computation_buffer_sec)
-
-        # Find exact slots whose centers fall within [center_start, center_end].
-        # Use direct timestamp matching instead of label-based slicing to avoid off-by-one.
-        center_start = adj_start + half_window
-        center_end = adj_end - half_window
-        
-        valid_mask = (window_indices.index >= center_start) & (window_indices.index <= center_end)
-        valid_indices = window_indices[valid_mask]
-        if len(valid_indices) == 0:
-            continue
-        start_window_idx = int(valid_indices.min())
-        # Convert to right-exclusive: last included index + 1
-        end_window_idx = int(valid_indices.max()) + 1
-
-        # DIAGNOSTIC: verify stored time centers map to expected absolute time.
-        expected_first_center_sec = (center_start - measurement_start_aware).total_seconds()
-        slot_timestamp = valid_indices.index.min()
-        slot_time_sec = (slot_timestamp - measurement_start_aware).total_seconds()
-        delta_ms = abs(slot_time_sec - expected_first_center_sec) * 1000.0
-        print(
-            f"Trial {start.time()} | start_slot={start_window_idx} | "
-            f"slot_time≈{slot_timestamp.time()} | "
-            f"expected_first_center≈{expected_first_center_sec:.3f}s | "
-            f"delta={delta_ms:.1f}ms"
-        )
-
-        task_specs.append((adj_start, adj_end, start_window_idx, end_window_idx))
-
-    return task_specs, measurement_start, time_indexed_eeg_df, time_indexed_emg_df, window_size_sec, hop_sec
-
-
-def OLD_assign_taskwise_cmc_outputs(
-            output_values: np.ndarray,
-            output_time_centers: np.ndarray,
-            start_window_idx: int,
-            end_window_idx: int,
-            values: np.ndarray,
-            time_centers: np.ndarray,
-            slice_offset_sec: float,
-            output_values_lower: np.ndarray | None = None,
-            output_values_upper: np.ndarray | None = None,
-            values_lower: np.ndarray | None = None,
-            values_upper: np.ndarray | None = None,
-    ) -> None:
-        """Assign one task block into global output arrays with bounds-safe slicing."""
-        expected_span = end_window_idx - start_window_idx
-        actual_values_count = len(values)
-        
-        # Key fix: Truncate or pad to match expected span
-        if actual_values_count != expected_span:
-            print(
-                f"[GEOMETRY MISMATCH] start_idx={start_window_idx}, end_idx={end_window_idx}, "
-                f"expected_span={expected_span}, but multitaper returned {actual_values_count} windows. "
-                f"Truncating to match expected span."
-            )
-            assign_len = min(expected_span, actual_values_count)
-        else:
-            assign_len = actual_values_count
-
-        target_slice = slice(start_window_idx, start_window_idx + assign_len)
-
-        output_values[target_slice] = values[:assign_len]
-        output_time_centers[target_slice] = time_centers[:assign_len] + slice_offset_sec
-
-        if (
-            output_values_lower is not None and output_values_upper is not None
-            and values_lower is not None and values_upper is not None
-        ):
-            output_values_lower[target_slice] = values_lower[:assign_len]
-            output_values_upper[target_slice] = values_upper[:assign_len]
-
-
 
 
 
@@ -1691,26 +1310,52 @@ def save_spectrograms(spectrograms: np.ndarray, time_centers: np.ndarray, freque
 
 def fetch_stored_spectrograms(dir: Path | str,
                               modality: str,
-                              file_identifier: str | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                              file_identifier: str | list[str] | None = None,
+                              expected_n_channels: int | None = None,
+                              ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     If no file_identifier is provided, just fetches the most recent fitting .npy file. Expects stored file titles
     to be 'PSD Spectrograms' for spectrograms, 'PSD Timecenters' for timecenters and 'PSD Frequencies' for frequencies.
+
+    Parameters
+    ----------
+    file_identifier : str, list[str], or None
+        Additional keyword(s) that must appear in the filename.  A list
+        adds multiple independent substring requirements (useful when the
+        identifiers are non-contiguous in the filename, e.g. muscle group
+        and channel subset).
+    expected_n_channels : int or None
+        If provided, asserts that the channel axis (axis 2) of the loaded
+        spectrogram has exactly this many channels.  Protects against
+        silently loading a file with a different channel configuration
+        (e.g. 11-channel CMC subset vs. 64-channel full CMC).
 
     Returns tuple with three np.ndarrays:
     1) spectrograms (n_times, n_freqs, n_channels)
     2) timecenters (n_times)
     3) frequencies (n_freqs)
     """
-    spec_kws = [f"{modality}", "Spectrograms"]
-    if file_identifier is not None: spec_kws.append(file_identifier)
+    ids = ([file_identifier] if isinstance(file_identifier, str)
+           else file_identifier if file_identifier is not None
+           else [])
+
+    spec_kws = [f"{modality}", "Spectrograms"] + ids
     spectrograms = np.load(filemgmt.most_recent_file(dir, ".npy", spec_kws))
 
-    times_kws = [f"{modality}", "Timecenters"]
-    if file_identifier is not None: times_kws.append(file_identifier)
+    if expected_n_channels is not None and spectrograms.ndim >= 3:
+        actual = spectrograms.shape[2]
+        if actual != expected_n_channels:
+            raise ValueError(
+                f"fetch_stored_spectrograms: expected {expected_n_channels} channels "
+                f"on axis 2 but loaded spectrogram has {actual} "
+                f"(modality={modality!r}, file_identifier={file_identifier!r}). "
+                f"Check that the correct file is being loaded."
+            )
+
+    times_kws = [f"{modality}", "Timecenters"] + ids
     timecenters = np.load(filemgmt.most_recent_file(dir, ".npy", times_kws))
 
-    freq_kws = [f"{modality}", "Frequencies"]
-    if file_identifier is not None: freq_kws.append(file_identifier)
+    freq_kws = [f"{modality}", "Frequencies"] + ids
     frequencies = np.load(filemgmt.most_recent_file(dir, ".npy", freq_kws))
 
     return spectrograms, timecenters, frequencies
