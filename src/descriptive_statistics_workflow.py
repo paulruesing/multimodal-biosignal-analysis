@@ -13,11 +13,12 @@ import src.utils.file_management as filemgmt
 
 
 # ── Colour palette ───────────────────────────────────────────────────────────
-_BABYBLUE = "#B8D4F0"   # gender: Male
-_PINK     = "#FF85B3"   # gender: Female
-_RED      = "#C00000"   # hand: Right  (intentionally bold — majority)
-_DKBLUE   = "#1F4E79"   # hand: Left
-_SALMON   = "#FF9999"   # trials: Silence
+# Gender encodes COLOR (green / darkorange); handedness encodes MARKER SHAPE.
+_GENDER_COLOR_MALE   = "green"
+_GENDER_COLOR_FEMALE = "darkorange"
+_HAND_COLOR_LEFT     = "lightblue"
+_HAND_COLOR_RIGHT    = "blue"
+_SALMON              = "#FF9999"   # trials: Silence
 
 # ── Per-subplot base colours (kept clearly distinct from bars above) ──────────
 _COLOR_SUBJECT  = "white" # "#4472C4"   # blue   — subject-level trait scores
@@ -26,9 +27,8 @@ _COLOR_CMC      = "white" # "#E8743B"   # orange — CMC coherence values
 _COLOR_ACCURACY = "white" #"#7B2D8B"   # purple — RMS error
 
 # ── Bar colour mappings ───────────────────────────────────────────────────────
-_GENDER_COLORS = {"Male": _BABYBLUE, "Female": _PINK}
-_HAND_COLORS   = {"Right": _RED,     "Left":   _DKBLUE}
-_TRIAL_COLORS  = {"Music": _COLOR_SUBJECT, "Silence": _SALMON}
+_GENDER_COLORS = {"Male": _GENDER_COLOR_MALE, "Female": _GENDER_COLOR_FEMALE}
+_HAND_COLORS   = {"Left": _HAND_COLOR_LEFT,   "Right": _HAND_COLOR_RIGHT}
 
 
 # ── Global font scaling ───────────────────────────────────────────────────────
@@ -275,21 +275,20 @@ def _draw_stacked_bar(
     left  = 0.0
     for label, count in counts.items():
         ax.barh(
-            0, count, left=left,
+            0.05, count, left=left,
             color=colors.get(label, "#CCCCCC"),
-            edgecolor="white", linewidth=2, height=0.6,
+            edgecolor="white", linewidth=2, height=0.5,
         )
         ax.text(
             left + count / 2, 0,
-            f"{count:{value_format}}\n{label}",
-            ha="center", va="center", fontsize=9, color=text_color,
-            fontweight="bold",
+            f"{count:{value_format}}\n\n\n{label}",
+            ha="center", va="center", color='black',
         )
         left += count
     ax.set_xlim(0, total)
     ax.set_ylim(-0.65, 0.65)
     ax.axis("off")
-    ax.set_title(title, fontsize=10, pad=6)
+    ax.set_title(title, pad=0)
 
 
 
@@ -302,12 +301,16 @@ def _draw_multi_boxplot(
     alpha_range: tuple[float, float] = (0.45, 0.85),
     max_spread_group_size: int = 10,
     subject_metadata: pd.DataFrame | None = None,
+        draw_legend: bool = True,
+        legend_bbox: tuple[float, float] | None = None,
+
     # subject_metadata: DataFrame indexed by Subject ID,
     # must contain 'Gender' and 'Dominant hand' columns
         jitter: float = 0.0,
 ) -> None:
-    _HAND_COLOR  = {"Right": "#C00000", "Left": "#1F4E79"}
-    _GENDER_MARK = {"Male": "^", "Female": "o"}
+    # Color encodes Gender; marker shape encodes Dominant Hand.
+    _GENDER_COLOR = {"Male": _GENDER_COLOR_MALE, "Female": _GENDER_COLOR_FEMALE}
+    _HAND_MARK    = {"Right": "o", "Left": "^"}
     _FALLBACK_COLOR  = "#1A1A2E"
     _FALLBACK_MARKER = "o"
 
@@ -349,11 +352,11 @@ def _draw_multi_boxplot(
                 )
                 .groupby(["hand", "gender"]).groups.items()
             ):
-                c  = _HAND_COLOR.get(hand,   _FALLBACK_COLOR)
-                mk = _GENDER_MARK.get(gender, _FALLBACK_MARKER)
+                c  = _GENDER_COLOR.get(gender, _FALLBACK_COLOR)
+                mk = _HAND_MARK.get(hand,      _FALLBACK_MARKER)
                 sc = ax.scatter(
                     x_scatter[group_idx], values[group_idx],
-                    alpha=0.75, color=c, marker=mk, s=32,
+                    alpha=0.75, color=c, marker=mk, s=42,
                     zorder=3, edgecolors="white", linewidths=0.4,
                 )
                 # Collect one handle per unique combo for the legend
@@ -365,12 +368,12 @@ def _draw_multi_boxplot(
                     )
         else:
             ax.scatter(x_scatter, values, alpha=0.55,
-                       color=_FALLBACK_COLOR, s=22, zorder=3)
+                       color=_FALLBACK_COLOR, s=30, zorder=3)
 
     ax.set_xlim(0.35, n + 0.65)
     ax.set_xticks(range(1, n + 1))
-    ax.set_xticklabels([p[0] for p in panels], fontsize=9)
-    ax.set_ylabel(ylabel, fontsize=8)
+    ax.set_xticklabels([p[0] for p in panels])
+    ax.set_ylabel(ylabel)
     ax.tick_params(axis="y", labelsize=8)
     ax.tick_params(axis="x", length=0)
     ax.spines[["top", "right"]].set_visible(False)
@@ -378,11 +381,12 @@ def _draw_multi_boxplot(
     ax.tick_params(axis="both", colors="black")
     ax.yaxis.label.set_color("black")
 
-    if legend_handles:
+    if legend_handles and draw_legend:
         ax.legend(
             handles=list(legend_handles.values()),
-            fontsize=7, loc="best", framealpha=0.7,
+            loc="lower left", framealpha=0.7,
             handletextpad=0.4, borderpad=0.5,
+            bbox_to_anchor=legend_bbox,
         )
 
 
@@ -453,21 +457,21 @@ def plot_combined_descriptive_mosaic(
     -------
     plt.Figure
     """
-    fig = plt.figure(figsize=(13, 8))
-    fig.subplots_adjust(top=0.92, bottom=0.09, left=0.06, right=0.98,
+    fig = plt.figure(figsize=(12, 8))
+    fig.subplots_adjust(top=0.92, bottom=0.09, left=0.04, right=0.98,
                         hspace=0.20)
 
     outer = gridspec.GridSpec(
         2, 1, figure=fig,
         height_ratios=[1.0, 1.05],
-        hspace=0.20,
+        hspace=0.25,
     )
 
     # ── ROW 1: personal characteristics ─────────────────────────────────────
     row1 = gridspec.GridSpecFromSubplotSpec(
         1, 2, subplot_spec=outer[0],
         width_ratios=[2.2, 7.8],
-        wspace=0.15,
+        wspace=0.195,
     )
     row1_left = gridspec.GridSpecFromSubplotSpec(
         2, 1, subplot_spec=row1[0], hspace=0.60,
@@ -479,8 +483,8 @@ def plot_combined_descriptive_mosaic(
     # ── ROW 2: ratings + CMC + accuracy ──────────────────────────────────────
     row2 = gridspec.GridSpecFromSubplotSpec(
         1, 3, subplot_spec=outer[1],
-        width_ratios=[3.0, 5.5, 1.5],
-        wspace=0.45,
+        width_ratios=[2.5, 5.5, 1.5],
+        wspace=0.2,
     )
     ax_ratings = fig.add_subplot(row2[0])
     ax_cmc     = fig.add_subplot(row2[1])
@@ -503,13 +507,13 @@ def plot_combined_descriptive_mosaic(
         ("Total Fatigue",   fatigue_series),
         ("Total Pleasure",  pleasure_series),
     ], color=_COLOR_SUBJECT, ylabel="Score [0-7]", boxwidth=.5,  # width slightly reduced here, since subplot is wider
-                        subject_metadata=subject_metadata)
+                        subject_metadata=subject_metadata, draw_legend=True, legend_bbox=(.79, 0.0))
 
     # ── DRAW ROW 2 ───────────────────────────────────────────────────────────
     _draw_multi_boxplot(ax_ratings, [
         ("Liking",      liking_series),
         ("Familiarity", familiarity_series),
-    ], color=_COLOR_TRIAL, ylabel="Score [0-7]", subject_metadata=subject_metadata)
+    ], color=_COLOR_TRIAL, ylabel="Score [0-7]", subject_metadata=subject_metadata, draw_legend=False)
 
     _draw_multi_boxplot(ax_cmc, [
         ("Flexor β", cmc_flexor_beta_series),
@@ -519,23 +523,23 @@ def plot_combined_descriptive_mosaic(
     ], color=_COLOR_CMC, ylabel="Coherence", subject_metadata=subject_metadata,
                         jitter=.05,
                         # add jitter here, because continuous y-axis prevents coinciding samples (no width spreading)
-                        )
+                        draw_legend=False)
 
     _draw_multi_boxplot(ax_acc, [
         ("Accuracy", accuracy_series),
     ], color=_COLOR_ACCURACY, ylabel="Task Error (RMSE)", subject_metadata=subject_metadata,
                         jitter=.1,
                         # same jitter argumentation here
-                        )
+                        draw_legend=False)
 
     # ── SECTION LABELS ───────────────────────────────────────────────────────
-    for y_fig, label in [(0.955, "Participant Characteristics"),
-                         (0.495, "Study Results")]:
-        fig.text(0.05, y_fig, label, fontsize=10, color="black",
-                 va="bottom", style="normal")
+    for y_fig, label in [(0.96, "Participant Characteristics (per subject)"),
+                         (0.495, "Study Results (per trial)")]:
+        fig.text(0.01, y_fig, label, color="black",
+                 va="bottom", ha="left", fontweight="bold", fontsize=13)
 
     if suptitle is not None:
-        fig.suptitle(suptitle, fontsize=13, y=0.99)
+        fig.suptitle(suptitle, y=0.99)
 
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -591,8 +595,11 @@ if __name__ == "__main__":
     dancing_habit_series = personal_df.set_index("Subject ID")["Dancing habit"]
     fatigue_series = personal_df.set_index("Subject ID")["Total fatigue"]
     pleasure_series = personal_df.set_index("Subject ID")["Total pleasure"]
+    # Pinned to the mid-point of data collection so reported ages are stable
+    # across reruns instead of drifting with the calendar.
+    AGE_REFERENCE_DATE = date(2026, 1, 25)
     age_series = personal_df["Birthdate"].apply(
-        lambda value: _compute_age_years(value, reference_date=date.today())
+        lambda value: _compute_age_years(value, reference_date=AGE_REFERENCE_DATE)
     )
 
     print("\n── Personal data ───────────────────────────────────────────")
@@ -601,6 +608,39 @@ if __name__ == "__main__":
     # ── Study structure ──────────────────────────────────────────────────────
     stats_df: pd.DataFrame = pd.read_csv(
         filemgmt.most_recent_file(FEATURE_OUTPUT_DATA, ".csv", ["Combined Statistics 1seg"])
+    )
+
+    # ── Restrict to VALID trials only ────────────────────────────────────────
+    # Source of truth: each subject's enriched log + get_all_task_start_ends,
+    # which internally calls get_task_start_end and drops trials whose
+    # 'Song Skipped' or 'Trial Exclusion Bool' flags are set. We rebuild the
+    # valid (Subject ID, Trial ID) set from the logs and inner-join stats_df
+    # against it, so the descriptive workflow does not silently inherit any
+    # stale rows from the precomputed CSV.
+    valid_trial_pairs: set[tuple[int, int]] = set()
+    for subject_ind in range(N_SUBJECTS):
+        subject_dir = EXPERIMENT_DATA / f"subject_{subject_ind:02}"
+        log_df = data_integration.fetch_enriched_log_frame(subject_dir, verbose=False)
+        valid_trial_ids = data_integration.get_all_task_start_ends(
+            log_df, output_type='dict',
+        ).keys()
+        for trial_id in valid_trial_ids:
+            valid_trial_pairs.add((subject_ind, int(trial_id)))
+
+    n_before_filter = len(stats_df)
+    stats_df = stats_df.loc[
+        [
+            (int(row_subject), int(row_trial)) in valid_trial_pairs
+            for row_subject, row_trial in zip(stats_df["Subject ID"], stats_df["Trial ID"])
+        ]
+    ].reset_index(drop=True)
+    n_dropped = n_before_filter - len(stats_df)
+    print(
+        f"\n── Trial validity filter ───────────────────────────────────"
+        f"\n  valid (Subject, Trial) pairs from logs: {len(valid_trial_pairs)}"
+        f"\n  CSV rows before filter:                 {n_before_filter}"
+        f"\n  CSV rows dropped as invalid:            {n_dropped}"
+        f"\n  CSV rows after filter:                  {len(stats_df)}"
     )
 
     # Trial-level series — index by Subject ID so each row maps to a subject
@@ -630,29 +670,10 @@ if __name__ == "__main__":
     familiarity_series = music_df.set_index("Subject ID")[familiarity_col].dropna()
     accuracy_series = stats_df.set_index("Subject ID")["RMS_Accuracy"].dropna()
 
-    """musical_skill_series = personal_df["Musical skill"]
-    athleticism_series   = personal_df["Athleticism"]
-    dancing_habit_series = personal_df["Dancing habit"]
-    fatigue_series       = personal_df["Total fatigue"]
-    pleasure_series      = personal_df["Total pleasure"]
-
-    
-
-    
-    liking_series      = music_df["Liking [0-7]"].dropna()
-    familiarity_series = music_df["Familiarity [0-7]"].dropna()"""
-
     print("\n── Trial counts ────────────────────────────────────────────")
     print(f"  Total:   {len(stats_df)}")
     print(f"  Music:   {stats_df['Music Listening'].astype(bool).sum()}")
     print(f"  Silence: {(~stats_df['Music Listening'].astype(bool)).sum()}")
-
-    """# ── Study results ────────────────────────────────────────────────────────
-    cmc_flexor_beta_series    = stats_df["CMC_Flexor_mean_beta"].dropna()
-    cmc_flexor_gamma_series   = stats_df["CMC_Flexor_mean_gamma"].dropna()
-    cmc_extensor_beta_series  = stats_df["CMC_Extensor_mean_beta"].dropna()
-    cmc_extensor_gamma_series = stats_df["CMC_Extensor_mean_gamma"].dropna()
-    accuracy_series           = stats_df["RMS_Accuracy"].dropna()"""
 
     # ── Final numeric summary output (all boxplot metrics + requested extras) ──
     print("\n── Final metric summary (Range / Mean / Median / SD) ────────")
