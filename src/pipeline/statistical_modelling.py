@@ -2079,6 +2079,7 @@ def run_influence_analysis(
     file_title: Callable[[str, str], str],
     dfbeta_flag_threshold: float = 1.0,
     cooks_flag_threshold: float | None = None,
+    df_transform: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """Run LOSO influence analysis for all (dep_var, comp_lvl, n_segments) configs.
 
@@ -2107,6 +2108,10 @@ def run_influence_analysis(
     cooks_flag_threshold : float or None
         Cook's D >= this value sets CooksD_Flagged = True.
         If None, uses the conventional 4 / n_subjects per config. Default None.
+    df_transform : callable or None
+        Optional transform applied to each loaded feature DataFrame before
+        modelling (e.g. adding a log-transformed DV column).  Signature:
+        ``df_transform(df) -> df``.  When None, the data is used as-is.
 
     Returns
     -------
@@ -2146,6 +2151,8 @@ def run_influence_analysis(
                 feature_output_data, ".csv", [f"Combined Statistics {n_segments}seg"]
             )
         )
+        if df_transform is not None:
+            all_subject_df = df_transform(all_subject_df)
         n_subjects = all_subject_df["Subject ID"].nunique()
         effective_cooks_threshold = (
             cooks_flag_threshold if cooks_flag_threshold is not None
@@ -2531,6 +2538,7 @@ def run_power_analysis(
     fetch_level_definitions: Callable[[bool], list[dict]],
     file_title: Callable[[str, str], str],
     save_full_power_curve: bool = False,
+    df_transform: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run simulation-based power analysis for all PowerConfig entries.
 
@@ -2585,6 +2593,8 @@ def run_power_analysis(
                 [f"Combined Statistics {cfg.n_segments}seg"]
             )
         )
+        if df_transform is not None:
+            base_df = df_transform(base_df)
 
         print("  Loading generative parameters from results frame...")
         gen_params = _extract_lme_params(
