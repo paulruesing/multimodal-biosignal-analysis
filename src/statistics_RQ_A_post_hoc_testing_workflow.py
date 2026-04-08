@@ -46,38 +46,17 @@ if __name__ == "__main__":
     exclude_subjects: list[int] = []
 
     # workflow control:
-    analyse_cbp: bool = True
+    analyse_cbp: bool = False   # settings (configs follow below)
     analyse_cmc_accuracy_phase_plot: bool = False
     analyse_emg_psd_phase_plot: bool = False
+    analyse_subject_heterogeneity: bool = True
 
-    analyse_subject_heterogeneity: bool = False
-    dep_vars_to_analyse: list[str] = [
-        "CMC_Flexor_mean_beta", "CMC_Extensor_mean_beta",
-        "CMC_Flexor_mean_gamma", "CMC_Extensor_mean_gamma",
-    ]
 
-    # Condition levels to scrutinise — level_key → (Condition_Variable, [non-reference conditions])
-    conditions_to_evaluate: dict[str, tuple[str, list[str]]] = {
-        "lvl_0": ("Music Listening", ["True"]),
-        "lvl_1": ("Category or Silence", ["Happy", "Groovy", "Sad", "Classic"]),
-    }
-
-    # Mutual Information Analysis:
-    analyse_mi_for_dfbetas: bool = True
-    plot_mi_categories: list[Literal['dfbeta', 'cooks_d', 'contrast']] = []#'cooks_d', 'contrast']
-
-    # Top-N MI-ranked moderators to carry into cluster→attribute scatter plots
-    top_n_moderators: int = 3
-
-    # Feature blocks to include in clustering (any subset of these three)
-    clustering_measures: list[str] = ["contrast", "cooks_d"]
-
-    # Minimum number of subjects per cluster — prevents trivial 1-subject clusters
-    min_cluster_size: int = 2
-
+    ### CMC Accuracy Plot Settings:
+    plot_accuracy_per_cycle_id: bool = False  # vs overall trial accuracy
     cmc_accuracy_plot_cfg = CBPAConfig(
         modality="CMC",
-        modality_file_id="Extensor",
+        modality_file_id="Flexor",
         freq_band="beta",
         channels=None,
         use_phase_normalization=True,
@@ -88,6 +67,7 @@ if __name__ == "__main__":
         output_dir=OUTPUT,
         save_plots=True,
         show_plots=True,
+        show_target_sine=True,
         include_dynamometer_force=True,
         exclude_subjects=exclude_subjects,
         # Align CMC cycles with the accuracy warm-up window so both modalities
@@ -97,6 +77,8 @@ if __name__ == "__main__":
         use_stretched_window_timestamps=True,
     )
 
+
+    ### EMG PSD Plot Settings
     emg_psd_plot_cfg = CBPAConfig(
         freq_band="beta",
         channels=None,
@@ -118,6 +100,29 @@ if __name__ == "__main__":
         use_stretched_window_timestamps=True,
     )
 
+
+    ### Subject heterogeneity plot settings:
+    dep_vars_to_analyse: list[str] = [
+        "CMC_Flexor_mean_beta", "CMC_Extensor_mean_beta",
+        "CMC_Flexor_mean_gamma", "CMC_Extensor_mean_gamma",
+    ]
+    # Condition levels to scrutinise — level_key → (Condition_Variable, [non-reference conditions])
+    conditions_to_evaluate: dict[str, tuple[str, list[str]]] = {
+        "lvl_0": ("Music Listening", ["True"]),
+        "lvl_1": ("Category or Silence", ["Happy", "Groovy", "Sad", "Classic"]),
+    }
+    # Mutual Information Analysis:
+    analyse_mi_for_dfbetas: bool = True
+    plot_mi_categories: list[Literal['dfbeta', 'cooks_d', 'contrast']] = []#'cooks_d', 'contrast']
+    # Top-N MI-ranked moderators to carry into cluster→attribute scatter plots
+    top_n_moderators: int = 3
+    # Feature blocks to include in clustering (any subset of these three)
+    clustering_measures: list[str] = ["contrast", "cooks_d"]
+    # Minimum number of subjects per cluster — prevents trivial 1-subject clusters
+    min_cluster_size: int = 2
+
+
+
     # ══════════════════════════════════════════════════════════════════════════════
     #  Cluster-based Permutation Analysis (CBPA)
     # ══════════════════════════════════════════════════════════════════════════════
@@ -129,6 +134,43 @@ if __name__ == "__main__":
         # n_within_trial_segs=5 entries are added for 5-seg-primary effects (resolution-specific).
 
         CONTRASTS: list[CBPAConfig] = [
+            # ONLY PLOT THE ONES INCLUDED IN THE THESIS KNOW:
+            CBPAConfig(
+                modality="CMC",
+                modality_file_id="Flexor",
+                freq_band="beta",
+                channels=None,
+                condition_column="Category or Silence",
+                condition_A="Happy",
+                condition_B="Silence",
+                n_within_trial_segs=1,
+                tail=1,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                use_phase_normalization=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H1_CMC_Flexor_beta_Happy_vs_Silence",
+            ),
+            CBPAConfig(
+                modality="CMC",
+                modality_file_id="Flexor",
+                freq_band="gamma",
+                channels=None,
+                condition_column="Category or Silence",
+                condition_A="Groovy",
+                condition_B="Silence",
+                n_within_trial_segs=1,
+                tail=1,
+                n_permutations=1000,
+                use_spatio_temporal=True,
+                use_phase_normalization=True,
+                data_root=ROOT,
+                output_dir=OUTPUT, exclude_subjects=exclude_subjects,
+                hypothesis_label="H1_CMC_Flexor_gamma_Groovy_vs_Silence",
+            ),
+        ]
+        """
 
             ######### n_within_trial_segs = 1 — all original contrasts unchanged #########
 
@@ -409,6 +451,7 @@ if __name__ == "__main__":
                 hypothesis_label="H5_gamma_Global_Happy_vs_Silence",
             ),
         ]
+        """
 
         # Use uniform window-center stretching for all CBPA contrasts to avoid
         # cumulative timestamp drift from nominal-fs-derived stored time-centers.
@@ -432,6 +475,8 @@ if __name__ == "__main__":
             experiment_results_dir=EXPERIMENT_RESULTS,
             channel_pooling='max',
             freq_pooling='max',
+            plot_accuracy_per_cycle_id=plot_accuracy_per_cycle_id,
+            accuracy_sd_factor=.05 if plot_accuracy_per_cycle_id else .25,  # automatically reduced for more curves
         )
 
     if analyse_emg_psd_phase_plot:
@@ -445,7 +490,8 @@ if __name__ == "__main__":
     #  Subject-Heterogeneity Modelling
     # ══════════════════════════════════════════════════════════════════════════════
     if analyse_subject_heterogeneity:
-
+        beta = '\u03b2'
+        gamma = '\u03b3'
         run_heterogeneity_modelling(
             dep_vars=dep_vars_to_analyse,
             conditions_to_evaluate=conditions_to_evaluate,
@@ -457,4 +503,17 @@ if __name__ == "__main__":
             omnibus_results_dir=OMNIBUS_TESTING_RESULTS,
             experiment_results_dir=EXPERIMENT_RESULTS,
             exclude_subjects=exclude_subjects,
+            rename_dict = {
+                # DVs — matched wherever they appear as a "│"-segment in
+                # DFBETA / CooksD / Contrast column keys.
+                'Extensor_mean_beta':  f'Extensor Avg. {beta}-band CMC',
+                'Extensor_mean_gamma': f'Extensor Avg. {gamma}-band CMC',
+                'Flexor_mean_beta':    f'Flexor Avg. {beta}-band CMC',
+                'Flexor_mean_gamma':   f'Flexor Avg. {gamma}-band CMC',
+                # Conditions
+                'Classic': 'Classical',
+                'True': 'Any Music',
+                # Groups:
+                'CooksD': "Cook's D",
+            }
         )
