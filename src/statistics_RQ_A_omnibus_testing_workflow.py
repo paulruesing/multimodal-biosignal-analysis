@@ -137,20 +137,20 @@ if __name__ == '__main__':
     conduct_analysis: bool = True
     statistical_hypotheses_var_tuples: list[tuple[str, str]] = [
         # CMC Hypotheses:
-        ('H1: Flexor Beta Peak CMC Increases with Music', "CMC_Flexor_max_beta"),
-        ('H1: Flexor Beta Avg. CMC Increases with Music', "CMC_Flexor_mean_beta"),
-        ('H1: Flexor Gamma Peak CMC Increases with Music', "CMC_Flexor_max_gamma"),
-        ('H1: Flexor Gamma Avg. CMC Increases with Music', "CMC_Flexor_mean_gamma"),
-        ('H1: Extensor Beta Peak CMC Increases with Music', "CMC_Extensor_max_beta"),
-        ('H1: Extensor Beta Avg. CMC Increases with Music', "CMC_Extensor_mean_beta"),
-        ('H1: Extensor Gamma Peak CMC Increases with Music', "CMC_Extensor_max_gamma"),
-        ('H1: Extensor Gamma Avg. CMC Increases with Music', "CMC_Extensor_mean_gamma"),
+        ('H1: Flexor Beta Peak CMC', "CMC_Flexor_max_beta"),
+        ('H1: Flexor Beta Avg. CMC', "CMC_Flexor_mean_beta"),
+        ('H1: Flexor Gamma Peak CMC', "CMC_Flexor_max_gamma"),
+        ('H1: Flexor Gamma Avg. CMC', "CMC_Flexor_mean_gamma"),
+        ('H1: Extensor Beta Peak CMC', "CMC_Extensor_max_beta"),
+        ('H1: Extensor Beta Avg. CMC', "CMC_Extensor_mean_beta"),
+        ('H1: Extensor Gamma Peak CMC', "CMC_Extensor_max_gamma"),
+        ('H1: Extensor Gamma Avg. CMC', "CMC_Extensor_mean_gamma"),
 
         # EEG-PSD Hypotheses:
-        ('H2: Temporal Prediction PSD Increases with Music', 'PSD_eeg_FC_CP_T_theta'),
-        ('H3: Vigilance PSD Increases with Music', 'PSD_eeg_F_C_beta'),
-        ('H4: Internal vs. External Attention PSD changes with Music', 'PSD_eeg_P_PO_alpha'),
-        ('H5: Long Range Interactions PSD Increases with Music', 'PSD_eeg_Global_gamma'),
+        ('H2: Temporal Prediction PSD', 'PSD_eeg_FC_CP_T_theta'),
+        ('H3: Vigilance PSD', 'PSD_eeg_F_C_beta'),
+        ('H4: Internal Attention', 'PSD_eeg_P_PO_alpha'),
+        ('H5: Long Range Interactions PSD', 'PSD_eeg_Global_gamma'),
 
         # Validation Hypotheses (EMG PSD):
         ('VALIDATION: EMG Flexor PSD Increases with Force', 'PSD_emg_1_flexor_Global_all'),
@@ -204,24 +204,24 @@ if __name__ == '__main__':
     }
 
     # comparison levels:
-    lvl_inds_to_include: list[int] = [0, 1, 2, 3]  # defines below  # todo: good to remove 2, 3 for forest plots
+    lvl_inds_to_include: list[int] = [0, 1]  # defines below  # todo: good to remove 2, 3 for forest plots
     lvls_to_include: list[str] = [f"lvl_{lvl_ind}" for lvl_ind in lvl_inds_to_include]
 
     # across time resolution comparison:
-    plot_time_resolution_comparisons: bool = False
+    plot_time_resolution_comparisons: bool = True
     parameter_comp_lvl_tuples_to_plot_across_time: list[tuple[str, int]] = [
-        ('Category or Silence[T.Happy]', 1),  # sig across all CMC DVs + EEG PSD
-        ('Category or Silence[T.Groovy]', 1),  # sig: Flexor mean/max beta, Flexor mean gamma
+        #('Category or Silence[T.Happy]', 1),  # sig across all CMC DVs + EEG PSD
+        #('Category or Silence[T.Groovy]', 1),  # sig: Flexor mean/max beta, Flexor mean gamma
         ('Category or Silence[T.Classic]', 1),  # sig: Extensor max beta (5-seg)
-        ('Dancing habit [0-7]_centered', 1),  # main effect: Extensor max beta, Extensor mean gamma
-        ('Segment ID', 1),  # sig: Extensor mean gamma, Flexor mean beta (L1 at 5-seg)
+        #('Dancing habit [0-7]_centered', 1),  # main effect: Extensor max beta, Extensor mean gamma
+        #('Segment ID', 1),  # sig: Extensor mean gamma, Flexor mean beta (L1 at 5-seg)
         # ('Perceived Category[T.Sad]:Dancing habit [0-7]_centered', 2),
         # ('Perceived Category[T.Happy]', 2),
         # ('Perceived Category[T.Groovy]', 2),
         # ('Perceived Category[T.Happy]:Musical skill [0-7]_centered', 2),
         # ('Perceived Category[T.Groovy]:Dancing habit [0-7]_centered', 2),
-        ('Median Scaled Force [0-1]', 1),  # large effect on EMG PSD at 5-seg
-        ('Median Unscaled Force [% MVC]', 1),
+        #('Median Scaled Force [0-1]', 1),  # large effect on EMG PSD at 5-seg
+        #('Median Unscaled Force [% MVC]', 1),
     ]
 
 
@@ -283,6 +283,9 @@ if __name__ == '__main__':
         "Liking_centered_squared",
         "Q('Familiarity [0-7]')",
     ]
+    _LVL3_PARAMS = [
+        "Q('Spectral Flux Std.')",
+    ]
     _STANDARD_DVS = [
         "CMC_Extensor_mean_beta",
         "CMC_Extensor_max_beta",
@@ -326,6 +329,12 @@ if __name__ == '__main__':
                     n_segments=1,
                     target_parameters=_LVL2_PARAMS,
                 ),
+                statistics.PowerConfig(
+                    dependent_var=dv,
+                    comp_lvl=3,
+                    n_segments=1,
+                    target_parameters=_LVL3_PARAMS,
+                ),
                 # ── n_segments = 5 ──────────────────────────────────────────
                 statistics.PowerConfig(
                     dependent_var=dv,
@@ -344,6 +353,12 @@ if __name__ == '__main__':
                     comp_lvl=2,
                     n_segments=5,
                     target_parameters=_LVL2_PARAMS,
+                ),
+                statistics.PowerConfig(
+                    dependent_var=dv,
+                    comp_lvl=3,
+                    n_segments=5,
+                    target_parameters=_LVL3_PARAMS,
                 ),
             ]
         ],
