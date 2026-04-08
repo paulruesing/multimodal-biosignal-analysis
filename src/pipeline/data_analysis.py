@@ -973,7 +973,75 @@ def phase_normalize_cycles(
         phase_wraparound_coverage_threshold: float = 0.8,
         verbose: bool = True,
 ) -> list[np.ndarray]:
-    # todo: insert docstring
+    """
+        Phase-normalize a trial into cycle-wise profiles on a common 0–360° grid.
+
+        This function segments a trial into task cycles, maps samples within each
+        cycle to phase space, and returns one normalized profile per accepted cycle.
+        It supports both 1D signals (single channel) and 2D signals
+        (time × channels), and can either interpolate onto the requested phase grid
+        or assign samples to the nearest phase bin.
+
+        Parameters
+        ----------
+        signal : np.ndarray
+            Input signal sampled over time. Can be 1D with shape ``(n_samples,)``
+            or 2D with shape ``(n_samples, n_channels)``.
+        t_rel : np.ndarray
+            Relative time stamps for ``signal`` in seconds. Must have the same
+            length as ``signal`` along axis 0.
+        task_freq : float
+            Task frequency in Hz. Defines the cycle duration as ``1 / task_freq``.
+        trial_dur_sec : float
+            Total trial duration in seconds. Determines how many cycles are
+            considered.
+        phase_grid : np.ndarray
+            Phase values, in degrees, used as the common output grid.
+        min_samples_per_cycle : int
+            Minimum number of samples required for a cycle to be processed.
+        start_offset_sec : float, default 0.0
+            Time offset in seconds before cycle counting begins.
+        min_cycle_coverage_ratio : float, default 0.8
+            Minimum fraction of a cycle that must be covered by samples for the cycle
+            to be considered.
+        use_interpolation : bool, default True
+            If True, interpolate values onto ``phase_grid``. If False, assign samples
+            to the nearest phase bin.
+        interpolation_kind : {'linear', 'nearest'}, default 'linear'
+            Interpolation method used when ``use_interpolation`` is True.
+        show_debug_trial_wise_plots : bool, default False
+            If True, display a trial-level time-domain debug plot before processing.
+        show_debug_cycle_wise_plots : bool, default False
+            If True, display a per-cycle phase-domain debug plot.
+        phase_wraparound_coverage_threshold : float, default 0.8
+            Coverage ratio threshold above which wrap-around padding is applied to
+            interpolation. This is used to avoid edge artifacts for nearly complete
+            cycles.
+        verbose : bool, default True
+            If True, emit warnings when coverage thresholds imply inconsistent
+            boundary behavior.
+
+        Returns
+        -------
+        list[np.ndarray]
+            A list containing one normalized profile per accepted cycle.
+
+            * For 1D input, each element has shape ``(len(phase_grid),)``.
+            * For 2D input, each element has shape ``(len(phase_grid), n_channels)``.
+
+        Notes
+        -----
+        - Cycles are processed in chronological order after sorting by ``t_rel``.
+        - Cycles with too few samples or insufficient phase coverage are skipped.
+        - When ``use_interpolation`` is True, the function averages duplicate phase
+          samples before interpolation.
+        - For near-complete cycles, wrap-around padding is applied by copying points
+          from the opposite end of the phase axis shifted by ±360°.
+        - If ``phase_grid`` represents a closed circular axis, the last bin is
+          forced to equal the first bin.
+        - Partial cycles may contain ``NaN`` near the boundaries when interpolation
+          is used without wrap-around padding.
+        """
 
     if show_debug_trial_wise_plots:
         import matplotlib.pyplot as plt
