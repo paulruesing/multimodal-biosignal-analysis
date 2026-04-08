@@ -20,6 +20,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import multiprocessing
 from tqdm import tqdm
 import os
+import re
 import textwrap
 from scipy.stats import gaussian_kde
 import math
@@ -151,8 +152,8 @@ def plot_category_reassignment_sankey(category_reassignment_frame: pd.DataFrame,
                                       rename_dict: dict[str, str] | None = None,
                                       show_title: bool = False,
                                       output_dir: str | Path | None = None,
-                                      width: int = 700,
-                                      height: int = 400):
+                                      width: int = 600,
+                                      height: int = 370):
     """Plot category reassignments as a two-column Sankey (original -> perceived).
 
     ``rename_dict`` can be used to relabel music categories for display. The mapping is
@@ -288,7 +289,8 @@ def plot_category_reassignment_sankey(category_reassignment_frame: pd.DataFrame,
 
     fig.update_layout(
         title='Category Reassignments' if show_title else None,
-        font_size=12,
+        # Match matplotlib's default sans-serif text style.
+        font=dict(family="DejaVu Sans, sans-serif", color="black", size=12),
         width=width,
         height=height,
         margin=dict(l=140, r=140, t=70, b=30),
@@ -926,6 +928,7 @@ def plot_scatter(x, y, x_label: str | None = None, y_label: str | None = None,
                  include_kdes: bool = True, kde_alpha: float = 0.5,
                  categorical_kdes: bool = True,
                  add_kde_legend: bool = False,
+                 legend_rename_dict: dict[str, str] | None = None,
                  save_dir: str | Path | None = None):
     """Scatter plot with categorical coloring and optional marginal KDE distributions.
 
@@ -966,6 +969,18 @@ def plot_scatter(x, y, x_label: str | None = None, y_label: str | None = None,
         Main scatter axes object.
     """
     from scipy.stats import gaussian_kde
+
+    # Legend-only rename map: applied purely to category labels on the
+    # scatter legend (and KDE legend if enabled). It does NOT touch the
+    # underlying category_list, color assignment, or KDE grouping. Default
+    # includes 'Classic' -> 'Classical' so music categories render with the
+    # correct English adjective.
+    _effective_legend_rename: dict[str, str] = {'Classic': 'Classical'}
+    if legend_rename_dict is not None:
+        _effective_legend_rename.update(legend_rename_dict)
+
+    def _display_category(cat: object) -> str:
+        return _effective_legend_rename.get(str(cat), str(cat))
 
     # =========================================================================
     # CREATE FIGURE AND AXES LAYOUT
@@ -1014,7 +1029,7 @@ def plot_scatter(x, y, x_label: str | None = None, y_label: str | None = None,
         # Create legend for scatter plot
         from matplotlib.lines import Line2D
         handles = [Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[i],
-                          markersize=8, label=str(cat))
+                          markersize=8, label=_display_category(cat))
                    for i, cat in enumerate(unique_cats)]
         ax_main.legend(handles=handles, title=category_label, loc='best')
 
@@ -1051,7 +1066,7 @@ def plot_scatter(x, y, x_label: str | None = None, y_label: str | None = None,
                         kde_x = gaussian_kde(x_cat_clean)
                         ax_top.fill_between(x_range, kde_x(x_range), alpha=kde_alpha,
                                             color=colors[i],
-                                            label=str(cat) if add_kde_legend else None)
+                                            label=_display_category(cat) if add_kde_legend else None)
                     except (np.linalg.LinAlgError, ValueError) as e:
                         print(f"[WARNING] Skipping X-KDE for category '{cat}': {e}")
                 else:
@@ -1064,7 +1079,7 @@ def plot_scatter(x, y, x_label: str | None = None, y_label: str | None = None,
                         kde_y = gaussian_kde(y_cat_clean)
                         ax_right.fill_betweenx(y_range, kde_y(y_range), alpha=kde_alpha,
                                                color=colors[i],
-                                               label=str(cat) if add_kde_legend else None)
+                                               label=_display_category(cat) if add_kde_legend else None)
                     except (np.linalg.LinAlgError, ValueError) as e:
                         print(f"[WARNING] Skipping Y-KDE for category '{cat}': {e}")
                 else:
@@ -1428,185 +1443,6 @@ def plot_array_with_ci(
     return fig, ax
 
 
-def old_plot_array_with_ci(
-        data: np.ndarray,
-        time_axis: int = 0,
-        hue_axis: Optional[int] = None,
-        hue_name: Optional[str] = None,
-        hue_labels: Optional[List[str]] = None,
-        input_lower_ci: Optional[np.ndarray] = None,
-        input_upper_ci: Optional[np.ndarray] = None,
-        sampling_freq: Optional[float] = None,
-        figsize: tuple = (14, 7),
-        linewidth: float = 2.5,
-        ci_alpha: float = 0.25,
-        colors: Optional[Union[dict, list, str]] = None,
-        title: str = 'Data Plot',
-        xlabel: str = 'Time',
-        ylabel: str = 'Value',
-        legend: bool = True,
-        legend_kws: Optional[dict] = None
-) -> Tuple[Figure, Axes]:
-    """
-    Plot n-dimensional array with optional confidence intervals and hue-based line grouping.
-
-    Generalizes the original `plot_psd_avg_with_std` to work with arbitrary numpy arrays,
-    allowing flexible specification of time and hue dimensions, plus explicit confidence
-    interval arrays instead of std-based shading.
-
-    Parameters
-    ----------
-    data : np.ndarray
-        Input data array. Shape is arbitrary; time_axis and hue_axis specify which
-        dimensions correspond to time and hue (line grouping).
-    time_axis : int, optional
-        Axis index representing time samples. Default is 0.
-    hue_axis : Optional[int], optional
-        Axis index for grouping into multiple lines (e.g., channels, conditions).
-        If None, plots single line from aggregated data. Default is None.
-    hue_name : Optional[str], optional
-        Name for hue dimension (used in legend if hue_axis provided).
-        E.g., 'Channel', 'Condition'. Default is None.
-    hue_labels : Optional[List[str]], optional
-        Custom labels for each hue level (e.g., channel names).
-        Must match data.shape[hue_axis] length if provided. Default is None.
-    input_lower_ci : Optional[np.ndarray], optional
-        Lower confidence interval bounds. Must match data.shape. If None, no CI shading.
-        Default is None.
-    input_upper_ci : Optional[np.ndarray], optional
-        Upper confidence interval bounds. Must match data.shape. If None, no CI shading.
-        Default is None.
-    sampling_freq : Optional[float], optional
-        Sampling frequency in Hz. If provided, time axis is converted to seconds.
-        If None, time axis is integer indices. Default is None.
-    figsize : tuple, optional
-        Figure size as (width, height). Default is (14, 7).
-    linewidth : float, optional
-        Line width for traces. Default is 2.5.
-    ci_alpha : float, optional
-        Transparency of shaded CI regions (0-1). Default is 0.25.
-    colors : Optional[Union[dict, list, str]], optional
-        Color specification. Can be:
-        - dict: mapping hue indices/names to colors {0: '#1f77b4', 1: '#ff7f0e', ...}
-        - list: sequence of colors to cycle through
-        - str: single color for all lines
-        - None: uses default matplotlib palette
-        Default is None.
-    title : str, optional
-        Plot title. Default is 'Data Plot'.
-    xlabel : str, optional
-        X-axis label. Default is 'Time'.
-    ylabel : str, optional
-        Y-axis label. Default is 'Value'.
-    legend : bool, optional
-        Whether to show legend. Default is True.
-    legend_kws : Optional[dict], optional
-        Additional keyword arguments passed to ax.legend(). Default is None.
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-        The figure object.
-    ax : matplotlib.axes.Axes
-        The axes object.
-
-    Raises
-    ------
-    ValueError
-        If time_axis or hue_axis out of bounds, if CI array shapes don't match data,
-        or if hue_labels length doesn't match hue_axis dimension.
-
-    Examples
-    --------
-    Plot 2D array (time x channels) with multiple lines per channel:
-
-    >>> data = np.random.randn(100, 5)  # 100 time points, 5 channels
-    >>> fig, ax = plot_array_with_ci(data, time_axis=0, hue_axis=1,
-    ...                               hue_name='Channel', sampling_freq=100)
-
-    Plot with confidence intervals and custom channel labels:
-
-    >>> lower_ci = data - 0.1
-    >>> upper_ci = data + 0.1
-    >>> channel_names = ['C3', 'C4', 'Cz', 'FC3', 'FC4']
-    >>> fig, ax = plot_array_with_ci(data, time_axis=0, hue_axis=1,
-    ...                               input_lower_ci=lower_ci,
-    ...                               input_upper_ci=upper_ci,
-    ...                               hue_labels=channel_names)
-
-    Plot single 1D array with explicit colors:
-
-    >>> data_1d = np.random.randn(100)
-    >>> fig, ax = plot_array_with_ci(data_1d, colors='steelblue')
-    """
-
-    # Input validation
-    _validate_inputs(data, time_axis, hue_axis, input_lower_ci, input_upper_ci, hue_labels)
-
-    # Build time axis
-    n_time_samples = data.shape[time_axis]
-    time = _build_time_axis(n_time_samples, sampling_freq)
-
-    # Prepare color mapping
-    color_map = _prepare_colors(colors, hue_axis, data)
-
-    # Create figure and axis
-    fig, ax = plt.subplots(figsize=figsize)
-
-    # Plot data by hue groups
-    if hue_axis is None:
-        # Single line: aggregate along all non-time axes
-        mean_signal = _aggregate_non_time_axes(data, time_axis)
-        lower = upper = None
-
-        if input_lower_ci is not None:
-            lower = _aggregate_non_time_axes(input_lower_ci, time_axis)
-        if input_upper_ci is not None:
-            upper = _aggregate_non_time_axes(input_upper_ci, time_axis)
-
-        color = color_map.get(0, 'C0') if isinstance(color_map, dict) else color_map
-        _plot_line_with_ci(ax, time, mean_signal, lower, upper, color,
-                           label=None, linewidth=linewidth, ci_alpha=ci_alpha)
-
-    else:
-        # Multiple lines: iterate over hue dimension
-        hue_size = data.shape[hue_axis]
-
-        for hue_idx in range(hue_size):
-            # Extract data slice for this hue level
-            mean_signal = _extract_hue_slice(data, hue_axis, hue_idx, time_axis)
-            lower = upper = None
-
-            if input_lower_ci is not None:
-                lower = _extract_hue_slice(input_lower_ci, hue_axis, hue_idx, time_axis)
-            if input_upper_ci is not None:
-                upper = _extract_hue_slice(input_upper_ci, hue_axis, hue_idx, time_axis)
-
-            # Determine label and color
-            label = _get_line_label(hue_idx, hue_name, hue_labels, color_map)
-            color = _get_line_color(hue_idx, color_map)
-
-            _plot_line_with_ci(ax, time, mean_signal, lower, upper, color,
-                               label=label, linewidth=linewidth, ci_alpha=ci_alpha)
-
-    # Customize plot appearance
-    ax.set_xlabel(xlabel, fontsize=12, fontweight='bold')
-    ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
-    ax.set_title(title, fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3, linestyle='--')
-
-    if legend and (hue_axis is not None or any(h is not None for h in
-                                               _get_all_labels(hue_axis, color_map))):
-        legend_params = {'loc': 'best', 'fontsize': 11}
-        if legend_kws:
-            legend_params.update(legend_kws)
-        ax.legend(**legend_params)
-
-    plt.tight_layout()
-
-    return fig, ax
-
-
 # ============================================================================
 # Private Helper Functions
 # ============================================================================
@@ -1957,10 +1793,11 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
                      significant_neg_color: str = 'red',
                      insignificant_color: str = '#AAAAAA',
                      include_y_labels: bool = True,
-                     title_max_width: int = 30,
+                     title_max_width: int = 15,
                      show_significance_legend: bool = False,
                      rename_dict: dict[str, str] | None = None,
                      parameter_label_colors: dict[str, str] | None = None,
+                     show_hypothesis_number: bool = False,
                      ):
     """
     Creates a beautiful forest plot for statistical effects.
@@ -2005,13 +1842,20 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
     # Sort by parameter name, then by level number, then by model type
     df = df.sort_values(by=[param_column, 'level_num', model_type_column]).reset_index(drop=True)
 
-    # Create y-axis labels combining parameter, enumerated level, and model type
+    # Create y-axis labels combining parameter, enumerated level, and (optionally) model type.
+    # The model type is omitted from the label whenever every row in this hypothesis uses the
+    # same model type — in that case it would just add visual noise without disambiguating rows.
     df['param_label_display'] = df[param_column].astype(str).apply(
         lambda x: _rename_parameter_label(x, rename_dict)
     )
-    df['y_label'] = (df['param_label_display'].astype(str) + ' | ' +
-                     df['comparison_lvl_enum'].astype(str) + ' | ' +
-                     df[model_type_column].astype(str))
+    is_multiple_model_types = (df[model_type_column].nunique(dropna=True) > 1)
+    if is_multiple_model_types:
+        df['y_label'] = (df['param_label_display'].astype(str) + ' | ' +
+                         df['comparison_lvl_enum'].astype(str) + ' | ' +
+                         df[model_type_column].astype(str))
+    else:
+        df['y_label'] = (df['param_label_display'].astype(str) + ' | ' +
+                         df['comparison_lvl_enum'].astype(str))
 
     # Calculate confidence intervals
     df['ci_lower'] = df[coeff_column] - (CI_z_score * df[se_column])
@@ -2103,7 +1947,6 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
         if row['sig_label']:  # Only show if not empty
             ax.text(text_x, row['y_pos'], row['sig_label'],
                     va='center', ha='left', fontsize=10,
-                    fontweight='bold',
                     color=row['color'])
 
     # Set y-axis
@@ -2111,7 +1954,7 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
     ax.set_yticks(y_positions)
 
     if include_y_labels:
-        y_tick_labels = ax.set_yticklabels(df['y_label'], fontsize=7)
+        y_tick_labels = ax.set_yticklabels(df['y_label'], fontsize=10)
         if parameter_label_colors:
             for tick, param_name in zip(y_tick_labels, df[param_column].astype(str).tolist()):
                 tick.set_color(parameter_label_colors.get(param_name, 'black'))
@@ -2122,17 +1965,22 @@ def draw_forest_plot(ax, effects_frame: pd.DataFrame,
     ax.set_ylim(-0.5, max_y + 0.5)
 
     # Set x-axis
-    ax.set_xlabel('Coefficient (β)', fontsize=11, fontweight='bold')
+    ax.set_xlabel('Coefficient (β)', fontsize=11)
     ax.tick_params(axis='x', labelsize=10)
 
     # Add grid for readability
     ax.grid(axis='x', alpha=0.3, linestyle=':', linewidth=0.8)
     ax.set_axisbelow(True)
 
-    # Set title from hypothesis with text wrapping
-    hypothesis_name = df[hypothesis_column].iloc[0]
+    # Set title from hypothesis with text wrapping. The hypothesis title is the
+    # single element kept bold — every other text in this plot is drawn at
+    # default weight. An "H1: " / "H2: " / ... prefix on the hypothesis label
+    # is stripped by default and can be kept via show_hypothesis_number=True.
+    hypothesis_name = str(df[hypothesis_column].iloc[0])
+    if not show_hypothesis_number:
+        hypothesis_name = re.sub(r'^H\d+:\s*', '', hypothesis_name)
     wrapped_title = '\n'.join(textwrap.wrap(hypothesis_name, width=title_max_width))
-    ax.set_title(wrapped_title, fontsize=7, fontweight='bold', pad=10)
+    ax.set_title(wrapped_title, fontsize=12, fontweight='bold', pad=10)
 
     # Add a subtle spine styling - always show left spine and ticks
     ax.spines['top'].set_visible(False)
@@ -2182,6 +2030,7 @@ def draw_time_resolution_forest_plot(
         include_y_labels: bool = True,
         show_significance_legend: bool = False,
         rename_dict: dict[str, str] | None = None,
+        show_hypothesis_number: bool = False,
 ):
     """
     Forest plot comparing one parameter at one comparison level across time resolutions.
@@ -2226,8 +2075,11 @@ def draw_time_resolution_forest_plot(
     if df.empty:
         ax.text(0.5, 0.5, f'No data\n"{display_parameter}"\n@ "{comparison_level}"',
                 ha='center', va='center', transform=ax.transAxes, fontsize=8, color='gray')
-        ax.set_title('\n'.join(textwrap.wrap(display_parameter, width=40)),
-                     fontsize=7, fontweight='bold', pad=10)
+        empty_title = display_parameter
+        if not show_hypothesis_number:
+            empty_title = re.sub(r'^H\d+:\s*', '', empty_title)
+        ax.set_title('\n'.join(textwrap.wrap(empty_title, width=40)),
+                     fontsize=12, fontweight='bold', pad=10)
         return ax
 
     df = df.reset_index(drop=True)
@@ -2323,22 +2175,22 @@ def draw_time_resolution_forest_plot(
         if row['sig_label']:
             ax.text(text_x, row['y_pos'], row['sig_label'],
                     va='center', ha='left', fontsize=10,
-                    fontweight='bold', color=row['color'])
+                    color=row['color'])
 
     # --- y-axis ---
     ax.set_yticks(df['y_pos'].values)
     if include_y_labels:
-        ax.set_yticklabels(df['y_label'], fontsize=7)
+        ax.set_yticklabels(df['y_label'], fontsize=10)
     else:
         ax.set_yticklabels([])
 
-    ax.set_ylabel(y_axis_label, fontsize=10, fontweight='bold')
+    ax.set_ylabel(y_axis_label, fontsize=10)
     ax.set_ylim(-0.5, max_y + 0.5)
 
     # --- x-axis ---
     from matplotlib.ticker import MaxNLocator
     ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
-    ax.set_xlabel(f'{display_parameter} β', fontsize=max(min(250/len(display_parameter), 11), 6), fontweight='bold')
+    ax.set_xlabel(f'{display_parameter} β', fontsize=max(min(250/len(display_parameter), 11), 6))
     ax.tick_params(axis='x', labelsize=10)
 
     # --- grid & spines ---
@@ -2350,9 +2202,15 @@ def draw_time_resolution_forest_plot(
     ax.spines['bottom'].set_linewidth(1.2)
 
     # --- title = hypothesis if provided, else parameter name ---
+    # The title is the single element in this plot that stays bold; every other
+    # text (axis labels, ticks, significance markers) renders at default weight.
+    # An "H1: " / "H2: " / ... prefix on the hypothesis label is stripped by
+    # default and can be kept via show_hypothesis_number=True.
     title_text = hypothesis if hypothesis is not None else display_parameter
+    if not show_hypothesis_number:
+        title_text = re.sub(r'^H\d+:\s*', '', title_text)
     ax.set_title('\n'.join(textwrap.wrap(title_text, width=40)),
-                 fontsize=8, fontweight='bold', pad=10)
+                 fontsize=12, fontweight='bold', pad=10)
 
     # --- x limits ---
     x_margin = x_range * 0.15
@@ -2386,6 +2244,7 @@ def plot_time_resolution_forest_mosaic(
         significance_source: Literal["autocorr", "fdr", "auto"] = "auto",
         show_title: bool = False,
         rename_dict: dict[str, str] | None = None,
+        show_hypothesis_number: bool = False,
 ):
     """
     Mosaic of time-resolution forest plots — one column per hypothesis,
@@ -2461,6 +2320,7 @@ def plot_time_resolution_forest_mosaic(
             include_y_labels=(col_ind == 0),  # only label y-axis on first column
             show_significance_legend=(col_ind == 0) and show_legend,
             rename_dict=rename_dict,
+            show_hypothesis_number=show_hypothesis_number,
         )
 
     display_parameter = _rename_parameter_label(parameter, rename_dict)
@@ -2491,6 +2351,7 @@ def plot_hypothesis_forest_mosaic(
     significance_source: Literal["autocorr", "fdr", "auto"] = "auto",
     show_title: bool = False,
     rename_dict: dict[str, str] | None = None,
+    show_hypothesis_number: bool = False,
 ):
     # slice results_frame:
     results_frame_subset = result_frame.copy()
@@ -2564,6 +2425,7 @@ def plot_hypothesis_forest_mosaic(
             include_y_labels=(col_ind == 0),
             rename_dict=rename_dict,
             parameter_label_colors=parameter_label_colors if col_ind == 0 else None,
+            show_hypothesis_number=show_hypothesis_number,
         )
 
     fig_title = f"Coefficient Overview{f' ({model_type} models)' if model_type is not None else ''}{f' ({file_identifier_suffix})' if file_identifier_suffix is not None else ''}"
@@ -3194,8 +3056,8 @@ def _derive_cmc_accuracy_hypothesis_label(cfg: CBPAConfig) -> str:
 
 def _create_cbpa_dual_panel_figure(
     show_target_sine: bool,
-    figure_size_with_target: tuple[float, float] = (16, 6),
-    figure_size_without_target: tuple[float, float] = (16, 5),
+    figure_size_with_target: tuple[float, float] = (12, 6),
+    figure_size_without_target: tuple[float, float] = (12, 6),
     grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
     grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
     grid_wspace: float = 0.12,
@@ -3284,16 +3146,14 @@ def plot_cmc_accuracy_phase_average(
         *,
         accuracy_sd_factor: float = 0.25,
         cmc_percentile_limits: tuple[float, float] = (3.0, 97.0),
-        figure_size_with_target: tuple[float, float] = (16, 6),
-        figure_size_without_target: tuple[float, float] = (16, 5),
+        figure_size_with_target: tuple[float, float] = (12, 6),
+        figure_size_without_target: tuple[float, float] = (12, 6),
         grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
         grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
         grid_wspace: float = 0.12,
         grid_hspace_with_target: float = 0.28,
         phase_xticks: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0, 360.0),
         phase_marker_lines: tuple[float, ...] = (90.0, 270.0),
-        channel_label_fontsize: float = 6.0,
-        legend_fontsize: float = 8.0,
         subplot_margins: tuple[float, float, float, float] = (0.06, 0.985, 0.90, 0.10),
         save_dpi: int = 150,
         freq_pooling: Literal["max", "mean"] = "max",
@@ -3478,7 +3338,6 @@ def plot_cmc_accuracy_phase_average(
             f"{plot_label}\n"
             f"Average {cfg.modality} ({cfg.modality_file_id}, {cfg.freq_band}) + Task Error (RMSE, {mode_txt})  |  "
             f"n = {len(valid_subjects)} subjects",
-            fontsize=10,
         )
 
     cmc_vmin = float(np.nanpercentile(cmc_mean, p_low))
@@ -3500,8 +3359,11 @@ def plot_cmc_accuracy_phase_average(
         ax.set_xlabel("Force Cycle Phase (°)")
     ax.set_ylabel("Channel index")
     ax.set_yticks(range(len(ch_names)))
-    ax.set_yticklabels(ch_names, fontsize=channel_label_fontsize)
-    ax.set_title(f"Averaged phase-normalized {cfg.modality_file_id.lower()} CMC")
+    ax.set_yticklabels(ch_names)
+    ax.set_title(
+        f"Averaged phase-normalized {cfg.modality_file_id.lower()} CMC "
+        f"({cfg.freq_band.lower()}-band)"
+    )
     ax.set_xlim(0, 360)
 
     # Accuracy panel
@@ -3557,13 +3419,15 @@ def plot_cmc_accuracy_phase_average(
                 transform=ax2.transAxes,
                 ha="center",
                 va="center",
-                fontsize=9,
                 color="grey",
             )
         else:
-            ax2.legend(fontsize=legend_fontsize, ncol=accuracy_cycles_to_plot // 2 if plot_accuracy_per_cycle_id else 1)
+            ax2.legend(ncol=accuracy_cycles_to_plot // 2 if plot_accuracy_per_cycle_id else 1)
 
-        ax2.set_title("Averaged phase-normalized accuracy (cycle-wise pooled)")
+        ax2.set_title(
+            f"Averaged phase-normalized accuracy "
+            f"(cycle-wise pooled, {cfg.freq_band.lower()}-band)"
+        )
     else:
         # Legacy behaviour: single mean ± SD line over subjects
         acc_band = accuracy_sd_factor * acc_std_smooth
@@ -3581,8 +3445,10 @@ def plot_cmc_accuracy_phase_average(
             alpha=0.2,
             label=f"±{accuracy_sd_factor:g} x SD",
         )
-        ax2.legend(fontsize=legend_fontsize)
-        ax2.set_title("Averaged phase-normalized accuracy")
+        ax2.legend()
+        ax2.set_title(
+            f"Averaged phase-normalized accuracy ({cfg.freq_band.lower()}-band)"
+        )
 
     if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
         ax2.set_xlabel("Force Cycle Phase (°)")
@@ -3651,15 +3517,14 @@ def plot_emg_psd_phase_average_plot(
         flexor_file_identifier: str = "emg_1_flexor",
         extensor_file_identifier: str = "emg_2_extensor",
         emg_percentile_limits: tuple[float, float] = (3.0, 97.0),
-        figure_size_with_target: tuple[float, float] = (16, 6),
-        figure_size_without_target: tuple[float, float] = (16, 5),
+        figure_size_with_target: tuple[float, float] = (12, 6),
+        figure_size_without_target: tuple[float, float] = (12, 6),
         grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
         grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
         grid_wspace: float = 0.12,
         grid_hspace_with_target: float = 0.28,
         phase_xticks: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0, 360.0),
         phase_marker_lines: tuple[float, ...] = (90.0, 270.0),
-        channel_label_fontsize: float = 6.0,
         show_channel_labels: bool = True,
         subplot_margins: tuple[float, float, float, float] = (0.06, 0.985, 0.90, 0.10),
         save_dpi: int = 150,
@@ -3760,7 +3625,6 @@ def plot_emg_psd_phase_average_plot(
             f"EMG PSD phase-normalized average ({cfg.freq_band})\n"
             f"Left: {flexor_file_identifier} | Right: {extensor_file_identifier} | "
             f"n = {len(common_subjects)} subjects",
-            fontsize=10,
         )
 
     channel_labels = [f"Ch {idx + 1}" for idx in range(flexor_mean.shape[1])]
@@ -3786,8 +3650,10 @@ def plot_emg_psd_phase_average_plot(
         ax.set_xlabel("Force Cycle Phase (°)")
     ax.set_ylabel("Channel index")
     ax.set_yticks(channel_tick_idx)
-    ax.set_yticklabels([channel_labels[i] for i in channel_tick_idx] if show_channel_labels else [''] * len(channel_tick_idx), fontsize=channel_label_fontsize)
-    ax.set_title("Phase-normalized average EMG PSD: Flexor")
+    ax.set_yticklabels([channel_labels[i] for i in channel_tick_idx] if show_channel_labels else [''] * len(channel_tick_idx))
+    ax.set_title(
+        f"Phase-normalized average EMG PSD (flexor, {cfg.freq_band.lower()}-band)"
+    )
 
     ax2.imshow(
         extensor_mean.T,
@@ -3803,9 +3669,10 @@ def plot_emg_psd_phase_average_plot(
     ax2.set_ylabel("")
     ax2.set_yticks(channel_tick_idx)
     ax2.set_yticklabels(
-        [channel_labels[i] for i in channel_tick_idx] if show_channel_labels else [''] * len(channel_tick_idx),
-        fontsize=channel_label_fontsize)
-    ax2.set_title("Phase-normalized average EMG PSD: Extensor")
+        [channel_labels[i] for i in channel_tick_idx] if show_channel_labels else [''] * len(channel_tick_idx))
+    ax2.set_title(
+        f"Phase-normalized average EMG PSD (extensor, {cfg.freq_band.lower()}-band)"
+    )
 
     if (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization) and ax_tgt_left is not None and ax_tgt_right is not None:
         # Optionally load and average dynamometer force if requested
@@ -4073,7 +3940,7 @@ def _plot_target_sine_panel(
     ax.set_ylim(cfg.target_sine_min_pct_mvc - pad, cfg.target_sine_max_pct_mvc + pad)
     ax.set_ylabel("Force [% MVC]" if show_ylabel else "")
     ax.set_xlabel(x_label)
-    ax.set_title("Target sine", fontsize=12)
+    ax.set_title("Target sine")
     ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
 
     if cfg.use_phase_normalization:
@@ -4094,7 +3961,7 @@ def _plot_target_sine_panel(
             color="forestgreen",
             linewidth=1.2,
             alpha=0.9,
-            label="Measurement" if is_unscaled_force else None,
+            label="Measured" if is_unscaled_force else None,
         )
 
         # Optional variability band around force mean.
@@ -4184,7 +4051,6 @@ def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool =
             f"Contrast: '{cfg.condition_A}' − '{cfg.condition_B}'  |  "
             f"{cfg.modality} {cfg.freq_band}  |  "
             f"n = {n_valid_subjects} subjects, {cfg.n_permutations} permutations",
-            fontsize=10,
         )
 
     # ── Panel A: heatmap + cluster contours ──────────────────────────────────
@@ -4224,13 +4090,15 @@ def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool =
         ax.set_xlabel(x_label)
     ax.set_ylabel("Channel index")
     ax.set_yticks(range(n_ch))
-    ax.set_yticklabels(ch_names, fontsize=6)
-    ax.set_title("t-statistic map\n(black contour = significant cluster)")
+    ax.set_yticklabels(ch_names)
+    ax.set_title(
+        f"t-statistic map ({cfg.freq_band.lower()}-band)"
+    )
 
     # ── Panel B: significant cluster time courses ─────────────────────────────
     if len(good_inds) == 0:
         ax2.text(0.5, 0.5, "No significant clusters", ha="center", va="center",
-                 transform=ax2.transAxes, fontsize=12, color="grey")
+                 transform=ax2.transAxes, color="grey")
     else:
         for idx in good_inds:
             mask = _resolve_cluster_mask(clusters[idx], n_times=n_times, n_ch=n_ch)
@@ -4264,12 +4132,14 @@ def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool =
         ax2.axhline( t_thresh, color="red", linewidth=0.8, linestyle=":",
                      label=f"±t_thresh ({t_thresh:.2f})")
         ax2.axhline(-t_thresh, color="red", linewidth=0.8, linestyle=":")
-        ax2.legend(fontsize=8)
+        ax2.legend()
 
     if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
         ax2.set_xlabel(x_label)
     ax2.set_ylabel("Mean t-statistic over cluster channels")
-    ax2.set_title("Significant cluster time courses")
+    ax2.set_title(
+        f"Significant cluster time courses ({cfg.freq_band.lower()}-band)"
+    )
 
     if (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
         dyno_force = None
@@ -4290,147 +4160,6 @@ def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool =
             dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force,
             show_legend=False,  # legend only for left plot
         )
-
-    if cfg.use_phase_normalization:
-        phase_axes = [ax, ax2]
-        if (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
-            phase_axes.extend([ax_tgt_left, ax_tgt_right])
-        _apply_phase_axis_style(
-            phase_axes,
-            phase_xticks=(0.0, 90.0, 180.0, 270.0, 360.0),
-            phase_marker_lines=(90.0, 270.0),
-        )
-
-    fig.subplots_adjust(left=0.06, right=0.985, top=0.90, bottom=0.10)
-    if cfg.save_plots:
-        out = cfg.output_dir / filemgmt.file_title(cfg.hypothesis_label + "_clusters", ".png")
-        fig.savefig(out, dpi=150, bbox_inches="tight")
-        print(f"  Plot saved: {out}")
-    if cfg.show_plots:
-        plt.show()
-    plt.close(fig)
-
-def old_plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool = True) -> None:
-    """Render heatmap and cluster-summary figures for one CBPA result.
-
-    Parameters
-    ----------
-    results : dict
-        Output dictionary produced by :func:`run_cbpa`.
-    cfg : CBPAConfig
-        Plotting and output configuration.
-
-    Notes
-    -----
-    Produces two main panels: a t-statistic heatmap with cluster contours and
-    a cluster time-course panel. Optional target-sine panels are appended below.
-    """
-    t_obs        = results["t_obs"]
-    t_thresh     = results["t_thresh"]
-    clusters     = results["clusters"]
-    cluster_pv   = results["cluster_pv"]
-    good_inds    = results["good_cluster_inds"]
-    ch_names     = results["ch_names"]
-    time_grid    = results["time_grid"]
-    n_valid_subjects = results["n_valid_subjects"]
-
-    n_times, n_ch = t_obs.shape
-    t_ax = time_grid if time_grid is not None else np.arange(n_times)
-
-    fig, ax, cax, ax2, ax_tgt_left, ax_tgt_right = _create_cbpa_dual_panel_figure(
-        show_target_sine=(cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization),
-    )
-
-    if cfg.include_suptitle:
-        fig.suptitle(
-            f"{cfg.hypothesis_label}\n"
-            f"Contrast: '{cfg.condition_A}' − '{cfg.condition_B}'  |  "
-            f"{cfg.modality} {cfg.freq_band}  |  "
-            f"n = {n_valid_subjects} subjects, {cfg.n_permutations} permutations",
-            fontsize=10,
-        )
-
-    # ── Panel A: heatmap + cluster contours ──────────────────────────────────
-    # Use a fixed ±3 baseline for cross-plot comparability;
-    # expand only if the observed t-values exceed it
-    vlim = max(3.0, np.nanpercentile(np.abs(t_obs), 97))
-    im = ax.imshow(
-        t_obs.T, aspect="auto", origin="lower", cmap="RdBu_r",
-        vmin=-vlim, vmax=vlim,
-        extent=[t_ax[0], t_ax[-1], -0.5, n_ch - 0.5],
-    )
-    plt.colorbar(im, cax=cax, label="t-statistic")
-
-    for idx, cluster in enumerate(clusters):
-        mask = _resolve_cluster_mask(cluster, n_times=n_times, n_ch=n_ch)
-        color = "black" if idx in good_inds else "silver"
-        lw    = 1.8    if idx in good_inds else 0.8
-        # contour needs at least one True and one False cell to draw anything
-        if mask.any() and not mask.all():
-            ax.contour(
-                np.linspace(t_ax[0], t_ax[-1], n_times),
-                np.arange(n_ch),
-                mask.T.astype(float),
-                levels=[0.5], colors=color, linewidths=lw,
-            )
-
-    x_label = "Force Cycle Phase (°)" if cfg.use_phase_normalization else "Time within trial (s)"
-    if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
-        ax.set_xlabel(x_label)
-    ax.set_ylabel("Channel index")
-    ax.set_yticks(range(n_ch))
-    ax.set_yticklabels(ch_names, fontsize=6)
-    ax.set_title("t-statistic map\n(black contour = significant cluster)")
-
-    # ── Panel B: significant cluster time courses ─────────────────────────────
-    if len(good_inds) == 0:
-        ax2.text(0.5, 0.5, "No significant clusters", ha="center", va="center",
-                 transform=ax2.transAxes, fontsize=12, color="grey")
-    else:
-        for idx in good_inds:
-            # Use shared resolver — fixes the previously unreshaped 1D mask here
-            mask = _resolve_cluster_mask(clusters[idx], n_times=n_times, n_ch=n_ch)
-
-            ch_in_cluster = mask.any(axis=0)   # (n_ch,) bool
-            t_in_cluster  = mask.any(axis=1)   # (n_times,) bool
-
-            if not ch_in_cluster.any():
-                continue
-
-            t_course = t_obs[:, ch_in_cluster].mean(axis=1)  # (n_times,)
-            ax2.plot(t_ax, t_course,
-                     label=f"Cluster #{idx + 1}  p={cluster_pv[idx]:.3f}")
-            ax2.fill_between(t_ax, 0, t_course, where=t_in_cluster, alpha=0.2)
-
-        ax2.axhline(0,         color="k",   linewidth=0.8, linestyle="--")
-        ax2.axhline( t_thresh, color="red", linewidth=0.8, linestyle=":",
-                     label=f"±t_thresh ({t_thresh:.2f})")
-        ax2.axhline(-t_thresh, color="red", linewidth=0.8, linestyle=":")
-        ax2.legend(fontsize=8)
-
-    if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
-        ax2.set_xlabel(x_label)
-    ax2.set_ylabel("Mean t-statistic over cluster channels")
-    ax2.set_title("Significant cluster time courses")
-
-    if (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
-        # Optionally load and average dynamometer force if requested
-        dyno_force = None
-        if cfg.include_dynamometer_force and cfg.use_phase_normalization:
-            # Load force data from all valid subjects (guessing they're in data root)
-            data_root = cfg.data_root / "data" / "experiment_results"
-            # Get subject IDs from results (assuming they were used in the CBPA run)
-            valid_subject_ids = list(range(0, 13))  # Fallback to known subjects
-            dyno_force = _load_avg_dynamometer_force_per_phase(
-                valid_subject_ids, data_root, t_ax, cfg, use_unscaled_force=use_unscaled_force,
-            )
-
-        _plot_target_sine_panel(ax_tgt_left, t_ax, cfg, x_label=x_label, show_ylabel=True,
-                                dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force)
-        _plot_target_sine_panel(ax_tgt_right, t_ax, cfg, x_label=x_label, show_ylabel=True,
-                                dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force,
-                                show_legend=False,  # legend only for left plot
-                                )
 
     if cfg.use_phase_normalization:
         phase_axes = [ax, ax2]
