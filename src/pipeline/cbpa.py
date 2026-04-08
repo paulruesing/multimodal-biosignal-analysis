@@ -40,6 +40,7 @@ CMC_EEG_CHANNEL_SUBSET: list[str] = [
     "FC5", "FC3", "FC1", "F3",
     "CP5", "CP3", "CP1", "P3",
 ]
+CMC_CHANNEL_FILE_SUFFIX: str = f"Channels_{'_'.join(CMC_EEG_CHANNEL_SUBSET)}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -303,10 +304,21 @@ def _load_subject_data(
     log_df.index = data_analysis.make_timezone_aware(log_df.index)
 
     qtc_start, qtc_end = data_integration.get_qtc_measurement_start_end(log_df, False)
+
+    # For CMC, include the channel subset suffix so the file lookup is
+    # unambiguous when both 11-channel and 64-channel files coexist.
+    if cfg.modality == "CMC":
+        file_id = [cfg.modality_file_id, CMC_CHANNEL_FILE_SUFFIX]
+        expected_ch = len(CMC_EEG_CHANNEL_SUBSET)
+    else:
+        file_id = cfg.modality_file_id
+        expected_ch = None
+
     spectrogram, times, freqs = fetch_stored_spectrograms(
         subject_feat_dir,
         modality=cfg.modality,
-        file_identifier=cfg.modality_file_id,
+        file_identifier=file_id,
+        expected_n_channels=expected_ch,
     )
     # spectrogram shape: (n_windows, n_freqs, n_channels)
 
