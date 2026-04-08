@@ -74,7 +74,7 @@ if __name__ == "__main__":
         resolution_segments  = [1, 5, 10],
 
         alpha_adjusted       = 0.05,
-        include_ols          = True,
+        include_ols          = False,
         target_power=0.80,
 
         # FDR Correction for multiple comparisons:
