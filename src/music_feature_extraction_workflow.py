@@ -51,7 +51,7 @@ if __name__ == '__main__':
     analyse_category_fit: bool = True  # plot, how many participants RE-assigned categories
     cluster_results: bool = False
     compute_mutual_information: bool = False  # analyse relation music features -> genres / categories
-    plot_scatters: bool = False  # plot feature distribution across categories
+    plot_scatters: bool = True  # plot feature distribution across categories
 
     # plot parameters:
     song_colors = {'Classic': 'orange', 'Groovy': 'red',
@@ -306,7 +306,7 @@ if __name__ == '__main__':
             )
             per_subject_reassignment_frame['Subject ID'] = subject_id
 
-            # append to complete reusults:
+            # append to complete results:
             category_reassigment_frame = pd.concat([category_reassigment_frame, per_subject_reassignment_frame], axis=0)
 
 
