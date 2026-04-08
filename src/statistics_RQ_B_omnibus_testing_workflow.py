@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 import functools
 import pandas as pd
@@ -36,8 +37,8 @@ _BASE_COVARIATES: list[str] = [
 
 def fetch_accuracy_level_definitions(
     multi_segments_per_trial: bool,
-    include_emg_psd: bool = True,
-        include_max_cmc: bool = False,
+        include_emg_psd: bool = True,
+        include_max_cmc: bool = True,
 ) -> list[dict]:
     """
     Build comparison-level definitions for RQ2: neural/motor features predicting accuracy.
@@ -116,15 +117,18 @@ if __name__ == '__main__':
     exclude_subjects: list[int] = []
 
     # Accuracy column name as written by statistics_data_preparation_workflow.py
-    ACCURACY_COL: str = 'RMS_Accuracy'
+    ACCURACY_COL_RAW: str = 'RMS_Accuracy'
+    log_transform_accuracy: bool = True  # log-transform RMSE to reduce outlier influence
 
     # Neural predictor configuration
     include_emg_psd: bool = False    # toggle False to exclude EMG PSD from Level 1
     include_max_cmc: bool = False  # toggle False to exclude max CMC predictors in all levels
 
+    ACCURACY_COL: str = f"log_{ACCURACY_COL_RAW}" if log_transform_accuracy else ACCURACY_COL_RAW
+
     # Single RQ; extend list here if further accuracy-related dependent vars are added
     statistical_hypotheses_var_tuples: list[tuple[str, str]] = [
-        ('RQ2: Neural features predict task accuracy', ACCURACY_COL),
+        ('Accuracy (RMSE)', ACCURACY_COL),
     ]
 
     # Levels to model (0 = CMC only, 1 = CMC + PSD)
@@ -139,11 +143,28 @@ if __name__ == '__main__':
     render_ols_effect_plots: bool = False
     show_ols_effect_plots: bool = False
 
-    render_lme_effect_plots: bool = True
+    render_lme_effect_plots: bool = False
     show_lme_effect_plots: bool = True
 
+    parameter_rename_dict: dict[str, str] = {
+        'CMC_Extensor_mean_beta': 'CMC extensor mean (beta)',
+        'CMC_Extensor_mean_gamma': 'CMC extensor mean (gamma)',
+        'CMC_Flexor_mean_beta': 'CMC flexor mean (beta)',
+        'CMC_Flexor_mean_gamma': 'CMC flexor mean (gamma)',
+        'Median Scaled Force [0-1]': 'Task-wise scaled force [0-1]',
+        'Median Unscaled Force [% MVC]': 'Force [% MVC]',
+        'PSD_eeg_FC_CP_T_theta': 'PSD FC/CP/T (theta)',
+        'PSD_eeg_F_C_beta': 'PSD F/C (beta)',
+        'PSD_eeg_Global_gamma': 'PSD Global (gamma)',
+        'PSD_eeg_P_PO_alpha': 'PSD P/O (alpha)',
+        'Task Frequency': 'Task frequency',
+        'Trial ID': 'Trial number',
+        'Segment ID': 'Intra-trial time'
+
+    }
+
     # Across-time-resolution parameter comparisons
-    plot_time_resolution_comparisons: bool = True
+    plot_time_resolution_comparisons: bool = False
     parameter_comp_lvl_tuples_to_plot_across_time: list[tuple[str, int]] = [
         # ('CMC_Flexor_max_beta',    0), # insignificant at primary scale...
         ('CMC_Flexor_mean_beta',   0),
@@ -157,13 +178,13 @@ if __name__ == '__main__':
     ]
 
     # Robustness / influence checks
-    conduct_robustness_checks: bool = True
+    conduct_robustness_checks: bool = False
     dep_var_comp_lvl_n_segments_tuples_to_robustness_check: list[tuple[str, int, int]] = [
         (ACCURACY_COL, 0, 5),  # 0 is important: PSD features are insignificant almost always
     ]
 
     # Power analysis — populate after inspecting initial effect sizes
-    conduct_power_analysis: bool = True
+    conduct_power_analysis: bool = False
     power_configs: list[statistics.PowerConfig] = [
         statistics.PowerConfig(
             dependent_var=ACCURACY_COL,
@@ -172,7 +193,9 @@ if __name__ == '__main__':
             target_parameters=[
                 "Q('Task Frequency')",
                 "CMC_Flexor_mean_beta",
+                "CMC_Flexor_mean_gamma",
                 "CMC_Extensor_mean_beta",
+                "CMC_Extensor_mean_gamma",
                 "Q('Median Scaled Force [0-1]')",
                 "Q('Median Unscaled Force [0-1]')",
                 "Q('Trial ID')",
@@ -231,12 +254,24 @@ if __name__ == '__main__':
 
 
         # Skip frame silently if accuracy column absent (pre-dates RQ2 addition)
-        if ACCURACY_COL not in all_subject_data_frame.columns:
+        if ACCURACY_COL_RAW not in all_subject_data_frame.columns:
             print(
-                f"[WARNING] '{ACCURACY_COL}' not found — "
+                f"[WARNING] '{ACCURACY_COL_RAW}' not found — "
                 f"re-run statistics_data_preparation.py to add accuracy. Skipping.\n"
             )
             continue
+
+        # Optional log-transform: compresses right tail of RMSE, stabilises
+        # variance, and makes LME coefficients interpretable as proportional
+        # changes.  The raw column is preserved; a new log_ column is added.
+        if log_transform_accuracy and ACCURACY_COL not in all_subject_data_frame.columns:
+            raw = all_subject_data_frame[ACCURACY_COL_RAW]
+            n_zero = (raw <= 0).sum()
+            if n_zero:
+                print(f"  [log-transform] {n_zero} rows with {ACCURACY_COL_RAW} <= 0 — "
+                      f"these will become NaN after log transform.")
+            all_subject_data_frame[ACCURACY_COL] = np.log(raw.where(raw > 0))
+            print(f"  [log-transform] Created '{ACCURACY_COL}' from '{ACCURACY_COL_RAW}'.")
 
 
         ########################################################
@@ -320,6 +355,7 @@ if __name__ == '__main__':
                     ),
                     model_type='OLS',
                     hidden=not show_ols_effect_plots,
+                    rename_dict=parameter_rename_dict,
                 )
 
             if render_lme_effect_plots:
@@ -331,6 +367,7 @@ if __name__ == '__main__':
                     ),
                     model_type='LME',
                     hidden=not show_lme_effect_plots,
+                    rename_dict=parameter_rename_dict,
                 )
 
 
@@ -400,6 +437,17 @@ if __name__ == '__main__':
             )
 
 
+    # Build optional transform so downstream steps that reload the CSV from
+    # disk (influence analysis, power analysis) apply the same log-transform.
+    _df_transform: Callable[[pd.DataFrame], pd.DataFrame] | None = None
+    if log_transform_accuracy:
+        def _df_transform(df: pd.DataFrame) -> pd.DataFrame:
+            if ACCURACY_COL not in df.columns and ACCURACY_COL_RAW in df.columns:
+                raw = df[ACCURACY_COL_RAW]
+                df[ACCURACY_COL] = np.log(raw.where(raw > 0))
+            return df
+
+
     #########################################################
     ################ INFLUENCE MEASURE COMP #################
     #########################################################
@@ -433,6 +481,7 @@ if __name__ == '__main__':
             fetch_level_definitions=_level_def_fn,
             run_model_levels=statistics.run_model_levels,
             file_title=filemgmt.file_title,
+            df_transform=_df_transform,
         )
         # INTERPRETATION
         #   -> Cook's D: squared shift in all fitted values -> directionless
@@ -459,4 +508,5 @@ if __name__ == '__main__':
             statistics_output_data=STATISTICS_OUTPUT_DATA,
             fetch_level_definitions=_level_def_fn,
             file_title=filemgmt.file_title,
+            df_transform=_df_transform,
         )
