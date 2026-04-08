@@ -421,8 +421,17 @@ def plot_clustering(
     clustering_measures: list[str],
     dep_vars: list[str],
     output_dir: Path,
+    rename_dict: dict[str, str] | None = None,
+    show_measure_legend: bool = False,
 ) -> None:
-    """Render and save the Ward dendrogram + heatmap figure."""
+    """Render and save the Ward dendrogram + heatmap figure.
+
+    ``rename_dict`` is applied only to the heatmap's x-axis tick labels: the
+    final ``│``-separated segment of each column (i.e. the parameter or
+    condition name) is looked up in the mapping and replaced if present.
+    Column ordering, color coding, clustering, and all other references to
+    ``combined_pivot.columns`` are left untouched.
+    """
     row_order = leaves_list(linkage_matrix)[::-1]
     ordered_data = combined_pivot.iloc[row_order]
 
@@ -453,33 +462,48 @@ def plot_clustering(
         handles=[Patch(color=_CLUSTER_PALETTE[k], label=f"Cluster {k + 1}") for k in range(best_k)],
         loc="lower left", framealpha=0.7, title="Clusters",
     )
-    axes[0].set_title("Ward Dendrogram")
+    axes[0].set_title("Ward dendrogram")
     axes[0].set_xlabel("Distance")
 
     # ── Heatmap ───────────────────────────────────────────────────────────────
     vlim = np.nanpercentile(np.abs(ordered_data.values), 97)
     im = axes[1].imshow(ordered_data.values, aspect="auto", cmap="RdBu_r", vmin=-vlim, vmax=vlim)
     axes[1].set_xticks(range(n_cols))
-    axes[1].set_xticklabels(combined_pivot.columns.tolist(), rotation=45, ha="right")
+
+    # Rename tokens on the heatmap's x-axis tick labels only. Each "│"-separated
+    # segment (measure prefix, DV, parameter, condition, ...) is looked up
+    # independently in rename_dict, so a single entry like
+    # {"Flexor_mean_beta": "Flexor Avg. β-band CMC"} applies uniformly across
+    # DFBETA / CooksD / Contrast columns regardless of the segment's position.
+    # Column keys themselves are unchanged so col_colors, legend, and ordering
+    # stay consistent with the underlying data.
+    def _display_column(col: str) -> str:
+        if rename_dict is None:
+            return col
+        return "│".join(rename_dict.get(seg, seg) for seg in col.split("│"))
+
+    x_tick_labels = [_display_column(c) for c in combined_pivot.columns.tolist()]
+    axes[1].set_xticklabels(x_tick_labels, rotation=45, ha="right")
     for tick, col in zip(axes[1].get_xticklabels(), col_colors):
         tick.set_color(col)
     axes[1].set_yticks(range(len(ordered_data)))
     axes[1].set_yticklabels([""] * len(ordered_data))  # labels come from dendrogram
     axes[1].set_title("Combined heterogeneity features")
     plt.colorbar(im, ax=axes[1], label="Standardised value", shrink=0.7)
-    _MEASURE_LABEL_MAP = {
-        "dfbeta": ("DFBETA", "DFBeta"),
-        "cooks_d": ("CooksD", "Cook's D"),
-        "contrast": ("Contrast", "Contrast"),
-    }
-    axes[1].legend(
-        handles=[
-            Patch(color=_METRIC_COLORS[_MEASURE_LABEL_MAP[m][0]], label=_MEASURE_LABEL_MAP[m][1])
-            for m in clustering_measures
-            if m in _MEASURE_LABEL_MAP
-        ],
-        loc="upper right", framealpha=0.7,
-    )
+    if show_measure_legend:
+        _MEASURE_LABEL_MAP = {
+            "dfbeta": ("DFBETA", "DFBeta"),
+            "cooks_d": ("CooksD", "Cook's D"),
+            "contrast": ("Contrast", "Contrast"),
+        }
+        axes[1].legend(
+            handles=[
+                Patch(color=_METRIC_COLORS[_MEASURE_LABEL_MAP[m][0]], label=_MEASURE_LABEL_MAP[m][1])
+                for m in clustering_measures
+                if m in _MEASURE_LABEL_MAP
+            ],
+            loc="upper right", framealpha=0.7,
+        )
 
     fig.suptitle(
         f"Subject Heterogeneity Clustering │ {' + '.join(clustering_measures)}\n"
@@ -501,6 +525,7 @@ def run_clustering(
     min_cluster_size: int,
     output_dir: Path,
     subj_col: str = "Subject_ID",
+    rename_dict: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, dict[int, float]]:
     """Fit Ward-linkage agglomerative clustering and save all outputs.
 
@@ -563,7 +588,10 @@ def run_clustering(
     print(f"  [Clustering] Selected k = {best_k}")
     cluster_labels = AgglomerativeClustering(n_clusters=best_k, linkage="ward").fit_predict(X)
 
-    plot_clustering(combined_pivot, cluster_labels, Z, best_k, clustering_measures, dep_vars, output_dir)
+    plot_clustering(
+        combined_pivot, cluster_labels, Z, best_k, clustering_measures, dep_vars, output_dir,
+        rename_dict=rename_dict,
+    )
 
     cluster_df = (
         pd.DataFrame({subj_col: combined_pivot.index, "Cluster": cluster_labels})
@@ -661,6 +689,7 @@ def run_heterogeneity_modelling(
     subj_col: str = "Subject_ID",
     dep_var_col: str = "Dependent_Variable",
     exclude_subjects: list[int] = [],
+    rename_dict: dict[str, str] | None = None,
 ) -> None:
     """Run the full subject-heterogeneity modelling pipeline end-to-end.
 
@@ -835,6 +864,7 @@ def run_heterogeneity_modelling(
     cluster_df, _ = run_clustering(
         combined_pivot, personal_df, clustering_measures, dep_vars,
         min_cluster_size, output_dir, subj_col,
+        rename_dict=rename_dict,
     )
 
     # ── Block 5 ───────────────────────────────────────────────────────────────
