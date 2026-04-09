@@ -204,7 +204,7 @@ if __name__ == '__main__':
     }
 
     # comparison levels:
-    lvl_inds_to_include: list[int] = [0, 1]  # defines below  # todo: good to remove 2, 3 for forest plots
+    lvl_inds_to_include: list[int] = [0, 1, 2, 3]  # defines below  # todo: good to remove 2, 3 for forest plots
     lvls_to_include: list[str] = [f"lvl_{lvl_ind}" for lvl_ind in lvl_inds_to_include]
 
     # across time resolution comparison:
