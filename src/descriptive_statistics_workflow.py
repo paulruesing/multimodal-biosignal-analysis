@@ -275,9 +275,9 @@ def _draw_stacked_bar(
     left  = 0.0
     for label, count in counts.items():
         ax.barh(
-            0.05, count, left=left,
+            0.04, count, left=left,
             color=colors.get(label, "#CCCCCC"),
-            edgecolor="white", linewidth=2, height=0.5,
+            edgecolor="white", linewidth=2, height=0.4,
         )
         ax.text(
             left + count / 2, 0,
@@ -533,8 +533,8 @@ def plot_combined_descriptive_mosaic(
                         draw_legend=False)
 
     # ── SECTION LABELS ───────────────────────────────────────────────────────
-    for y_fig, label in [(0.96, "Participant Characteristics (per subject)"),
-                         (0.495, "Study Results (per trial)")]:
+    for y_fig, label in [(0.94, "(A)"),
+                         (0.495, "(B)")]:
         fig.text(0.01, y_fig, label, color="black",
                  va="bottom", ha="left", fontweight="bold", fontsize=13)
 
