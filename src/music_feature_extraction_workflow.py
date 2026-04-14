@@ -427,4 +427,5 @@ if __name__ == '__main__':
             _ = visualizations.plot_scatter(x=feature_array[:, x_ind], y=feature_array[:, y_ind],
                                             x_label=x_label, y_label=y_label,
                                             category_list=target_array, category_label=target_label,
+                                            plot_size=(6, 6),
                                             cmap=list(song_colors.values()), save_dir=PLOT_DIR)
