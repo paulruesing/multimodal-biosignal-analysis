@@ -46,10 +46,10 @@ if __name__ == "__main__":
     exclude_subjects: list[int] = []
 
     # workflow control:
-    analyse_cbp: bool = False   # settings (configs follow below)
+    analyse_cbp: bool = True   # settings (configs follow below)
     analyse_cmc_accuracy_phase_plot: bool = False
     analyse_emg_psd_phase_plot: bool = False
-    analyse_subject_heterogeneity: bool = True
+    analyse_subject_heterogeneity: bool = False
 
 
     ### CMC Accuracy Plot Settings:
