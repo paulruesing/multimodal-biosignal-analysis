@@ -2200,7 +2200,7 @@ if __name__ == '__main__':
     import matplotlib as mpl
 
     mpl.use('MacOSX')
-
+    """
     # global vars:
     ROOT = Path().resolve().parent.parent
     QTC_DATA = ROOT / "data" / "qtc_measurements" / "2025_06"
@@ -2240,14 +2240,14 @@ if __name__ == '__main__':
 
 
     # todo: ponder visualization of subset of EEG channels (e.g. np.zeros for the others)
-
+    """
     # animation:
-    print(psd_sampling_freq)
-    visualizations.animate_electrode_heatmap(
-        freq_averaged_psd_dict['beta'].T,  # requires shape (n_timesteps, n_channels)
-        positions=visualizations.EMG_POSITIONS, add_head_shape=False,
-        sampling_rate=psd_sampling_freq, animation_fps=psd_sampling_freq,
-        value_label="Power [V^2/Hz]" if not do_log_transform else "Power [V^2/Hz] [log10]",
+    #print(psd_sampling_freq)
+    visualizations.initialise_electrode_heatmap(
+        np.array([[i]*64 for i in range(1000)]).T,#freq_averaged_psd_dict['beta'].T,  # requires shape (n_timesteps, n_channels)
+        positions=visualizations.EEG_POSITIONS, add_head_shape=True,
+        #sampling_rate=10, animation_fps=10,
+        value_label="Power [V^2/Hz]",# if not do_log_transform else "Power [V^2/Hz] [log10]",
         plot_title="EEG PSD (Beta-Band)"
     )
 
