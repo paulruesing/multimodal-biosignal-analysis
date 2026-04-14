@@ -1087,8 +1087,8 @@ def plot_scatter(x, y, x_label: str | None = None, y_label: str | None = None,
 
             # Add legends only if labels were assigned
             if add_kde_legend:
-                ax_top.legend(loc='upper right', fontsize=8)
-                ax_right.legend(loc='upper right', fontsize=8)
+                ax_top.legend(loc='upper right')#, fontsize=8)
+                ax_right.legend(loc='upper right')#, fontsize=8)
         else:
             # Plot overall KDE (no categories or categorical_kdes=False)
             x_range = np.linspace(np.asarray(x).min(), np.asarray(x).max(), 200)
@@ -3060,7 +3060,7 @@ def _create_cbpa_dual_panel_figure(
     figure_size_without_target: tuple[float, float] = (12, 6),
     grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
     grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
-    grid_wspace: float = 0.12,
+    grid_wspace: float = 0.2,
     grid_hspace_with_target: float = 0.28,
 ) -> tuple[Figure, Axes, Axes, Axes, Axes | None, Axes | None]:
     """Create shared two-panel layout with optional target-sine row."""
@@ -3150,7 +3150,7 @@ def plot_cmc_accuracy_phase_average(
         figure_size_without_target: tuple[float, float] = (12, 6),
         grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
         grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
-        grid_wspace: float = 0.12,
+        grid_wspace: float = 0.2,
         grid_hspace_with_target: float = 0.28,
         phase_xticks: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0, 360.0),
         phase_marker_lines: tuple[float, ...] = (90.0, 270.0),
@@ -3165,6 +3165,7 @@ def plot_cmc_accuracy_phase_average(
         accuracy_cycles_to_plot: int = 4,
         accuracy_cycle_colors: tuple[str, ...] = ("tab:orange", "tab:red", "purple", "black"),
         min_accuracy_cycle_count: int = 20,
+        show_force_sd: bool = True,
 ) -> None:
     """Create a CBPA-like plot with mean CMC map and phase-normalized accuracy."""
     import src.pipeline.cbpa as cbpa
@@ -3426,7 +3427,7 @@ def plot_cmc_accuracy_phase_average(
 
         ax2.set_title(
             f"Averaged phase-normalized accuracy "
-            f"(cycle-wise pooled, {cfg.freq_band.lower()}-band)"
+            f"(cycle-wise pooled)"
         )
     else:
         # Legacy behaviour: single mean ± SD line over subjects
@@ -3447,7 +3448,7 @@ def plot_cmc_accuracy_phase_average(
         )
         ax2.legend()
         ax2.set_title(
-            f"Averaged phase-normalized accuracy ({cfg.freq_band.lower()}-band)"
+            f"Averaged phase-normalized accuracy"
         )
 
     if not (cfg.show_target_sine if cfg.show_target_sine is not None else cfg.use_phase_normalization):
@@ -3464,14 +3465,17 @@ def plot_cmc_accuracy_phase_average(
                 phase_grid,
                 cfg,
                 use_unscaled_force=use_unscaled_force,
+                return_std=show_force_sd,
             )
+        # if show_force_sd, above returns a tuple. This is handled below:
         _plot_target_sine_panel(
             ax_tgt_left,
             phase_grid,
             cfg,
             x_label="Force Cycle Phase (°)",
             show_ylabel=True,
-            dynamometer_force_y=dyno_force,
+            dynamometer_force_y=dyno_force[0] if show_force_sd else dyno_force,
+            dynamometer_force_std_y=dyno_force[1] if show_force_sd else None,
             is_unscaled_force=use_unscaled_force,
         )
         _plot_target_sine_panel(
@@ -3480,7 +3484,8 @@ def plot_cmc_accuracy_phase_average(
             cfg,
             x_label="Force Cycle Phase (°)",
             show_ylabel=True,
-            dynamometer_force_y=dyno_force,
+            dynamometer_force_y=dyno_force[0] if show_force_sd else dyno_force,
+            dynamometer_force_std_y=dyno_force[1] if show_force_sd else None,
             is_unscaled_force=use_unscaled_force,
             show_legend=False,
         )
@@ -3521,7 +3526,7 @@ def plot_emg_psd_phase_average_plot(
         figure_size_without_target: tuple[float, float] = (12, 6),
         grid_width_ratios: tuple[float, float, float, float] = (1.0, 0.05, 0.14, 1.0),
         grid_height_ratios_with_target: tuple[float, float] = (5.0, 1.0),
-        grid_wspace: float = 0.12,
+        grid_wspace: float = 0.2,
         grid_hspace_with_target: float = 0.28,
         phase_xticks: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0, 360.0),
         phase_marker_lines: tuple[float, ...] = (90.0, 270.0),
@@ -3529,6 +3534,7 @@ def plot_emg_psd_phase_average_plot(
         subplot_margins: tuple[float, float, float, float] = (0.06, 0.985, 0.90, 0.10),
         save_dpi: int = 150,
         use_unscaled_force: bool = True,
+        show_force_sd: bool = True,
 ) -> None:
     """Create a phase-normalized average EMG-PSD plot (left=flexor, right=extensor)."""
     import src.pipeline.cbpa as cbpa
@@ -3682,11 +3688,18 @@ def plot_emg_psd_phase_average_plot(
             experiment_results_dir = cfg.data_root / "data" / "experiment_results"
             dyno_force = _load_avg_dynamometer_force_per_phase(
                 common_subjects, experiment_results_dir, phase_grid, cfg, use_unscaled_force=use_unscaled_force,
+                return_std=show_force_sd,
             )
         _plot_target_sine_panel(ax_tgt_left, phase_grid, cfg, x_label="Force Cycle Phase (°)",
-                                show_ylabel=True, dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force)
+                                show_ylabel=True,
+                                dynamometer_force_y=dyno_force[0] if show_force_sd else dyno_force,
+                                dynamometer_force_std_y=dyno_force[1] if show_force_sd else None,
+                                is_unscaled_force=use_unscaled_force)
         _plot_target_sine_panel(ax_tgt_right, phase_grid, cfg, x_label="Force Cycle Phase (°)",
-                                show_ylabel=True, dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force,
+                                show_ylabel=True,
+                                dynamometer_force_y=dyno_force[0] if show_force_sd else dyno_force,
+                                dynamometer_force_std_y=dyno_force[1] if show_force_sd else None,
+                                is_unscaled_force=use_unscaled_force,
                                 show_legend=False,  # legend only for left plot
                                 )
 
@@ -3902,7 +3915,7 @@ def _plot_target_sine_panel(
         is_unscaled_force: bool = True,
         show_legend: bool = True,
         dynamometer_force_std_y: np.ndarray | None = None,
-        dynamometer_force_std_factor: float = 0.5,
+        dynamometer_force_std_factor: float = 1,
 ) -> None:
     """Draw one target-sine reference panel under a main plot.
 
@@ -3936,7 +3949,7 @@ def _plot_target_sine_panel(
 
     ax.plot(x_plot, y_target_plot, color="dimgray", linewidth=1.2, label="Target" if is_unscaled_force else None)
 
-    pad = 0.1 * max(1e-6, cfg.target_sine_max_pct_mvc - cfg.target_sine_min_pct_mvc)
+    pad = 0.2 * max(1e-6, cfg.target_sine_max_pct_mvc - cfg.target_sine_min_pct_mvc)
     ax.set_ylim(cfg.target_sine_min_pct_mvc - pad, cfg.target_sine_max_pct_mvc + pad)
     ax.set_ylabel("Force [% MVC]" if show_ylabel else "")
     ax.set_xlabel(x_label)
@@ -3980,7 +3993,7 @@ def _plot_target_sine_panel(
                 color="forestgreen",
                 alpha=0.15,
                 linewidth=0.0,
-                label=f"Measurement ±{dynamometer_force_std_factor:g}x SD" if is_unscaled_force else None,
+                label=f"Measured ±{dynamometer_force_std_factor:g}xSD" if is_unscaled_force else None,
             )
 
         # Right axis in native force units.
@@ -4011,10 +4024,10 @@ def _plot_target_sine_panel(
                 ax_force.set_xlim(0, 360)
         else:
             if show_legend:
-                ax.legend(loc='center right', bbox_to_anchor=(1.275, 0.5))
+                ax.legend(loc='center right', bbox_to_anchor=(1.41, 0.5))
 
 
-def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool = True) -> None:
+def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool = True, show_force_sd: bool = True) -> None:
     """Render heatmap and cluster-summary figures for one CBPA result.
 
     Parameters
@@ -4149,15 +4162,20 @@ def plot_cbpa_results(results: dict, cfg: CBPAConfig, use_unscaled_force: bool =
             dyno_force = _load_avg_dynamometer_force_per_phase(
                 valid_subject_ids, data_root, t_ax, cfg,
                 use_unscaled_force=use_unscaled_force,
+                return_std=show_force_sd,
             )
 
         _plot_target_sine_panel(
             ax_tgt_left, t_ax, cfg, x_label=x_label, show_ylabel=True,
-            dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force,
+            dynamometer_force_y=dyno_force[0] if show_force_sd else dyno_force,
+            dynamometer_force_std_y=dyno_force[1] if show_force_sd else None,
+            is_unscaled_force=use_unscaled_force,
         )
         _plot_target_sine_panel(
             ax_tgt_right, t_ax, cfg, x_label=x_label, show_ylabel=True,
-            dynamometer_force_y=dyno_force, is_unscaled_force=use_unscaled_force,
+            dynamometer_force_y=dyno_force[0] if show_force_sd else dyno_force,
+            dynamometer_force_std_y=dyno_force[1] if show_force_sd else None,
+            is_unscaled_force=use_unscaled_force,
             show_legend=False,  # legend only for left plot
         )
 
