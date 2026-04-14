@@ -128,11 +128,11 @@ if __name__ == '__main__':
 
     # Single RQ; extend list here if further accuracy-related dependent vars are added
     statistical_hypotheses_var_tuples: list[tuple[str, str]] = [
-        ('Accuracy (RMSE)', ACCURACY_COL),
+        ('Task RMSE', ACCURACY_COL),
     ]
 
     # Levels to model (0 = CMC only, 1 = CMC + PSD)
-    lvl_inds_to_include: list[int] = [0, 1]
+    lvl_inds_to_include: list[int] = [0]
     lvls_to_include: list[str] = [f"lvl_{i}" for i in lvl_inds_to_include]
 
     ## Analysis flags
@@ -143,7 +143,7 @@ if __name__ == '__main__':
     render_ols_effect_plots: bool = False
     show_ols_effect_plots: bool = False
 
-    render_lme_effect_plots: bool = False
+    render_lme_effect_plots: bool = True
     show_lme_effect_plots: bool = True
 
     parameter_rename_dict: dict[str, str] = {
