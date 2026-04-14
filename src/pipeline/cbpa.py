@@ -16,7 +16,7 @@ from mne.stats import (
 )
 from scipy.stats import t as t_dist
 
-from src.pipeline.signal_features import fetch_stored_spectrograms, aggregate_psd_spectrogram
+from src.pipeline.signal_features import fetch_stored_spectrograms, aggregate_psd_spectrogram, mirror_eeg_channel_list
 import src.pipeline.data_integration as data_integration
 import src.pipeline.data_analysis as data_analysis
 from src.pipeline.channel_layout import EEG_CHANNEL_IND_DICT
@@ -300,6 +300,9 @@ def _load_subject_data(
     subject_feat_dir = FEATURE_DATA / f"subject_{subject_ind:02}"
     subject_exp_dir = EXPERIMENT_DATA / f"subject_{subject_ind:02}"
 
+    # important for selecting the right CMC subset:
+    handedness = data_integration.fetch_personal_data(subject_exp_dir, False)['Dominant hand']
+    # other subject-specific data:
     log_df = data_integration.fetch_enriched_log_frame(subject_exp_dir, verbose=False)
     log_df.index = data_analysis.make_timezone_aware(log_df.index)
 
@@ -308,7 +311,10 @@ def _load_subject_data(
     # For CMC, include the channel subset suffix so the file lookup is
     # unambiguous when both 11-channel and 64-channel files coexist.
     if cfg.modality == "CMC":
-        file_id = [cfg.modality_file_id, CMC_CHANNEL_FILE_SUFFIX]
+        # mirror cmc channel subset (default is left side of brain, i.e. odd indices
+        cmc_ch_subset = mirror_eeg_channel_list(CMC_EEG_CHANNEL_SUBSET, input_is_left=True) if handedness == 'Left' else CMC_EEG_CHANNEL_SUBSET
+        ch_identifier = f"Channels_{'_'.join(cmc_ch_subset)}"  # will also be searched for
+        file_id = [cfg.modality_file_id, ch_identifier]
         expected_ch = len(CMC_EEG_CHANNEL_SUBSET)
     else:
         file_id = cfg.modality_file_id
