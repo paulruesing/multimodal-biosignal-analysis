@@ -149,7 +149,7 @@ if __name__ == '__main__':
         # EEG-PSD Hypotheses:
         ('H2: Temporal Prediction PSD', 'PSD_eeg_FC_CP_T_theta'),
         ('H3: Vigilance PSD', 'PSD_eeg_F_C_beta'),
-        ('H4: Internal Attention', 'PSD_eeg_P_PO_alpha'),
+        ('H4: Internal Attention PSD', 'PSD_eeg_P_PO_alpha'),
         ('H5: Long Range Interactions PSD', 'PSD_eeg_Global_gamma'),
 
         # Validation Hypotheses (EMG PSD):
@@ -204,7 +204,7 @@ if __name__ == '__main__':
     }
 
     # comparison levels:
-    lvl_inds_to_include: list[int] = [0, 1, 2, 3]  # defines below  # todo: good to remove 2, 3 for forest plots
+    lvl_inds_to_include: list[int] = [0,1]  # defines below  # todo: good to remove 2, 3 for forest plots
     lvls_to_include: list[str] = [f"lvl_{lvl_ind}" for lvl_ind in lvl_inds_to_include]
 
     # across time resolution comparison:
@@ -226,7 +226,7 @@ if __name__ == '__main__':
 
 
     # LME robustness checks / influence measures:
-    conduct_robustness_checks: bool = True
+    conduct_robustness_checks: bool = False
     robustness_dep_vars: list[str] = [
         # CMC DVs: all 8 have significant effects at primary resolution
         'CMC_Extensor_mean_beta',
