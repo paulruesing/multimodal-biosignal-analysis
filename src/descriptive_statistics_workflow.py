@@ -533,8 +533,8 @@ def plot_combined_descriptive_mosaic(
                         draw_legend=False)
 
     # ── SECTION LABELS ───────────────────────────────────────────────────────
-    for y_fig, label in [(0.94, "(A)"),
-                         (0.495, "(B)")]:
+    for y_fig, label in [(0.94, ""),
+                         (0.495, "")]:
         fig.text(0.01, y_fig, label, color="black",
                  va="bottom", ha="left", fontweight="bold", fontsize=13)
 
